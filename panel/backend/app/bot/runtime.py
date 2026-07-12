@@ -12,6 +12,7 @@ import httpx
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.bot.admin import ADMIN_COMMANDS, handle_admin
 from app.core.config import get_settings
 from app.core.database import SessionLocal
 from app.models import (
@@ -21,10 +22,8 @@ from app.models import (
     Order,
     Package,
     PaymentTxid,
-    Subscription,
     SupportTicket,
     User,
-    WorkerNode,
 )
 from app.services import billing as billing_svc
 from app.services import jobs as jobs_svc
@@ -52,15 +51,7 @@ CODE_HANDLED_COMMANDS = frozenset(
         "/stats",
         "/jobs",
         "/stop",
-        "/servers",
-        "/pending",
-        "/approve",
-        "/users",
-        "/grant",
-        "/revoke",
-        "/extend",
-        "/disable",
-        "/enable",
+        *ADMIN_COMMANDS,
     }
 )
 COMMAND_ALIASES = {
@@ -68,6 +59,7 @@ COMMAND_ALIASES = {
     "/plans": "/packages",
     "/me": "/subscription",
     "/renew": "/subscription",
+    "/servers": "/workers",
 }
 
 
@@ -148,8 +140,8 @@ class TelegramBotRuntime:
             self.offset = updates[-1]["update_id"] + 1
         return updates
 
-    async def _send(self, token: str, chat_id: int, text: str) -> None:
-        await send_text(token, chat_id, text)
+    async def _send(self, token: str, chat_id: int, text: str, *, reply_markup: dict | None = None) -> None:
+        await send_text(token, chat_id, text, reply_markup=reply_markup)
 
     async def _handle_update(self, db: AsyncSession, token: str, update: dict) -> None:
         msg = update.get("message") or update.get("edited_message")
@@ -157,7 +149,9 @@ class TelegramBotRuntime:
             return
         frm = msg.get("from") or {}
         uid = frm.get("id")
-        chat_id = (msg.get("chat") or {}).get("id")
+        chat = msg.get("chat") or {}
+        chat_id = chat.get("id")
+        chat_type = str(chat.get("type") or "private")
         if uid is None or chat_id is None:
             return
 
@@ -265,12 +259,22 @@ class TelegramBotRuntime:
             await self._stop_job(db, token, chat_id, user)
             return
 
-        # admin telegram commands
-        if cmd in ("/servers", "/pending", "/approve", "/users", "/grant", "/revoke", "/extend", "/disable", "/enable"):
+        # Admin Telegram commands — role=admin + Bot Builder flag (even if command listed for others).
+        resolved = COMMAND_ALIASES.get(cmd, cmd)
+        if resolved in ADMIN_COMMANDS or cmd in ADMIN_COMMANDS:
             if user.role != "admin" or not settings.admin_commands_enabled:
                 await self._send(token, chat_id, "⛔ Admins only (enable admin commands in Bot Builder).")
                 return
-            await self._admin_cmd(db, token, chat_id, cmd, args)
+            await handle_admin(
+                db=db,
+                token=token,
+                chat_id=chat_id,
+                chat_type=chat_type,
+                admin=user,
+                cmd=resolved if resolved in ADMIN_COMMANDS else cmd,
+                args=args,
+                send=self._send,
+            )
             return
 
         if meta and meta.response_text:
@@ -615,178 +619,6 @@ class TelegramBotRuntime:
             if settings and settings.deliver_results_telegram:
                 await send_document(token, chat_id, zip_path, caption=zip_path.name)
 
-    async def _admin_cmd(self, db, token, chat_id, cmd, args) -> None:
-        if cmd == "/servers":
-            workers = (await db.execute(select(WorkerNode))).scalars().all()
-            if not workers:
-                await self._send(token, chat_id, "No workers.")
-                return
-            lines = []
-            for w in workers:
-                lines.append(
-                    f"• {w.name}: {'on' if w.last_seen_at else 'off'} "
-                    f"cpu {w.cpu_percent:.0f}% mem {w.mem_percent:.0f}% "
-                    f"{'drain' if w.is_draining else ''}{' disabled' if not w.is_enabled else ''}"
-                )
-            await self._send(token, chat_id, "Workers:\n" + "\n".join(lines))
-        elif cmd == "/pending":
-            orders = (
-                await db.execute(select(Order).where(Order.status == "pending").order_by(Order.id.desc()))
-            ).scalars().all()
-            if not orders:
-                await self._send(token, chat_id, "No pending orders.")
-                return
-            lines = []
-            for o in orders:
-                u = await db.get(User, o.user_id)
-                p = await db.get(Package, o.package_id)
-                lines.append(f"• order {o.id}: {u.username if u else o.user_id} → {p.slug if p else o.package_id}")
-            lines.append("Approve in panel or: /approve <order_id>")
-            await self._send(token, chat_id, "\n".join(lines))
-        elif cmd == "/approve":
-            if not args or not args[0].isdigit():
-                await self._send(token, chat_id, "Usage: /approve <order_id>")
-                return
-            order = await db.get(Order, int(args[0]))
-            if not order or order.status != "pending":
-                await self._send(token, chat_id, "Pending order not found.")
-                return
-            user = await db.get(User, order.user_id)
-            pkg = await db.get(Package, order.package_id)
-            if not user or not pkg:
-                await self._send(token, chat_id, "User/package missing.")
-                return
-            order.status = "approved"
-            await db.commit()
-            sub = await billing_svc.activate_subscription(db, user, pkg)
-            await self._send(token, chat_id, f"✅ Approved order {order.id} → {user.username} until {sub.expires_at.date()}")
-            if user.telegram_id:
-                await self._send(token, int(user.telegram_id), f"✅ Subscription {pkg.name} active until {sub.expires_at.date()}.")
-        elif cmd == "/users":
-            users = (await db.execute(select(User).order_by(User.id))).scalars().all()
-            lines = []
-            for u in users:
-                sub = await billing_svc.active_subscription(db, u)
-                flag = "ON" if u.is_active else "OFF"
-                plan = sub.package_name if sub else "-"
-                lines.append(f"• {u.id} {u.username} [{flag}] tg={u.telegram_id or '-'} plan={plan}")
-            await self._send(token, chat_id, "Users:\n" + "\n".join(lines[:80]))
-        elif cmd == "/grant":
-            # /grant <telegram_id|username> <package_slug> [days]
-            if len(args) < 2:
-                await self._send(token, chat_id, "Usage: /grant <telegram_id|username> <package_slug> [days]")
-                return
-            target = await self._find_user(db, args[0])
-            if not target:
-                await self._send(token, chat_id, "User not found.")
-                return
-            pkg = (
-                await db.execute(select(Package).where(Package.slug == args[1]))
-            ).scalar_one_or_none()
-            if not pkg:
-                await self._send(token, chat_id, "Package not found.")
-                return
-            days = int(args[2]) if len(args) > 2 and args[2].isdigit() else None
-            sub = await billing_svc.activate_subscription(db, target, pkg, duration_days=days)
-            await self._send(
-                token,
-                chat_id,
-                f"✅ Granted {pkg.name} → {target.username} until {sub.expires_at.date()}",
-            )
-            if target.telegram_id:
-                await self._send(
-                    token,
-                    int(target.telegram_id),
-                    f"✅ Subscription {pkg.name} active until {sub.expires_at.date()}.",
-                )
-        elif cmd == "/revoke":
-            # /revoke <telegram_id|username>
-            if not args:
-                await self._send(token, chat_id, "Usage: /revoke <telegram_id|username>")
-                return
-            target = await self._find_user(db, args[0])
-            if not target:
-                await self._send(token, chat_id, "User not found.")
-                return
-            sub = await billing_svc.active_subscription(db, target)
-            if not sub:
-                await self._send(token, chat_id, "No active subscription.")
-                return
-            await billing_svc.revoke_subscription(db, sub)
-            await self._send(token, chat_id, f"Revoked subscription for {target.username}.")
-            if target.telegram_id:
-                await self._send(token, int(target.telegram_id), "⚠️ Your subscription was revoked.")
-        elif cmd == "/extend":
-            # /extend <telegram_id|username> <days>
-            if len(args) < 2 or not args[1].isdigit():
-                await self._send(token, chat_id, "Usage: /extend <telegram_id|username> <days>")
-                return
-            target = await self._find_user(db, args[0])
-            if not target:
-                await self._send(token, chat_id, "User not found.")
-                return
-            sub = await billing_svc.active_subscription(db, target)
-            if not sub:
-                # extend last sub or require grant
-                sub = (
-                    await db.execute(
-                        select(Subscription)
-                        .where(Subscription.user_id == target.id)
-                        .order_by(Subscription.expires_at.desc())
-                    )
-                ).scalars().first()
-            if not sub:
-                await self._send(token, chat_id, "No subscription to extend. Use /grant first.")
-                return
-            sub = await billing_svc.extend_subscription(db, sub, int(args[1]))
-            await self._send(
-                token,
-                chat_id,
-                f"Extended {target.username} by {args[1]}d → {sub.expires_at.date()}",
-            )
-            if target.telegram_id:
-                await self._send(
-                    token,
-                    int(target.telegram_id),
-                    f"✅ Subscription extended until {sub.expires_at.date()}.",
-                )
-        elif cmd == "/disable":
-            if not args:
-                await self._send(token, chat_id, "Usage: /disable <telegram_id|username>")
-                return
-            target = await self._find_user(db, args[0])
-            if not target:
-                await self._send(token, chat_id, "User not found.")
-                return
-            if target.role == "admin":
-                await self._send(token, chat_id, "Cannot disable an admin.")
-                return
-            target.is_active = False
-            await db.commit()
-            await self._send(token, chat_id, f"Disabled {target.username}.")
-        elif cmd == "/enable":
-            if not args:
-                await self._send(token, chat_id, "Usage: /enable <telegram_id|username>")
-                return
-            target = await self._find_user(db, args[0])
-            if not target:
-                await self._send(token, chat_id, "User not found.")
-                return
-            target.is_active = True
-            await db.commit()
-            await self._send(token, chat_id, f"Enabled {target.username}.")
-
-    async def _find_user(self, db: AsyncSession, key: str) -> User | None:
-        key = key.strip()
-        if key.isdigit():
-            by_tg = (await db.execute(select(User).where(User.telegram_id == key))).scalar_one_or_none()
-            if by_tg:
-                return by_tg
-            by_id = await db.get(User, int(key))
-            if by_id:
-                return by_id
-        return (await db.execute(select(User).where(User.username == key))).scalar_one_or_none()
-
     def _audience_ok(self, audience: str, user: User | None, has_sub: bool = False) -> bool:
         if audience == "everyone":
             return True
@@ -808,6 +640,8 @@ class TelegramBotRuntime:
             if c.audience == "admins" and not settings.admin_commands_enabled:
                 continue
             lines.append(f"{c.command} — {c.title or c.description}")
+        if user and user.role == "admin" and settings.admin_commands_enabled:
+            lines.append("/admin — Telegram admin menu")
         return "\n".join(lines)
 
 

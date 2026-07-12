@@ -1,3 +1,5 @@
+import secrets
+
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -5,8 +7,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import require_admin, require_ready_user
 from app.core.database import get_db
 from app.core.security import hash_password
-from app.models import AuditLog, User, UserWorker, WorkerNode
+from app.models import AuditLog, Package, User, UserWorker, WorkerNode
 from app.schemas import MessageOut, UserCreate, UserOut, UserPermsSchema, UserUpdate
+from app.services import billing as billing_svc
 from app.services.billing import package_for_user, user_has_dedicated_worker
 from app.services.perms import DEFAULT_USER_PERMS, ENGINE_OPTIONS, PERM_SCHEMA, normalize_perms
 from app.services.worker_config import DEFAULT_WORKER_CONFIG, package_defaults_from_package
@@ -57,6 +60,7 @@ async def _set_worker_ids(db: AsyncSession, user_id: int, worker_ids: list[int] 
 
 
 async def _user_out(db: AsyncSession, user: User, worker_ids: list[int] | None = None) -> UserOut:
+    sub = await billing_svc.active_subscription(db, user)
     return UserOut(
         id=user.id,
         username=user.username,
@@ -70,6 +74,10 @@ async def _user_out(db: AsyncSession, user: User, worker_ids: list[int] | None =
         worker_ids=worker_ids or [],
         dedicated_worker=await user_has_dedicated_worker(db, user),
         created_at=user.created_at,
+        subscription_package=sub.package_name if sub else None,
+        subscription_id=sub.id if sub else None,
+        subscription_expires_at=sub.expires_at if sub else None,
+        has_active_subscription=bool(sub and billing_svc.subscription_is_live(sub)),
     )
 
 
@@ -98,22 +106,92 @@ async def create_user(
     _: User = Depends(require_ready_user),
     db: AsyncSession = Depends(get_db),
 ):
-    if (await db.execute(select(User).where(User.username == body.username))).scalar_one_or_none():
+    if body.role == "user":
+        tid = str(body.telegram_id).strip()
+        existing_tg = (await db.execute(select(User).where(User.telegram_id == tid))).scalar_one_or_none()
+        if existing_tg:
+            raise HTTPException(400, f"Telegram id already linked to {existing_tg.username}")
+
+        username = (body.username or f"tg_{tid}").strip()
+        if (await db.execute(select(User).where(User.username == username))).scalar_one_or_none():
+            raise HTTPException(400, "Username already exists")
+
+        email = (str(body.email).strip().lower() if body.email else f"tg_{tid}@telegram.local")
+        if (await db.execute(select(User).where(User.email == email))).scalar_one_or_none():
+            raise HTTPException(400, "Email already exists")
+
+        password = body.password or secrets.token_urlsafe(24)
+        base_perms = {**DEFAULT_USER_PERMS, "telegram_user": True, **(body.perms or {})}
+        base_perms["telegram_user"] = True
+        user = User(
+            username=username,
+            email=email,
+            password_hash=hash_password(password),
+            role="user",
+            telegram_id=tid,
+            perms=normalize_perms(base_perms),
+            must_change_password=True,
+            totp_enabled=False,
+        )
+        db.add(user)
+        db.add(
+            AuditLog(
+                actor_id=admin.id,
+                action="user.create",
+                detail={"username": username, "telegram_id": tid, "kind": "telegram"},
+            )
+        )
+        await db.commit()
+        await db.refresh(user)
+
+        if body.worker_ids is not None:
+            await _set_worker_ids(db, user.id, body.worker_ids)
+            await db.commit()
+
+        if body.package_id:
+            pkg = await db.get(Package, body.package_id)
+            if not pkg:
+                raise HTTPException(404, "Package not found")
+            await billing_svc.activate_subscription(db, user, pkg, duration_days=body.duration_days)
+            if body.notify:
+                from app.services.notify import notify_user_telegram
+
+                sub = await billing_svc.active_subscription(db, user)
+                if sub:
+                    await notify_user_telegram(
+                        db,
+                        user,
+                        f"✅ Access granted: {pkg.name} until {sub.expires_at.date()}.",
+                    )
+
+        return await _user_out(db, user, await _worker_ids_for(db, user.id))
+
+    # Admin panel account
+    username = str(body.username).strip()
+    email = str(body.email).strip().lower()
+    if (await db.execute(select(User).where(User.username == username))).scalar_one_or_none():
         raise HTTPException(400, "Username already exists")
-    if (await db.execute(select(User).where(User.email == str(body.email)))).scalar_one_or_none():
+    if (await db.execute(select(User).where(User.email == email))).scalar_one_or_none():
         raise HTTPException(400, "Email already exists")
+    if body.telegram_id:
+        tid = str(body.telegram_id).strip()
+        if tid and not tid.isdigit():
+            raise HTTPException(400, "telegram_id must be a numeric Telegram user id")
+        clash = (await db.execute(select(User).where(User.telegram_id == tid))).scalar_one_or_none()
+        if clash:
+            raise HTTPException(400, f"Telegram id already linked to {clash.username}")
     user = User(
-        username=body.username,
-        email=str(body.email),
+        username=username,
+        email=email,
         password_hash=hash_password(body.password),
-        role=body.role,
-        telegram_id=body.telegram_id,
+        role="admin",
+        telegram_id=(str(body.telegram_id).strip() if body.telegram_id else None) or None,
         perms=normalize_perms({**DEFAULT_USER_PERMS, **(body.perms or {})}),
         must_change_password=True,
         totp_enabled=False,
     )
     db.add(user)
-    db.add(AuditLog(actor_id=admin.id, action="user.create", detail={"username": body.username}))
+    db.add(AuditLog(actor_id=admin.id, action="user.create", detail={"username": username, "kind": "admin"}))
     await db.commit()
     await db.refresh(user)
     if body.worker_ids is not None:
@@ -149,17 +227,33 @@ async def update_user(
             user.telegram_id = None
         else:
             tid = str(tid).strip()
+            if not tid.isdigit():
+                raise HTTPException(400, "telegram_id must be numeric")
             clash = (
                 await db.execute(select(User).where(User.telegram_id == tid, User.id != user.id))
             ).scalar_one_or_none()
             if clash:
                 raise HTTPException(400, f"Telegram id already linked to {clash.username}")
             user.telegram_id = tid
+    if "username" in data and data["username"]:
+        new_username = str(data.pop("username")).strip()
+        clash = (
+            await db.execute(select(User).where(User.username == new_username, User.id != user.id))
+        ).scalar_one_or_none()
+        if clash:
+            raise HTTPException(400, "Username already exists")
+        user.username = new_username
     if "perms" in data and data["perms"] is not None:
         user.perms = normalize_perms(data.pop("perms"))
     for k, v in data.items():
         if k == "email" and v is not None:
-            setattr(user, k, str(v))
+            email = str(v).strip().lower()
+            clash = (
+                await db.execute(select(User).where(User.email == email, User.id != user.id))
+            ).scalar_one_or_none()
+            if clash:
+                raise HTTPException(400, "Email already exists")
+            setattr(user, k, email)
         elif v is not None:
             setattr(user, k, v)
     if worker_ids is not None:

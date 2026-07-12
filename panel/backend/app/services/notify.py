@@ -21,12 +21,23 @@ async def bot_token(db: AsyncSession) -> str | None:
     return None
 
 
-async def send_text(token: str, chat_id: int | str, text: str) -> None:
+async def send_text(
+    token: str,
+    chat_id: int | str,
+    text: str,
+    *,
+    reply_markup: dict | None = None,
+) -> None:
     try:
         async with httpx.AsyncClient(timeout=30) as client:
+            payload: dict = {"chat_id": chat_id, "text": text[:4000]}
+            if reply_markup is not None:
+                import json
+
+                payload["reply_markup"] = json.dumps(reply_markup)
             await client.post(
                 f"https://api.telegram.org/bot{token}/sendMessage",
-                data={"chat_id": chat_id, "text": text[:4000]},
+                data=payload,
             )
     except Exception:
         log.exception("send_text failed")

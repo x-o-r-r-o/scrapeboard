@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, EmailStr, Field, model_validator
 
 
 class TokenResponse(BaseModel):
@@ -46,18 +46,45 @@ class UserOut(BaseModel):
     worker_ids: list[int] = []
     dedicated_worker: bool = False
     created_at: datetime
+    subscription_package: str | None = None
+    subscription_id: int | None = None
+    subscription_expires_at: datetime | None = None
+    has_active_subscription: bool = False
 
     model_config = {"from_attributes": True}
 
 
 class UserCreate(BaseModel):
-    username: str = Field(min_length=3, max_length=64)
-    email: EmailStr | str
-    password: str = Field(min_length=8)
+    """Create panel admin (login) or Telegram user (bot-linked, no panel login fields)."""
+
     role: Literal["admin", "user"] = "user"
+    username: str | None = Field(default=None, min_length=3, max_length=64)
+    email: EmailStr | str | None = None
+    password: str | None = Field(default=None, min_length=8)
     telegram_id: str | None = None
+    package_id: int | None = None
+    duration_days: int | None = Field(default=None, ge=1, le=3650)
+    notify: bool = False
     perms: dict[str, Any] = Field(default_factory=dict)
     worker_ids: list[int] | None = None
+
+    @model_validator(mode="after")
+    def validate_by_role(self) -> "UserCreate":
+        if self.role == "admin":
+            if not (self.username or "").strip():
+                raise ValueError("Admin users require username")
+            if not self.email:
+                raise ValueError("Admin users require email")
+            if not self.password:
+                raise ValueError("Admin users require temporary password")
+        else:
+            tid = (self.telegram_id or "").strip()
+            if not tid:
+                raise ValueError("Telegram users require telegram_id")
+            if not tid.isdigit():
+                raise ValueError("telegram_id must be a numeric Telegram user id")
+            self.telegram_id = tid
+        return self
 
 
 class UserUpdate(BaseModel):
@@ -69,6 +96,7 @@ class UserUpdate(BaseModel):
     worker_ids: list[int] | None = None
     password: str | None = Field(default=None, min_length=8)
     reset_2fa: bool = False
+    username: str | None = Field(default=None, min_length=3, max_length=64)
 
 
 class UserPermsSchema(BaseModel):

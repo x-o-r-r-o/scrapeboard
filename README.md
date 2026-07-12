@@ -151,7 +151,7 @@ scrapeboard/
 - Toggle commands, audiences, welcome text, support chat  
 - `/packages` `/buy` `/paid` `/subscription` `/run` `/status` `/stop` `/support`  
 - Upload keyword/location files with captions  
-- Optional admin commands: `/servers` `/pending` `/approve` `/users`  
+- **Telegram admin** (`role=admin` + linked `telegram_id` + Bot Builder admin commands): `/admin` menu for users, subscriptions, workers, packages, jobs, proxies, captcha/bot toggles — see [`panel/README.md`](panel/README.md#telegram-admin)  
 - Results optionally delivered as Telegram documents  
 
 ---
@@ -443,11 +443,14 @@ After first login (password + 2FA done):
 ### 2. Users (Admin → Users)
 
 ```
-Create user → username, email, temp password, role (user|admin), optional Telegram ID
+Role first:
+  user (Telegram, default) → Telegram ID required; optional display name + package
+  admin (panel login)      → username, email, temp password required
 ```
 
-User must change password and enable 2FA on first login.  
-Link Telegram ID so the bot can authorize them.
+Telegram users get opaque internal username/email/password (not shown).  
+Use **Assign package** / **Change plan** on a user row to grant a subscription (same as Billing → Grant).  
+Admins must change password and enable 2FA on first login.
 
 ### 3. Packages & billing (Admin → Packages / Billing)
 
@@ -610,13 +613,17 @@ Click **Install / refresh demos** to load onboarding, USDT buy, manual buy, job 
 | `/status` | users | **Own jobs only** |
 | `/stop` | subscribers | Stop own job + partial ZIP |
 | `/support …` | users | Ticket → support chat |
-| `/servers` | admins** | Workers |
-| `/pending` | admins** | Pending orders |
-| `/approve <order_id>` | admins** | Approve manual order |
-| `/users` | admins** | List users |
+| `/admin` | admins** | Admin menu + keyboard |
+| `/users` `/userinfo` `/adduser` `/deluser` … | admins** | User CRUD |
+| `/subs` `/grant` `/revoke` `/extend` | admins** | Subscriptions |
+| `/pending` `/approve` `/reject` | admins** | Orders |
+| `/workers` `/worker` `/addworker` `/workertoken` … | admins** | Workers (tokens DM’d privately) |
+| `/adminpkgs` `/addpkg` `/editpkg` | admins** | Packages |
+| `/alljobs` `/job` `/adminstop` | admins** | Cross-user jobs |
+| `/proxies` `/captcha` `/botstatus` | admins** | Infra / settings (keys stay in panel) |
 
 \* if “public packages” enabled  
-\*\* only if “admin Telegram commands” enabled  
+\*\* only if “admin Telegram commands” enabled; runtime also requires `User.role=admin` linked via `telegram_id`. Full list: [`panel/README.md`](panel/README.md#telegram-admin).  
 
 ### Upload inputs in Telegram
 

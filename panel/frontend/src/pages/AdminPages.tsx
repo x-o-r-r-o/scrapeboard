@@ -118,17 +118,38 @@ type AdminUser = {
   perms: Record<string, unknown>;
   worker_ids: number[];
   dedicated_worker: boolean;
+  subscription_package: string | null;
+  subscription_id: number | null;
+  subscription_expires_at: string | null;
+  has_active_subscription: boolean;
 };
+
+type PackageLite = {
+  id: number;
+  name: string;
+  duration_days: number;
+  threads: number;
+  is_active: boolean;
+  dedicated_worker?: boolean;
+};
+
+function isTelegramUser(u: { role: string; telegram_id?: string | null; perms?: Record<string, unknown> }) {
+  return u.role === "user" && (Boolean(u.telegram_id) || Boolean(u.perms?.telegram_user));
+}
 
 export function UsersAdminPage() {
   const { schema, workers } = usePermSchema();
   const [users, setUsers] = useState<AdminUser[]>([]);
+  const [packages, setPackages] = useState<PackageLite[]>([]);
   const [form, setForm] = useState({
     username: "",
     email: "",
     password: "",
     role: "user",
     telegram_id: "",
+    package_id: "",
+    duration_days: "",
+    notify: true,
     perms: {} as Record<string, unknown>,
     worker_ids: [] as number[],
   });
@@ -144,12 +165,29 @@ export function UsersAdminPage() {
     perms: Record<string, unknown>;
     worker_ids: number[];
     dedicated_worker: boolean;
+    subscription_package: string | null;
+    has_active_subscription: boolean;
+  } | null>(null);
+  const [assign, setAssign] = useState<{
+    user_id: number;
+    username: string;
+    current_package: string | null;
+    package_id: string;
+    duration_days: string;
+    notify: boolean;
   } | null>(null);
   const [error, setError] = useState("");
   const [msg, setMsg] = useState("");
 
+  const activePackages = packages.filter((p) => p.is_active);
+
   async function refresh() {
-    setUsers(await api("/api/users"));
+    const [userRows, pkgs] = await Promise.all([
+      api<AdminUser[]>("/api/users"),
+      api<PackageLite[]>("/api/packages").catch(() => [] as PackageLite[]),
+    ]);
+    setUsers(userRows);
+    setPackages(pkgs);
   }
   useEffect(() => {
     refresh().catch((e) => setError(e.message));
@@ -157,7 +195,10 @@ export function UsersAdminPage() {
 
   useEffect(() => {
     if (schema && Object.keys(form.perms).length === 0) {
-      setForm((f) => ({ ...f, perms: { ...schema.defaults } }));
+      setForm((f) => ({
+        ...f,
+        perms: { ...schema.defaults, ...(f.role === "user" ? { telegram_user: true } : {}) },
+      }));
     }
   }, [schema]);
 
@@ -166,28 +207,44 @@ export function UsersAdminPage() {
     setError("");
     setMsg("");
     try {
-      await api("/api/users", {
-        method: "POST",
-        body: JSON.stringify({
-          username: form.username,
-          email: form.email,
-          password: form.password,
-          role: form.role,
-          telegram_id: form.telegram_id || null,
-          perms: form.perms,
-          worker_ids: form.worker_ids,
-        }),
-      });
+      const body: Record<string, unknown> = {
+        role: form.role,
+        perms: form.role === "user" ? { ...form.perms, telegram_user: true } : form.perms,
+        worker_ids: form.worker_ids,
+      };
+      if (form.role === "user") {
+        body.telegram_id = form.telegram_id.trim();
+        if (form.username.trim()) body.username = form.username.trim();
+        if (form.package_id) {
+          body.package_id = Number(form.package_id);
+          body.notify = form.notify;
+          if (form.duration_days) body.duration_days = Number(form.duration_days);
+        }
+      } else {
+        body.username = form.username.trim();
+        body.email = form.email.trim();
+        body.password = form.password;
+        if (form.telegram_id.trim()) body.telegram_id = form.telegram_id.trim();
+      }
+      const createdRole = form.role;
+      await api("/api/users", { method: "POST", body: JSON.stringify(body) });
       setForm({
         username: "",
         email: "",
         password: "",
         role: "user",
         telegram_id: "",
-        perms: schema ? { ...schema.defaults } : {},
+        package_id: "",
+        duration_days: "",
+        notify: true,
+        perms: schema ? { ...schema.defaults, telegram_user: true } : {},
         worker_ids: [],
       });
-      setMsg("User created (must change password + setup 2FA on first login)");
+      setMsg(
+        createdRole === "admin"
+          ? "Admin created (must change password + setup 2FA on first login)"
+          : "Telegram user created"
+      );
       await refresh();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed");
@@ -200,15 +257,19 @@ export function UsersAdminPage() {
     setError("");
     try {
       const body: Record<string, unknown> = {
-        email: edit.email,
         role: edit.role,
         is_active: edit.is_active,
         telegram_id: edit.telegram_id || null,
         reset_2fa: edit.reset_2fa,
-        perms: edit.perms,
+        perms: edit.role === "user" ? { ...edit.perms, telegram_user: true } : edit.perms,
         worker_ids: edit.worker_ids,
       };
-      if (edit.password) body.password = edit.password;
+      if (edit.role === "admin") {
+        body.email = edit.email;
+        if (edit.password) body.password = edit.password;
+      } else if (edit.username.trim()) {
+        body.username = edit.username.trim();
+      }
       await api(`/api/users/${edit.id}`, { method: "PATCH", body: JSON.stringify(body) });
       setMsg("User updated.");
       setEdit(null);
@@ -218,39 +279,158 @@ export function UsersAdminPage() {
     }
   }
 
+  async function saveAssign(e: FormEvent) {
+    e.preventDefault();
+    if (!assign) return;
+    setError("");
+    try {
+      const body: Record<string, unknown> = {
+        user_id: assign.user_id,
+        package_id: Number(assign.package_id),
+        notify: assign.notify,
+      };
+      if (assign.duration_days) body.duration_days = Number(assign.duration_days);
+      await api("/api/subscriptions/grant", { method: "POST", body: JSON.stringify(body) });
+      setMsg(`Package assigned to ${assign.username}.`);
+      setAssign(null);
+      await refresh();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Assign failed");
+    }
+  }
+
+  function openAssign(u: AdminUser) {
+    setAssign({
+      user_id: u.id,
+      username: u.username,
+      current_package: u.has_active_subscription ? u.subscription_package : null,
+      package_id: "",
+      duration_days: "",
+      notify: true,
+    });
+    setEdit(null);
+  }
+
   return (
     <div className="stack">
       <div className="page-header">
         <div>
           <h1>Users</h1>
-          <p className="subtitle">Create panel/admin accounts and set role permissions. Leave worker assignment empty for dedicated-worker users to use all workers.</p>
+          <p className="subtitle">
+            Default users are Telegram-linked (no panel login). Admins need username, email, and a temporary password.
+            Assign packages from the user row or edit form.
+          </p>
         </div>
       </div>
       <form className="card" onSubmit={create} style={{ display: "grid", gap: "0.6rem", gridTemplateColumns: "repeat(auto-fit,minmax(160px,1fr))" }}>
         <h3 style={{ margin: 0, gridColumn: "1 / -1" }}>Create user</h3>
-        <input className="input" placeholder="username" value={form.username} onChange={(e) => setForm({ ...form, username: e.target.value })} required />
-        <input className="input" placeholder="email" value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} required />
-        <input className="input" placeholder="temp password" type="password" value={form.password} onChange={(e) => setForm({ ...form, password: e.target.value })} required minLength={8} />
-        <select className="input" value={form.role} onChange={(e) => setForm({ ...form, role: e.target.value })}>
-          <option value="user">user</option>
-          <option value="admin">admin</option>
-        </select>
-        <input className="input" placeholder="telegram id" value={form.telegram_id} onChange={(e) => setForm({ ...form, telegram_id: e.target.value })} />
+        <label className="field" style={{ gridColumn: "1 / -1", maxWidth: 280 }}>
+          Role
+          <select
+            className="input"
+            value={form.role}
+            onChange={(e) => {
+              const role = e.target.value;
+              setForm({
+                ...form,
+                role,
+                perms:
+                  role === "user"
+                    ? { ...(schema?.defaults || {}), telegram_user: true }
+                    : { ...(schema?.defaults || {}) },
+              });
+            }}
+          >
+            <option value="user">user (Telegram)</option>
+            <option value="admin">admin (panel login)</option>
+          </select>
+        </label>
         {form.role === "user" ? (
-          <PermsEditor
-            perms={form.perms}
-            workerIds={form.worker_ids}
-            onPermsChange={(perms) => setForm({ ...form, perms })}
-            onWorkerIdsChange={(worker_ids) => setForm({ ...form, worker_ids })}
-            schema={schema}
-            workers={workers}
-            showWorkers={false}
-            title="Role permissions"
-          />
+          <>
+            <label className="field">
+              Telegram ID
+              <input
+                className="input"
+                placeholder="numeric id"
+                value={form.telegram_id}
+                onChange={(e) => setForm({ ...form, telegram_id: e.target.value })}
+                required
+              />
+            </label>
+            <label className="field">
+              Display name (optional)
+              <input
+                className="input"
+                placeholder="defaults to tg_&lt;id&gt;"
+                value={form.username}
+                onChange={(e) => setForm({ ...form, username: e.target.value })}
+              />
+            </label>
+            <label className="field">
+              Package (optional)
+              <select className="input" value={form.package_id} onChange={(e) => setForm({ ...form, package_id: e.target.value })}>
+                <option value="">None</option>
+                {activePackages.map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.name} ({p.duration_days}d · {p.threads} threads)
+                  </option>
+                ))}
+              </select>
+            </label>
+            {form.package_id ? (
+              <>
+                <label className="field">
+                  Days override
+                  <input
+                    className="input"
+                    type="number"
+                    min={1}
+                    placeholder="package default"
+                    value={form.duration_days}
+                    onChange={(e) => setForm({ ...form, duration_days: e.target.value })}
+                  />
+                </label>
+                <label style={{ alignSelf: "end", paddingBottom: "0.4rem" }}>
+                  <input type="checkbox" checked={form.notify} onChange={(e) => setForm({ ...form, notify: e.target.checked })} /> Notify on Telegram
+                </label>
+              </>
+            ) : null}
+            <PermsEditor
+              perms={form.perms}
+              workerIds={form.worker_ids}
+              onPermsChange={(perms) => setForm({ ...form, perms: { ...perms, telegram_user: true } })}
+              onWorkerIdsChange={(worker_ids) => setForm({ ...form, worker_ids })}
+              schema={schema}
+              workers={workers}
+              showWorkers={Boolean(
+                form.package_id && activePackages.find((p) => String(p.id) === String(form.package_id))?.dedicated_worker
+              )}
+              title="Role permissions"
+            />
+          </>
         ) : (
-          <p className="muted" style={{ gridColumn: "1 / -1" }}>
-            Admins have full access; permission matrix applies to user-role accounts.
-          </p>
+          <>
+            <input className="input" placeholder="username" value={form.username} onChange={(e) => setForm({ ...form, username: e.target.value })} required />
+            <input className="input" placeholder="email" value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} required />
+            <input
+              className="input"
+              placeholder="temp password"
+              type="password"
+              value={form.password}
+              onChange={(e) => setForm({ ...form, password: e.target.value })}
+              required
+              minLength={8}
+            />
+            <input
+              className="input"
+              placeholder="telegram id (optional)"
+              value={form.telegram_id}
+              onChange={(e) => setForm({ ...form, telegram_id: e.target.value })}
+            />
+            <p className="muted" style={{ gridColumn: "1 / -1" }}>
+              Admins have full access and sign in with username/email + password + 2FA. Packages are not required.
+            </p>
+          </>
         )}
         <button className="btn" type="submit">
           Create user
@@ -265,6 +445,7 @@ export function UsersAdminPage() {
               <th>ID</th>
               <th>User</th>
               <th>Role</th>
+              <th>Plan</th>
               <th>Workers</th>
               <th>Status</th>
               <th>2FA</th>
@@ -278,14 +459,28 @@ export function UsersAdminPage() {
                 <td>{u.id}</td>
                 <td>
                   {u.username}
-                  <div className="muted">{u.email}</div>
+                  {u.role === "admin" || !isTelegramUser(u) ? <div className="muted">{u.email}</div> : null}
                 </td>
-                <td>{u.role}</td>
+                <td>{u.role === "user" ? "user (Telegram)" : u.role}</td>
+                <td>
+                  {u.has_active_subscription && u.subscription_package ? (
+                    <>
+                      {u.subscription_package}
+                      {u.subscription_expires_at ? (
+                        <div className="muted" style={{ fontSize: "0.75rem" }}>
+                          until {new Date(u.subscription_expires_at).toLocaleDateString()}
+                        </div>
+                      ) : null}
+                    </>
+                  ) : (
+                    <span className="muted">{u.role === "admin" ? "n/a" : "none"}</span>
+                  )}
+                </td>
                 <td>{u.worker_ids?.length ? u.worker_ids.join(", ") : "any"}</td>
                 <td>
                   <span className={`badge ${u.is_active ? "ok" : "danger"}`}>{u.is_active ? "active" : "disabled"}</span>
                 </td>
-                <td>{u.totp_enabled ? "yes" : "pending"}</td>
+                <td>{u.role === "admin" ? (u.totp_enabled ? "yes" : "pending") : "—"}</td>
                 <td>{u.telegram_id || "—"}</td>
                 <td style={{ display: "flex", gap: "0.35rem", flexWrap: "wrap" }}>
                   <button
@@ -304,11 +499,18 @@ export function UsersAdminPage() {
                         perms: { ...(schema?.defaults || {}), ...(u.perms || {}) },
                         worker_ids: [...(u.worker_ids || [])],
                         dedicated_worker: Boolean(u.dedicated_worker),
+                        subscription_package: u.has_active_subscription ? u.subscription_package : null,
+                        has_active_subscription: u.has_active_subscription,
                       })
                     }
                   >
                     Edit
                   </button>
+                  {u.role === "user" ? (
+                    <button className="btn secondary sm" type="button" onClick={() => openAssign(u)}>
+                      {u.has_active_subscription ? "Change plan" : "Assign package"}
+                    </button>
+                  ) : null}
                   <button
                     className="btn secondary sm"
                     type="button"
@@ -344,45 +546,140 @@ export function UsersAdminPage() {
           </tbody>
         </table>
       </div>
+      {assign ? (
+        <form className="card" onSubmit={saveAssign} style={{ display: "grid", gap: "0.65rem", maxWidth: 480 }}>
+          <h3 style={{ margin: 0 }}>
+            {assign.current_package ? "Change plan" : "Assign package"} — {assign.username}
+          </h3>
+          {assign.current_package ? <p className="muted" style={{ margin: 0 }}>Current: {assign.current_package}</p> : null}
+          <label className="field">
+            Package
+            <select className="input" required value={assign.package_id} onChange={(e) => setAssign({ ...assign, package_id: e.target.value })}>
+              <option value="">Select…</option>
+              {packages.map((p) => (
+                <option key={p.id} value={p.id}>
+                  {p.name} ({p.duration_days}d · {p.threads} threads){!p.is_active ? " (disabled)" : ""}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="field">
+            Days (optional)
+            <input
+              className="input"
+              type="number"
+              min={1}
+              placeholder="package default"
+              value={assign.duration_days}
+              onChange={(e) => setAssign({ ...assign, duration_days: e.target.value })}
+            />
+          </label>
+          <label>
+            <input type="checkbox" checked={assign.notify} onChange={(e) => setAssign({ ...assign, notify: e.target.checked })} /> Notify on Telegram
+          </label>
+          <div style={{ display: "flex", gap: "0.5rem" }}>
+            <button className="btn" type="submit">
+              {assign.current_package ? "Change plan" : "Assign package"}
+            </button>
+            <button className="btn secondary" type="button" onClick={() => setAssign(null)}>
+              Cancel
+            </button>
+          </div>
+        </form>
+      ) : null}
       {edit ? (
         <form className="card" onSubmit={saveEdit} style={{ display: "grid", gap: "0.65rem", maxWidth: 720 }}>
           <h3 style={{ margin: 0 }}>Edit {edit.username}</h3>
           <label className="field">
-            Email
-            <input className="input" value={edit.email} onChange={(e) => setEdit({ ...edit, email: e.target.value })} />
-          </label>
-          <label className="field">
             Role
             <select className="input" value={edit.role} onChange={(e) => setEdit({ ...edit, role: e.target.value })}>
-              <option value="user">user</option>
+              <option value="user">user (Telegram)</option>
               <option value="admin">admin</option>
             </select>
           </label>
           <label className="field">
             Telegram ID
-            <input className="input" value={edit.telegram_id} onChange={(e) => setEdit({ ...edit, telegram_id: e.target.value })} placeholder="blank to unlink" />
+            <input
+              className="input"
+              value={edit.telegram_id}
+              onChange={(e) => setEdit({ ...edit, telegram_id: e.target.value })}
+              placeholder={edit.role === "user" ? "required for Telegram users" : "optional"}
+              required={edit.role === "user"}
+            />
           </label>
-          <label className="field">
-            New password (optional)
-            <input className="input" type="password" value={edit.password} onChange={(e) => setEdit({ ...edit, password: e.target.value })} minLength={8} />
-          </label>
+          {edit.role === "user" ? (
+            <label className="field">
+              Display name
+              <input className="input" value={edit.username} onChange={(e) => setEdit({ ...edit, username: e.target.value })} />
+            </label>
+          ) : (
+            <>
+              <label className="field">
+                Email
+                <input className="input" value={edit.email} onChange={(e) => setEdit({ ...edit, email: e.target.value })} />
+              </label>
+              <label className="field">
+                New password (optional)
+                <input
+                  className="input"
+                  type="password"
+                  value={edit.password}
+                  onChange={(e) => setEdit({ ...edit, password: e.target.value })}
+                  minLength={8}
+                />
+              </label>
+            </>
+          )}
           <label>
             <input type="checkbox" checked={edit.is_active} onChange={(e) => setEdit({ ...edit, is_active: e.target.checked })} /> Active
           </label>
-          <label>
-            <input type="checkbox" checked={edit.reset_2fa} onChange={(e) => setEdit({ ...edit, reset_2fa: e.target.checked })} /> Reset 2FA
-          </label>
+          {edit.role === "admin" ? (
+            <label>
+              <input type="checkbox" checked={edit.reset_2fa} onChange={(e) => setEdit({ ...edit, reset_2fa: e.target.checked })} /> Reset 2FA
+            </label>
+          ) : null}
           {edit.role === "user" ? (
-            <PermsEditor
-              perms={edit.perms}
-              workerIds={edit.worker_ids}
-              onPermsChange={(perms) => setEdit({ ...edit, perms })}
-              onWorkerIdsChange={(worker_ids) => setEdit({ ...edit, worker_ids })}
-              schema={schema}
-              workers={workers}
-              showWorkers={edit.dedicated_worker}
-              title="Role permissions"
-            />
+            <>
+              <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap", alignItems: "center" }}>
+                <span className="muted">
+                  Plan: {edit.has_active_subscription && edit.subscription_package ? edit.subscription_package : "none"}
+                </span>
+                <button
+                  className="btn secondary sm"
+                  type="button"
+                  onClick={() =>
+                    openAssign({
+                      id: edit.id,
+                      username: edit.username,
+                      email: edit.email,
+                      role: edit.role,
+                      is_active: edit.is_active,
+                      telegram_id: edit.telegram_id || null,
+                      totp_enabled: false,
+                      perms: edit.perms,
+                      worker_ids: edit.worker_ids,
+                      dedicated_worker: edit.dedicated_worker,
+                      subscription_package: edit.subscription_package,
+                      subscription_id: null,
+                      subscription_expires_at: null,
+                      has_active_subscription: edit.has_active_subscription,
+                    })
+                  }
+                >
+                  {edit.has_active_subscription ? "Change plan" : "Assign package"}
+                </button>
+              </div>
+              <PermsEditor
+                perms={edit.perms}
+                workerIds={edit.worker_ids}
+                onPermsChange={(perms) => setEdit({ ...edit, perms: { ...perms, telegram_user: true } })}
+                onWorkerIdsChange={(worker_ids) => setEdit({ ...edit, worker_ids })}
+                schema={schema}
+                workers={workers}
+                showWorkers={edit.dedicated_worker}
+                title="Role permissions"
+              />
+            </>
           ) : null}
           <div style={{ display: "flex", gap: "0.5rem" }}>
             <button className="btn" type="submit">

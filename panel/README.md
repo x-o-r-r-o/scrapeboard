@@ -78,6 +78,15 @@ panel/
 | **admin** | Full panel + optional Telegram admin commands |
 | **user** | Own dashboard, jobs, subscription only |
 
+**Admin → Users** create rules:
+
+| Role | Required fields | Hidden / auto |
+|------|-----------------|---------------|
+| **user** (default, Telegram) | Telegram ID; optional display name + package | Username/email/password generated internally (`tg_<id>`, opaque password) — not shown |
+| **admin** | Username, email, temporary password | Package not required |
+
+Assign or change a subscription package from the Users table (**Assign package** / **Change plan**), or from Billing → Grant. Both call `POST /api/subscriptions/grant`.
+
 ### Billing
 
 - Packages (slug, USDT price, days, threads, upload MB, tier)  
@@ -108,6 +117,45 @@ panel/
 - Connect BotFather token, toggle commands/audiences  
 - Demo workflows, support chat, optional result delivery  
 
+### Telegram admin
+
+Panel users with **`role=admin`** and a linked **`telegram_id`** can manage the control plane from Telegram when **Admin commands** is enabled in Bot Builder (`admin_commands_enabled`).
+
+**Setup**
+
+1. Create/link an admin in **Admin → Users** and set their Telegram ID (send `/whoami` to the bot to see yours).  
+2. Bot Builder → paste token → enable bot → turn on **Admin commands**.  
+3. **Install / refresh demos** so admin slash commands appear in Bot Builder (or rely on bootstrap seeding missing keys).  
+4. DM the bot `/admin` for the menu + reply keyboard.
+
+**Auth gate**
+
+Every admin action checks: sender `telegram_id` → enabled `User` with `role=admin`, **and** `admin_commands_enabled`. Listing a command in Bot Builder is not enough — non-admins never get these handlers.
+
+**Fully manageable via Telegram**
+
+| Area | Commands |
+|------|----------|
+| Users | `/users`, `/userinfo`, `/adduser`, `/setname`, `/settg`, `/setperm`, `/disable`, `/enable`, `/deluser … confirm` |
+| Subscriptions | `/subs`, `/grant`, `/revoke`, `/extend`, `/pending`, `/approve`, `/reject` |
+| Workers | `/workers` (`/servers`), `/worker`, `/addworker`, `/editworker`, `/workerdrain`, `/workeron`, `/workeroff`, `/workertoken` |
+| Packages | `/adminpkgs`, `/addpkg`, `/editpkg`, `/disablepkg` |
+| Jobs | `/alljobs`, `/job`, `/adminstop` |
+| Proxies | `/proxies`, `/proxy <id> on\|off` |
+| Captcha / bot | `/captcha` `[off]`, `/botstatus`, `/boton`, `/botoff` |
+
+Worker tokens are never echoed in group chats — they are DM’d to the admin’s private chat when possible.
+
+**Panel-only leftovers**
+
+- Proxy list text / pool assign UI, full worker `worker_config` / package `scrape_defaults` editors  
+- Captcha API keys & provider hosts (Telegram can only show status / turn solvers off)  
+- BotFather token, security (reCAPTCHA/lockout), creating panel admin accounts with passwords  
+- Hard-delete workers (panel has no delete API — disable via `/workeroff`)  
+- Job purge/storage cleanup, dedicated-worker pin UI beyond simple fields  
+
+Normal scrape flows (`/run`, `/stop`, `/status`, …) are unchanged for non-admin Telegram users.
+
 ---
 
 ## UI routes
@@ -120,9 +168,9 @@ panel/
 | `/app` | user/admin | Dashboard (live fleet / jobs / platform stats) |
 | `/app/jobs` | user/admin | Create / monitor / download jobs |
 | `/app/subscription` | user/admin | Buy / paid / current plan |
-| `/app/admin/users` | admin | Create & manage users |
+| `/app/admin/users` | admin | Create Telegram/admin users, assign packages |
 | `/app/admin/packages` | admin | Plans |
-| `/app/admin/billing` | admin | Wallet, methods, pending, grant |
+| `/app/admin/billing` | admin | Wallet, methods, pending, grant (also available on Users) |
 | `/app/admin/proxies` | admin | Proxy pools |
 | `/app/admin/workers` | admin | Workers + per-worker scrape flags |
 | `/app/admin/captcha` | admin | Global scrape captcha solvers |
