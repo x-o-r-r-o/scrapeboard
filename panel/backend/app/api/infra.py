@@ -470,6 +470,19 @@ def _require_active_worker(w: WorkerNode) -> None:
         raise HTTPException(403, "Worker is disabled")
 
 
+def _body_int(body: dict, key: str, *, default: int | None = None, required: bool = False) -> int:
+    """Parse an int from JSON without treating 0 as missing (``x or default`` is wrong)."""
+    raw = body.get(key) if key in body else None
+    if raw is None or raw == "":
+        if required or default is None:
+            raise HTTPException(400, f"{key} required")
+        return default
+    try:
+        return int(body[key])
+    except (TypeError, ValueError) as e:
+        raise HTTPException(400, f"{key} must be an integer") from e
+
+
 async def _require_chunk_lease(db: AsyncSession, w: WorkerNode, job: Job, chunk_id: int) -> JobChunk:
     chunk = (
         await db.execute(
@@ -483,6 +496,66 @@ async def _require_chunk_lease(db: AsyncSession, w: WorkerNode, job: Job, chunk_
     if chunk.worker_id != w.id:
         raise HTTPException(403, "Chunk leased to another worker")
     return chunk
+
+
+async def _clear_worker_leases_for_job(
+    db: AsyncSession,
+    w: WorkerNode,
+    job: Job,
+    *,
+    chunk_id: int | None = None,
+    rows: int = 0,
+) -> int:
+    """Mark this worker's leased chunks on the job done (frees active_leases)."""
+    q = select(JobChunk).where(
+        JobChunk.job_id == job.id,
+        JobChunk.worker_id == w.id,
+        JobChunk.state == "leased",
+    )
+    if chunk_id is not None:
+        q = q.where(JobChunk.chunk_id == chunk_id)
+    chunks = (await db.execute(q)).scalars().all()
+    for chunk in chunks:
+        chunk.state = "done"
+        if rows and not chunk.rows:
+            chunk.rows = rows
+            job.rows_saved += rows
+        chunk.leased_at = None
+    return len(chunks)
+
+
+def _lease_is_stale(leased_at: datetime | None, before: datetime) -> bool:
+    if not leased_at:
+        return True
+    ts = leased_at if leased_at.tzinfo else leased_at.replace(tzinfo=timezone.utc)
+    return ts < before
+
+
+async def _reclaim_stale_leases(
+    db: AsyncSession,
+    *,
+    worker_id: int | None = None,
+    job_id: int | None = None,
+    stale_before: datetime | None = None,
+) -> int:
+    """Return leased chunks older than TTL to pending (capacity recovery)."""
+    before = stale_before or (datetime.now(timezone.utc) - timedelta(seconds=120))
+    clauses = [JobChunk.state == "leased"]
+    if worker_id is not None and job_id is not None:
+        clauses.append(or_(JobChunk.job_id == job_id, JobChunk.worker_id == worker_id))
+    elif worker_id is not None:
+        clauses.append(JobChunk.worker_id == worker_id)
+    elif job_id is not None:
+        clauses.append(JobChunk.job_id == job_id)
+    rows = (await db.execute(select(JobChunk).where(*clauses))).scalars().all()
+    n = 0
+    for c in rows:
+        if _lease_is_stale(c.leased_at, before):
+            c.state = "pending"
+            c.worker_id = None
+            c.leased_at = None
+            n += 1
+    return n
 
 
 @router.post("/worker-api/hello")
@@ -571,12 +644,30 @@ async def worker_heartbeat(
     w.version = str(body.get("version") or w.version)
 
     # Refresh lease TTL + surface jobs that are no longer active so the agent can stop.
+    # When the agent reports active_chunks, only refresh those; reclaim the rest so a
+    # failed ack cannot leave active_leases stuck (heartbeat used to refresh zombies forever).
     cancel_jobs: list[str] = []
     leased = (
         await db.execute(
             select(JobChunk).where(JobChunk.worker_id == w.id, JobChunk.state == "leased")
         )
     ).scalars().all()
+    reported_active: set[tuple[str, int]] | None = None
+    if "active_chunks" in body:
+        reported_active = set()
+        raw_active = body.get("active_chunks") or []
+        if isinstance(raw_active, list):
+            for item in raw_active:
+                if not isinstance(item, dict):
+                    continue
+                pid = str(item.get("job_id") or "").strip()
+                if not pid or item.get("chunk_id") is None or item.get("chunk_id") == "":
+                    continue
+                try:
+                    reported_active.add((pid, int(item["chunk_id"])))
+                except (TypeError, ValueError):
+                    continue
+
     if leased:
         job_ids = {c.job_id for c in leased}
         jobs = (
@@ -584,10 +675,29 @@ async def worker_heartbeat(
         ).scalars().all()
         by_id = {j.id: j for j in jobs}
         for c in leased:
-            c.leased_at = now
             j = by_id.get(c.job_id)
-            if j and j.status not in ("running", "queued"):
-                cancel_jobs.append(j.public_id)
+            public_id = j.public_id if j else ""
+            terminal = bool(j and j.status not in ("running", "queued"))
+            if terminal:
+                cancel_jobs.append(public_id)
+                # Drop capacity even if the agent ignores cancel_jobs (pre-0.8.0).
+                c.state = "done"
+                c.worker_id = None
+                c.leased_at = None
+                continue
+            key = (public_id, c.chunk_id)
+            if reported_active is not None and key not in reported_active:
+                # Agent no longer running this instance — free the lease immediately.
+                c.state = "pending"
+                c.worker_id = None
+                c.leased_at = None
+                continue
+            c.leased_at = now
+
+    # TTL reclaim for this worker even when lease polls are failing (502).
+    # With active_chunks, orphans are already cleared above; this covers legacy agents.
+    if reported_active is None:
+        await _reclaim_stale_leases(db, worker_id=w.id)
 
     # Also deliver cancel hints queued by finalize_job after leases were cleared.
     meta = dict(w.meta or {})
@@ -815,20 +925,7 @@ async def worker_lease(
         return await _with_update({"chunk": None})
 
     # reclaim stale leases (global for this worker + current job)
-    stale_before = datetime.now(timezone.utc) - timedelta(seconds=120)
-    stale = (
-        await db.execute(
-            select(JobChunk).where(
-                JobChunk.state == "leased",
-                or_(JobChunk.job_id == job.id, JobChunk.worker_id == w.id),
-            )
-        )
-    ).scalars().all()
-    for c in stale:
-        leased = c.leased_at
-        if leased and (leased if leased.tzinfo else leased.replace(tzinfo=timezone.utc)) < stale_before:
-            c.state = "pending"
-            c.worker_id = None
+    await _reclaim_stale_leases(db, worker_id=w.id, job_id=job.id)
     await db.commit()
 
     # Re-check capacity after reclaim
@@ -1037,36 +1134,45 @@ async def worker_ack(
     w = await _auth_worker(db, authorization)
     _require_active_worker(w)
     job_id = body.get("job_id")
-    chunk_id = int(body.get("chunk_id") or -1)
-    rows = int(body.get("rows") or 0)
+    # IMPORTANT: chunk_id 0 is valid — never use ``x or -1`` (that mapped chunk 0 → 404).
+    chunk_id = _body_int(body, "chunk_id", required=True)
+    rows = _body_int(body, "rows", default=0)
     job = (await db.execute(select(Job).where(Job.public_id == job_id))).scalar_one_or_none()
     if not job:
         return {"ok": False}
 
     # Terminal job: still clear this worker's lease so active_leases cannot stick.
     if job.status in ("stopped", "completed", "failed"):
-        chunk = (
-            await db.execute(
-                select(JobChunk).where(
-                    JobChunk.job_id == job.id,
-                    JobChunk.chunk_id == chunk_id,
-                    JobChunk.worker_id == w.id,
-                )
-            )
-        ).scalar_one_or_none()
-        if chunk and chunk.state == "leased":
-            chunk.state = "done"
-            if rows and not chunk.rows:
-                chunk.rows = rows
-                job.rows_saved += rows
-            await db.commit()
+        cleared = await _clear_worker_leases_for_job(
+            db, w, job, chunk_id=chunk_id, rows=rows
+        )
+        if not cleared:
+            # Chunk id mismatch / already cleared — still drop any leftover leases.
+            await _clear_worker_leases_for_job(db, w, job, rows=rows)
+        await db.commit()
         return {"ok": True, "cancelled": True}
 
-    chunk = await _require_chunk_lease(db, w, job, chunk_id)
+    chunk = (
+        await db.execute(
+            select(JobChunk).where(JobChunk.job_id == job.id, JobChunk.chunk_id == chunk_id)
+        )
+    ).scalar_one_or_none()
+    if not chunk:
+        # Never 404 after a successful scrape/upload — free any leases this worker holds.
+        await _clear_worker_leases_for_job(db, w, job, rows=rows)
+        await db.commit()
+        return {"ok": True, "cleared": True}
+
+    if chunk.worker_id not in (None, w.id):
+        raise HTTPException(403, "Chunk leased to another worker")
+    if chunk.state not in ("leased", "done", "pending"):
+        raise HTTPException(409, "Chunk is not leased to this worker")
+
     if chunk.state != "done":
         chunk.state = "done"
         chunk.rows = rows
         chunk.worker_id = w.id
+        chunk.leased_at = None
         job.done_searches = min(
             job.total_searches,
             job.done_searches + (chunk.end_index - chunk.start_index),
@@ -1091,3 +1197,13 @@ async def worker_ack(
     else:
         await db.commit()
     return {"ok": True}
+
+
+# Backward-compatible alias (same handler) if an older agent/docs used /complete.
+@router.post("/worker-api/complete")
+async def worker_ack_alias(
+    body: dict,
+    authorization: str | None = Header(default=None),
+    db: AsyncSession = Depends(get_db),
+):
+    return await worker_ack(body, authorization, db)

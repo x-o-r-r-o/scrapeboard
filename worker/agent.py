@@ -34,7 +34,7 @@ ROOT = Path(__file__).resolve().parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-VERSION = "0.8.0"
+VERSION = "0.8.1"
 CONFIG_NAME = "worker_config.json"
 HOST_OS = platform.system()  # Windows | Darwin | Linux
 SERVICE_NAME = "scrapeboard-worker"
@@ -496,9 +496,9 @@ class PanelClient:
         r.raise_for_status()
         return r.json()
 
-    def heartbeat(self):
+    def heartbeat(self, active_chunks: list[dict] | None = None):
         stats = _host_stats()
-        payload = {
+        payload: dict = {
             "cpu": stats["cpu"],
             "mem": stats["mem"],
             "disk": stats["disk"],
@@ -513,6 +513,8 @@ class PanelClient:
             "version": VERSION,
             "name": self.worker_name,
             "os": HOST_OS,
+            # Always send (even []) so the panel can reclaim orphan DB leases.
+            "active_chunks": list(active_chunks or []),
         }
         r = self.requests.post(
             f"{self.base}/api/worker-api/heartbeat",
@@ -540,15 +542,41 @@ class PanelClient:
         r.raise_for_status()
         return r.json()
 
-    def ack(self, job_id: str, chunk_id: int, rows: int):
-        r = self.requests.post(
-            f"{self.base}/api/worker-api/ack",
-            json={"job_id": job_id, "chunk_id": chunk_id, "rows": rows},
-            headers=self.headers,
-            timeout=30,
-        )
-        r.raise_for_status()
-        return r.json()
+    def ack(self, job_id: str, chunk_id: int, rows: int, *, retries: int = 5):
+        """Acknowledge chunk completion; retry so a transient 404/502 cannot leave a DB lease."""
+        url = f"{self.base}/api/worker-api/ack"
+        payload = {"job_id": job_id, "chunk_id": chunk_id, "rows": rows}
+        last_err: Exception | None = None
+        for attempt in range(1, max(1, retries) + 1):
+            try:
+                r = self.requests.post(
+                    url,
+                    json=payload,
+                    headers=self.headers,
+                    timeout=30,
+                )
+                if not r.ok:
+                    body = (r.text or "").strip().replace("\n", " ")[:300]
+                    print(
+                        f"[worker] ack HTTP {r.status_code} "
+                        f"job={job_id} chunk={chunk_id} "
+                        f"attempt={attempt}/{retries} body={body!r}",
+                        flush=True,
+                    )
+                r.raise_for_status()
+                return r.json()
+            except Exception as e:
+                last_err = e
+                if attempt >= retries:
+                    break
+                delay = min(2 ** (attempt - 1), 10)
+                print(
+                    f"[worker] ack retry in {delay}s after: {e}",
+                    flush=True,
+                )
+                time.sleep(delay)
+        assert last_err is not None
+        raise last_err
 
     def push_logs(self, lines: list[str], *, replace: bool = False):
         if not lines:
@@ -1090,6 +1118,7 @@ def main(argv=None) -> int:
             flush=True,
         )
         rows = 0
+        uploaded = False
         try:
             rows, zip_path = run_chunk(
                 job,
@@ -1106,6 +1135,7 @@ def main(argv=None) -> int:
             if zip_path and zip_path.exists() and not stop.is_set():
                 try:
                     client.upload(job["job_id"], chunk["id"], zip_path)
+                    uploaded = True
                     print(f"[worker] uploaded chunk={chunk['id']} user={owner_id}", flush=True)
                 except Exception as e:
                     print(f"[worker] upload skipped/failed: {e}", flush=True)
@@ -1113,6 +1143,7 @@ def main(argv=None) -> int:
                 # Best-effort upload of partial results after cancel
                 try:
                     client.upload(job["job_id"], chunk["id"], zip_path)
+                    uploaded = True
                     print(f"[worker] uploaded partial chunk={chunk['id']}", flush=True)
                 except Exception as e:
                     print(f"[worker] partial upload skipped: {e}", flush=True)
@@ -1120,16 +1151,43 @@ def main(argv=None) -> int:
             print(f"[worker] chunk error user={owner_id} chunk={chunk['id']}: {e}", flush=True)
             rows = 0
         try:
-            ack = client.ack(job["job_id"], chunk["id"], rows)
+            # Always ack (even after cancel/no upload) so the panel releases the lease.
+            # Extra retries after a successful upload — lease stickiness is worse than a delay.
+            ack_retries = 8 if uploaded else 5
+            ack = client.ack(job["job_id"], chunk["id"], rows, retries=ack_retries)
             if ack.get("cancelled"):
                 print(f"[worker] ack cancelled chunk={chunk['id']}", flush=True)
             else:
                 print(f"[worker] ack chunk={chunk['id']} rows={rows}", flush=True)
         except Exception as e:
-            print(f"[worker] ack error: {e}", flush=True)
+            print(
+                f"[worker] ack failed after retries job={job['job_id']} "
+                f"chunk={chunk['id']} uploaded={uploaded}: {e}",
+                flush=True,
+            )
+            print(
+                "[worker] lease may stick until next heartbeat reclaim "
+                "(panel needs active_chunks / 0.8.1+)",
+                flush=True,
+            )
+        finally:
+            with active_lock:
+                active.pop(key, None)
+                stops.pop(key, None)
+
+    def _active_chunk_payload() -> list[dict]:
         with active_lock:
-            active.pop(key, None)
-            stops.pop(key, None)
+            keys = list(active.keys())
+        out: list[dict] = []
+        for key in keys:
+            job_id, sep, chunk_s = key.partition(":")
+            if not sep:
+                continue
+            try:
+                out.append({"job_id": job_id, "chunk_id": int(chunk_s)})
+            except (TypeError, ValueError):
+                continue
+        return out
 
     def _apply_cancels(cancel_jobs: list) -> None:
         if not cancel_jobs:
@@ -1230,7 +1288,7 @@ def main(argv=None) -> int:
 
     while True:
         try:
-            hb = client.heartbeat()
+            hb = client.heartbeat(active_chunks=_active_chunk_payload())
             try:
                 sync_local_config_from_panel(hb, Path(rt["config_path"]))
             except Exception as e:

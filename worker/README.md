@@ -246,6 +246,20 @@ Online agents pick the command up on the next heartbeat, wait for active scrapes
 - `.scrapeboard-role=worker` and a background service (`install_service.*`)
 - Agent version that understands heartbeat `commands: ["update"]` (0.8.0+)
 
+**If the panel still shows agent `0.7.0`:** that build does **not** cancel mid-scrape or report `active_chunks` for lease cleanup. After pull/update you **must restart** the service so Python loads the new `agent.py`:
+
+```bash
+# Linux (user systemd):
+cd /path/to/bot
+python3 install.py --role worker --update
+systemctl --user restart scrapeboard-worker
+systemctl --user status scrapeboard-worker --no-pager
+grep -E 'scrapeboard worker v' worker/logs/worker.log | tail -3
+# Expect: v0.8.1+  (0.7.0 = still the old process)
+```
+
+Panel Admin → Workers should show **0.8.1+** within ~15s. Until then, a failed ack on `chunk_id=0` (fixed in panel) plus no cancel support can leave **1 instance running** on the dashboard.
+
 Tailscale is **not** required — workers only need outbound HTTPS to the panel.
 
 ### Manual update (SSH)
@@ -421,15 +435,21 @@ Standalone engine CLI (`gmaps_scraper.py`) is separate — see [`SCRAPER.md`](SC
 
 ## What the agent does
 
-1. `POST /api/worker-api/heartbeat` — online + CPU/RAM/disk/load + host identity  
+1. `POST /api/worker-api/heartbeat` — online + CPU/RAM/disk/load + host identity + `active_chunks` (so the panel can reclaim orphan leases)  
 2. `POST /api/worker-api/lease` — up to **`max_browsers` concurrent leases** (one instance per user job chunk); each lease includes keywords/locations + merged settings + proxies  
 3. Runs `gmaps_scraper` for that chunk using the job’s **thread** count (browsers inside the instance)  
 4. Zips CSV parts → `POST /api/worker-api/upload`  
-5. `POST /api/worker-api/ack` — panel merges when all chunks complete → user ZIP (+ optional Telegram)  
+5. `POST /api/worker-api/ack` — panel merges when all chunks complete → user ZIP (+ optional Telegram); agent retries on failure  
 
 **Panel-side thread quota:** the panel only promotes a user’s queued job when the sum of that user’s running job threads stays within their plan allowance. Unassigned users share the worker pool; dedicated-worker packages may optionally pin workers.
 
 Work directories are isolated per user: `work_root/user_{owner_id}/{job_id}/`.
+
+### Troubleshooting: ack 404 / stuck `1/N` instances
+
+- Route is **`POST /api/worker-api/ack`** (registered on the panel under `/api`). A `404` on `chunk=0` was a panel bug: `chunk_id or -1` treated `0` as missing.
+- After upload succeeds but ack fails, older agents leave the DB lease `leased`; heartbeat used to refresh that TTL forever. **0.8.1+** reports `active_chunks` and retries ack.
+- Agents still on **0.7.0** ignore cancel and lack lease cleanup — restart after update (see above).
 
 ---
 

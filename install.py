@@ -708,7 +708,8 @@ def print_worker_restart_verify_commands(kind: str) -> None:
         print("  systemctl --user status scrapeboard-worker --no-pager")
         print("  journalctl --user -u scrapeboard-worker -n 20 --no-pager")
         print("  grep -E 'scrapeboard worker v' logs/worker.log | tail -3")
-    print("Panel should show agent version 0.8.0+ after the next heartbeat (~15s).")
+    print("Panel should show agent version 0.8.1+ after the next heartbeat (~15s).")
+    print("Linux: systemctl --user restart scrapeboard-worker  # required after pull if still on 0.7.0")
 
 
 def run_update_mode(role: str, kind: str, ref: str | None = None) -> int:
