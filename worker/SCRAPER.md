@@ -55,9 +55,9 @@ website and its likely `/contact` and `/about` pages through the same proxy.
   auto-verified on-chain** and **manual** payment methods. Multiple packages with
   their own price, duration, **thread allowance**, and **upload-size limit**; expiry
   blocks access until renewal; **upgrade-only** (no downgrade while active). Each
-  package's limits are enforced. **Thread allowance is shared across all of a
-  user's running jobs** (sum of job threads ≤ plan). Extra jobs stay queued until
-  capacity frees, or the user lowers a queued job's threads in the panel.
+  package's limits are enforced. **One job runs at a time per user**; that job's
+  threads must be ≤ plan allowance. Extra jobs stay queued until the running one
+  finishes (or is stopped/failed).
 - **Proxies work with or without authentication** on every engine (including
   Camoufox) — `host:port` or `host:port:user:pass` are both fine.
 - **Anti-bot / stealth measures** (see below) so Google is far less likely to

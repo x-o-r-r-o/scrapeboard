@@ -190,7 +190,7 @@ def job_thread_count(job: Job) -> int:
 
 
 async def user_thread_allowance(db: AsyncSession, user: User) -> int:
-    """Max concurrent browser threads this user may run across all jobs."""
+    """Max browser threads for this user's single running job (plan/perm cap)."""
     perms = effective_perms(user)
     cap = int(perms.get("max_threads") or DEFAULT_USER_PERMS["max_threads"])
     if user.role == "admin":
@@ -199,6 +199,42 @@ async def user_thread_allowance(db: AsyncSession, user: User) -> int:
     if sub:
         cap = min(cap, int(sub.threads or cap))
     return max(1, cap)
+
+
+async def owner_blocking_job(
+    db: AsyncSession,
+    owner_id: int,
+    *,
+    exclude_job_id: int | None = None,
+) -> Job | None:
+    """Return another job that blocks starting a new one for this owner.
+
+    Policy: at most one active scrape job per owner_id. A job blocks others when
+    its status is ``running``, or when it still holds leased chunks (in-flight
+    work after a race / before finalize clears leases).
+    """
+    q = select(Job).where(Job.owner_id == owner_id, Job.status == "running")
+    if exclude_job_id is not None:
+        q = q.where(Job.id != exclude_job_id)
+    q = q.order_by(Job.id)
+    running = (await db.execute(q)).scalars().first()
+    if running:
+        return running
+
+    # Sticky / in-flight leases on another active job still occupy the owner slot.
+    lease_q = (
+        select(Job)
+        .join(JobChunk, JobChunk.job_id == Job.id)
+        .where(
+            Job.owner_id == owner_id,
+            Job.status.in_(("queued", "running")),
+            JobChunk.state == "leased",
+        )
+        .order_by(Job.id)
+    )
+    if exclude_job_id is not None:
+        lease_q = lease_q.where(Job.id != exclude_job_id)
+    return (await db.execute(lease_q)).scalars().first()
 
 
 async def sum_running_threads(
@@ -220,29 +256,34 @@ async def sum_running_threads(
 
 
 async def free_thread_slots(db: AsyncSession, user: User) -> int:
-    allowance = await user_thread_allowance(db, user)
-    used = await sum_running_threads(db, user.id)
-    return max(0, allowance - used)
+    """Threads available for a *new* job. Zero while another job holds the owner slot."""
+    if await owner_blocking_job(db, user.id):
+        return 0
+    return await user_thread_allowance(db, user)
 
 
 async def can_start_job(db: AsyncSession, job: Job) -> bool:
-    """True if promoting this queued job would stay within the owner's thread quota."""
+    """True if this job may be promoted/leased: no other active job for the owner,
+    and its thread count fits the owner's allowance."""
     owner = await db.get(User, job.owner_id)
     if not owner:
         return False
+    if await owner_blocking_job(db, job.owner_id, exclude_job_id=job.id):
+        return False
     need = job_thread_count(job)
-    used = await sum_running_threads(db, job.owner_id, exclude_job_id=job.id if job.status == "running" else None)
     allowance = await user_thread_allowance(db, owner)
-    return used + need <= allowance
+    return need <= allowance
 
 
 async def thread_quota_snapshot(db: AsyncSession, user: User) -> dict:
     allowance = await user_thread_allowance(db, user)
     used = await sum_running_threads(db, user.id)
+    # One job at a time: free is 0 while any job holds the owner slot.
+    free = 0 if await owner_blocking_job(db, user.id) else max(0, allowance - used)
     return {
         "thread_allowance": allowance,
         "threads_in_use": used,
-        "threads_free": max(0, allowance - used),
+        "threads_free": free,
     }
 
 
@@ -418,10 +459,11 @@ async def create_job_from_bytes(
     if requested > thread_cap:
         raise ValueError(
             f"Threads ({requested}) exceed your allowance ({thread_cap}). "
-            f"Lower threads or wait for running jobs to free capacity."
+            f"Lower threads or wait for your current job to finish."
         )
     settings["threads"] = requested
-    # Jobs always start queued; lease promotes only when free threads cover this job.
+    # Jobs always start queued; lease promotes only when this owner has no other
+    # active job and threads fit the allowance (one job at a time per owner).
     free = await free_thread_slots(db, user)
     settings["queued_for_threads"] = requested > free
 

@@ -22,6 +22,8 @@ type Job = {
   created_at: string;
   started_at?: string | null;
   waiting_for_threads?: boolean;
+  blocking_job_public_id?: string | null;
+  blocking_job_label?: string | null;
   settings?: { engine?: string; threads?: number };
   chunks_pending?: number | null;
   chunks_leased?: number | null;
@@ -132,7 +134,10 @@ export function JobsPage() {
       const created = await api<Job>("/api/jobs", { method: "POST", body: fd });
       form.reset();
       setJobName("");
-      if (created.waiting_for_threads) {
+      if (created.blocking_job_label || created.blocking_job_public_id) {
+        const behind = created.blocking_job_label || created.blocking_job_public_id;
+        setMsg(`Job queued — 1 job at a time — waiting for ${behind} to finish.`);
+      } else if (created.waiting_for_threads) {
         setMsg(
           `Job queued — waiting for free threads (${created.threads} needed). ` +
             `It starts when capacity frees, or edit threads on the queued job.`,
@@ -239,8 +244,8 @@ export function JobsPage() {
           <h1>Jobs</h1>
           <p className="subtitle">
             {isAdmin
-              ? "Each job has a unique ID. View worker placement and stop any job from here."
-              : "Each job has a unique ID. Use Telegram /stop to cancel your own queued or running jobs."}
+              ? "Each job has a unique ID. One job per owner runs at a time; view worker placement and stop any job from here."
+              : "One job runs at a time. Use Telegram /stop to cancel your own queued or running jobs."}
           </p>
         </div>
         {isAdmin ? (
@@ -308,7 +313,7 @@ export function JobsPage() {
         {quota ? (
           <p className="muted" style={{ margin: 0 }}>
             Thread pool: <strong>{quota.threads_in_use}</strong> in use / <strong>{quota.thread_allowance}</strong> allowed
-            ({quota.threads_free} free). Concurrent jobs share this budget — extras stay queued until capacity frees.
+            ({quota.threads_free} free). One job runs at a time — extra jobs stay queued until it finishes.
           </p>
         ) : null}
         <div className="form-grid two">
@@ -454,7 +459,11 @@ export function JobsPage() {
                   <span className={`badge ${j.status === "completed" ? "ok" : j.status === "running" ? "warn" : j.status === "failed" ? "danger" : ""}`}>
                     {j.status}
                   </span>
-                  {j.waiting_for_threads ? (
+                  {j.blocking_job_label || j.blocking_job_public_id ? (
+                    <div className="muted" style={{ fontSize: "0.75rem" }}>
+                      1 job at a time — waiting for {j.blocking_job_label || j.blocking_job_public_id} to finish
+                    </div>
+                  ) : j.waiting_for_threads ? (
                     <div className="muted" style={{ fontSize: "0.75rem" }}>
                       waiting for free threads
                     </div>
@@ -611,8 +620,10 @@ export function JobsPage() {
           </h3>
           {editJob.status === "queued" ? (
             <p className="muted" style={{ margin: 0 }}>
-              Lower threads to fit free capacity ({quota?.threads_free ?? "—"} free of {quota?.thread_allowance ?? "—"}).
-              The job starts automatically when enough threads are available.
+              One job runs at a time. Threads must be ≤ your allowance (
+              {quota?.thread_allowance ?? "—"}). This job starts automatically when
+              your current running job finishes
+              {quota && quota.threads_free === 0 ? " (slot busy)" : ""}.
             </p>
           ) : (
             <p className="muted" style={{ margin: 0 }}>

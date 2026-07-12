@@ -63,9 +63,17 @@ async def _job_out(db: AsyncSession, j: Job, *, viewer: User | None = None) -> J
     exists, size = _result_meta(j)
     threads = jobs_svc.job_thread_count(j)
     waiting = False
+    blocking_public_id: str | None = None
+    blocking_label: str | None = None
     if j.status == "queued" and owner:
-        free = await jobs_svc.free_thread_slots(db, owner)
-        waiting = threads > free
+        blocker = await jobs_svc.owner_blocking_job(db, j.owner_id, exclude_job_id=j.id)
+        if blocker:
+            waiting = True
+            blocking_public_id = blocker.public_id
+            blocking_label = jobs_svc.job_display_label(blocker)
+        else:
+            free = await jobs_svc.free_thread_slots(db, owner)
+            waiting = threads > free
 
     chunks_pending = chunks_leased = chunks_done = None
     workers_out: list[JobWorkerLeaseOut] | None = None
@@ -138,6 +146,8 @@ async def _job_out(db: AsyncSession, j: Job, *, viewer: User | None = None) -> J
         finished_at=j.finished_at,
         pct=pct,
         waiting_for_threads=waiting,
+        blocking_job_public_id=blocking_public_id,
+        blocking_job_label=blocking_label,
         chunks_pending=chunks_pending,
         chunks_leased=chunks_leased,
         chunks_done=chunks_done,

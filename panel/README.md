@@ -108,8 +108,8 @@ Assign or change a subscription package from the Users table (**Assign package**
 
 - Upload keywords + locations → queued chunks leased by workers  
 - **Input validation before queue:** `.txt` / `.csv`, UTF-8, non-empty; one entry per line (`#` comments ignored). Optional CSV header columns: `keyword`/`query` (keywords) or `location` (locations). Invalid uploads return a clear error and **do not** create or lease a job. Telegram: `/formats` (also appended on `/help`).  
-- **Shared per-user thread pool:** sum of threads across running jobs ≤ plan/perm allowance; extras wait in queue  
-- Edit **queued** job threads/engine to fit free capacity (`PATCH /api/jobs/{id}`)  
+- **One job at a time per owner:** at most one `running` job (or job with leased chunks) per `owner_id`; extras stay `queued` until it completes/stops/fails. Thread allowance still caps threads on that single job.  
+- Edit **queued** job threads/engine (`PATCH /api/jobs/{id}`)  
 - Results stored under `results/user_{id}/{public_id}/`  
 - Progress, stop, download merged ZIP; admin storage / purge  
 - Ownership enforced (users never see others’ jobs)  

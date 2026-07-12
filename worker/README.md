@@ -454,7 +454,7 @@ Standalone engine CLI (`gmaps_scraper.py`) is separate — see [`SCRAPER.md`](SC
 5. Zips CSV parts → `POST /api/worker-api/upload`  
 6. `POST /api/worker-api/ack` — panel merges when all chunks complete → user ZIP (+ optional Telegram); agent retries on failure; ack is source of truth (clears live counters)  
 
-**Panel-side thread quota:** the panel only promotes a user’s queued job when the sum of that user’s running job threads stays within their plan allowance. Unassigned users share the worker pool; dedicated-worker packages may optionally pin workers.
+**Panel-side job concurrency:** the panel promotes at most **one job per owner** at a time (queued jobs wait until the running one finishes). That job’s `threads` must still fit the owner’s plan allowance. Unassigned users share the worker pool; dedicated-worker packages may optionally pin workers.
 
 Work directories are isolated per user: `work_root/user_{owner_id}/{job_id}/`.
 

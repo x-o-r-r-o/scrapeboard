@@ -520,7 +520,7 @@ See [Telegram Bot Builder](#telegram-bot-builder).
 1. Active subscription (or admin)  
 2. **Jobs → New job** → upload `keywords.txt` + `locations.txt`  
 3. Optional engine/threads (each job’s threads must be ≤ plan allowance)  
-4. **Shared thread pool:** concurrent jobs share your allowance. If you request more threads than are free, the job stays **queued** until capacity frees (or edit the queued job’s threads to fit).  
+4. **One job at a time:** only one job per owner runs; additional jobs stay **queued** until the running one finishes (completes / stops / fails). Thread allowance still caps threads on that single job.  
 5. Watch progress; **Stop** or wait for complete → **Download** ZIP  
 
 UI route map and API notes: [`panel/README.md`](panel/README.md).
@@ -703,16 +703,16 @@ Lease settings merge order for each chunk:
 - optional `engine`, `threads`, `scrape_websites`, `max_results`  
 
 `threads` for a single job cannot exceed the user’s allowance (`min(perms.max_threads, subscription.threads)`).  
-Across **all running jobs**, the sum of threads must stay ≤ that allowance. Extra jobs remain `queued` until free threads cover them.
+At most **one job per owner** may be `running` (or hold leased chunks) at a time. Extra jobs remain `queued` until that job finishes; workers then promote the next queued job in order.
 
 `GET /api/jobs/quota` → `{ thread_allowance, threads_in_use, threads_free }`  
-`PATCH /api/jobs/{id}` (queued only) → `{ threads?, engine? }` to lower threads so a waiting job can start.
+`PATCH /api/jobs/{id}` (queued only) → `{ threads?, engine? }` to adjust threads on a waiting job.
 
 ### Job statuses
 
 `queued` → `running` → `completed` | `stopped` | `failed`
 
-Queued jobs may show **waiting for free threads** when the owner’s pool is full.
+Queued jobs may show **1 job at a time — waiting for job X to finish** when another job for the same owner is active.
 
 ### Download
 

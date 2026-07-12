@@ -1063,13 +1063,20 @@ class TelegramBotRuntime:
         except (PermissionError, ValueError) as e:
             await self._send(token, chat_id, f"❌ {e}\nJob was not started. See /formats.")
             return
+        blocker = await jobs_svc.owner_blocking_job(db, user.id, exclude_job_id=job.id)
+        if blocker:
+            wait_note = (
+                f"1 job at a time — waiting for {jobs_svc.job_display_label(blocker)} to finish.\n"
+            )
+        else:
+            wait_note = "Workers will pick it up when a slot is free.\n"
         await self._send(
             token,
             chat_id,
             f"✅ Job queued: {jobs_svc.job_display_label(job)}\n"
             f"{job.total_searches:,} searches · {jobs_svc.job_thread_count(job)} threads.\n"
-            f"Threads are shared across your running jobs — this job starts when enough "
-            f"capacity is free (or lower threads with panel Edit). /status for progress.",
+            f"{wait_note}"
+            f"/status for progress.",
         )
 
     async def _status(self, db, token, chat_id, user) -> None:
@@ -1115,7 +1122,7 @@ class TelegramBotRuntime:
 
         lines: list[str] = ["📊 Your job status", ""]
         if active:
-            lines.append("▶ Currently running")
+            lines.append("▶ Active jobs (1 runs at a time)")
             for j in active:
                 done, rows, pct = await _progress(j)
                 lines.append(f"• {jobs_svc.job_display_label(j)}")
@@ -1124,11 +1131,18 @@ class TelegramBotRuntime:
                     f"  searches {done:,}/{j.total_searches:,} · "
                     f"rows {rows:,} · engine {_engine(j)}"
                 )
+                if j.status == "queued":
+                    blocker = await jobs_svc.owner_blocking_job(db, user.id, exclude_job_id=j.id)
+                    if blocker:
+                        lines.append(
+                            f"  ⏳ 1 job at a time — waiting for "
+                            f"{jobs_svc.job_display_label(blocker)} to finish"
+                        )
                 if j.started_at:
                     lines.append(f"  started {j.started_at.strftime('%Y-%m-%d %H:%M UTC')}")
             lines.append("")
         else:
-            lines.append("▶ Currently running")
+            lines.append("▶ Active jobs (1 runs at a time)")
             lines.append("• none — queue a job with /run")
             lines.append("")
 

@@ -626,6 +626,9 @@ class JobOut(BaseModel):
     finished_at: datetime | None
     pct: float = 0
     waiting_for_threads: bool = False
+    # When queued behind another active job (one-at-a-time policy)
+    blocking_job_public_id: str | None = None
+    blocking_job_label: str | None = None
     # Admin-only operational detail (omitted / empty for non-admins)
     chunks_pending: int | None = None
     chunks_leased: int | None = None

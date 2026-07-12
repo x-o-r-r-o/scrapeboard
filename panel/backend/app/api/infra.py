@@ -937,7 +937,7 @@ async def worker_lease(
                     continue
                 if status == "running" and not await _has_pending(cand.id):
                     continue
-                # Shared per-user thread quota: queued jobs wait until free threads cover them
+                # One active job per owner: queued jobs wait until the running one finishes
                 if status == "queued" and not await jobs_svc.can_start_job(db, cand):
                     continue
                 if cand.owner_id in busy_owners:
@@ -946,7 +946,7 @@ async def worker_lease(
                     primary.append(cand)
         for cand in primary + secondary:
             # Do not promote queued→running here — only after a chunk is claimed,
-            # so thread quota is not held without work.
+            # so the owner slot is not held without work.
             return cand
         return None
 
@@ -977,12 +977,13 @@ async def worker_lease(
     await db.refresh(job)
     if job.status == "stopped":
         return await _with_update({"chunk": None})
-    # Queued jobs must still fit thread quota at claim time
+    # Queued jobs: one-at-a-time per owner + thread allowance at claim time
     if job.status == "queued" and not await jobs_svc.can_start_job(db, job):
         return await _with_update({"chunk": None})
 
     # Atomic claim of one pending chunk. Different workers may hold different
-    # chunks of the same job at once — there is no global "one lease per job" lock.
+    # chunks of the *same* job at once — there is no global "one lease per job" lock.
+    # A second *job* for the same owner is never leased while can_start_job is false.
     # Only the pending→leased CAS below serializes contention on a single chunk row.
     claimed: JobChunk | None = None
     tried: set[int] = set()
@@ -1028,11 +1029,11 @@ async def worker_lease(
     if not claimed:
         return await _with_update({"chunk": None})
 
-    # Promote queued → running only after a successful claim (thread quota consumed now)
+    # Promote queued → running only after a successful claim (owner slot taken now)
     await db.refresh(job)
     if job.status == "queued":
         if not await jobs_svc.can_start_job(db, job):
-            # Lost race on quota — release the chunk and leave job queued
+            # Lost race (another job started) — release the chunk and leave job queued
             claimed.state = "pending"
             claimed.worker_id = None
             claimed.leased_at = None
@@ -1046,12 +1047,13 @@ async def worker_lease(
         job.settings = settings
         await db.commit()
         await db.refresh(job)
-        # Final oversubscribe check
+        # Final safety: demote if another owner job is active or threads oversubscribe
         owner = await db.get(User, job.owner_id)
         if owner:
+            blocker = await jobs_svc.owner_blocking_job(db, job.owner_id, exclude_job_id=job.id)
             used = await jobs_svc.sum_running_threads(db, job.owner_id)
             allowance = await jobs_svc.user_thread_allowance(db, owner)
-            if used > allowance:
+            if blocker or used > allowance:
                 job.status = "queued"
                 job.started_at = None
                 claimed.state = "pending"
