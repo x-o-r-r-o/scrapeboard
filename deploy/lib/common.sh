@@ -166,12 +166,65 @@ build_frontend() {
   cd "$FRONTEND_DIR"
   sudo -u "${SITE_USER}" /usr/local/bin/bun install
   sudo -u "${SITE_USER}" /usr/local/bin/bun run build
+  if [[ ! -f "${FRONTEND_DIR}/dist/index.html" ]]; then
+    echo "Frontend build failed: dist/index.html missing" >&2
+    exit 1
+  fi
 }
 
 publish_frontend() {
   echo "==> Publishing to ${PUBLIC_HTML} ..."
-  rsync -a --delete "${FRONTEND_DIR}/dist/" "${PUBLIC_HTML}/"
+  if [[ ! -f "${FRONTEND_DIR}/dist/index.html" ]]; then
+    echo "Nothing to publish: ${FRONTEND_DIR}/dist/index.html missing" >&2
+    exit 1
+  fi
+  # Ensure Apache SPA rewrite is present even if Vite public/ was empty
+  if [[ ! -f "${FRONTEND_DIR}/dist/.htaccess" ]] && [[ -f "${FRONTEND_DIR}/public/.htaccess" ]]; then
+    cp "${FRONTEND_DIR}/public/.htaccess" "${FRONTEND_DIR}/dist/.htaccess"
+  fi
+  rsync -a --delete \
+    --exclude '.htaccess' \
+    "${FRONTEND_DIR}/dist/" "${PUBLIC_HTML}/"
+  # Always keep SPA fallback files
+  if [[ -f "${FRONTEND_DIR}/dist/.htaccess" ]]; then
+    cp -f "${FRONTEND_DIR}/dist/.htaccess" "${PUBLIC_HTML}/.htaccess"
+  elif [[ -f "${FRONTEND_DIR}/public/.htaccess" ]]; then
+    cp -f "${FRONTEND_DIR}/public/.htaccess" "${PUBLIC_HTML}/.htaccess"
+  fi
   chown -R "${SITE_USER}:${SITE_USER}" "${PUBLIC_HTML}"
+  if [[ ! -f "${PUBLIC_HTML}/index.html" ]]; then
+    echo "Publish failed: ${PUBLIC_HTML}/index.html missing" >&2
+    exit 1
+  fi
+  echo "    Published index.html + assets to ${PUBLIC_HTML}"
+}
+
+install_spa_web_template() {
+  # Optional: Hestia nginx template with try_files → /index.html for React Router
+  echo "==> Ensuring scrapeboard SPA web template (if Hestia templates exist)..."
+  local dir ext src
+  for dir in \
+    /usr/local/hestia/data/templates/web/nginx \
+    /usr/local/hestia/data/templates/web/nginx/php-fpm
+  do
+    [[ -d "$dir" ]] || continue
+    for ext in tpl stpl; do
+      src="$dir/default.${ext}"
+      [[ -f "$src" ]] || continue
+      cp -f "$src" "$dir/scrapeboard.${ext}"
+      # Common Hestia try_files lines → SPA fallback
+      sed -i \
+        -e 's|try_files \$uri \$uri/ =404;|try_files $uri $uri/ /index.html;|g' \
+        -e 's|try_files \$uri \$uri/ /index.php?\$query_string;|try_files $uri $uri/ /index.html;|g' \
+        -e 's|try_files \$uri \$uri/ /index.php?\$args;|try_files $uri $uri/ /index.html;|g' \
+        "$dir/scrapeboard.${ext}" || true
+    done
+  done
+  # Apply template when the CLI supports it (ignore failures on mixed stacks)
+  if command -v v-change-web-domain-tpl >/dev/null 2>&1; then
+    v-change-web-domain-tpl "${SITE_USER}" "${DOMAIN}" scrapeboard 2>/dev/null \
+      || echo "    (hint) In HestiaCP → WEB → edit ${DOMAIN} → set Nginx template to scrapeboard"
+  fi
 }
 
 write_systemd() {
@@ -262,6 +315,7 @@ run_install() {
   publish_frontend
   write_systemd
   install_nginx_snippet
+  install_spa_web_template
   wait_health
   print_done
 }
@@ -280,6 +334,7 @@ run_update() {
   publish_frontend
   write_systemd
   install_nginx_snippet
+  install_spa_web_template
   wait_health
   echo "==> Update complete: https://${DOMAIN}"
 }

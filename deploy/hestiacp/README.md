@@ -289,11 +289,39 @@ Workers only process jobs created by **panel users** or **linked Telegram** acco
 
 ---
 
-## 9. Troubleshooting
+## 404 on /login (React Router)
+
+Hestia serves files from `public_html`. Paths like `/login` are not real files, so nginx/Apache must fall back to `index.html`.
+
+After pulling this fix:
+
+```bash
+cd /home/cvmso/apps/scrapeboard
+sudo -u cvmso git pull --ff-only
+bash deploy/hestiacp/update.sh
+```
+
+Then either:
+
+1. HestiaCP → **WEB** → edit `scrape.cvmso.com` → set **Nginx template** to `scrapeboard` → Save, or  
+2. Confirm the update script applied it via `v-change-web-domain-tpl`.
+
+Quick checks:
+
+```bash
+ls -la /home/cvmso/web/scrape.cvmso.com/public_html/index.html
+ls -la /home/cvmso/web/scrape.cvmso.com/public_html/.htaccess
+curl -sI https://scrape.cvmso.com/login | head -5
+# Expect HTTP/2 200 (not 404)
+curl -s http://127.0.0.1:3010/api/health
+```
+
+---
 
 | Problem | Commands / fix |
 |---------|----------------|
 | `dubious ownership` | `chown -R cvmso:cvmso /home/cvmso/apps/scrapeboard` then `git config --global --add safe.directory /home/cvmso/apps/scrapeboard` |
+| Blank SPA / 404 on `/login` | Rebuild frontend + SPA fallback: `bash deploy/hestiacp/update.sh`. Or HestiaCP → WEB → edit domain → Nginx template **scrapeboard**. Confirm `ls /home/cvmso/web/scrape.cvmso.com/public_html/index.html` |
 | Invalid first login | Password truncated at `#` in old unquoted `.env` → `bash deploy/hestiacp/reset_admin_password.sh 'NewPass'` |
 | 502 on `/api` | `systemctl status scrapeboard`; `journalctl -u scrapeboard -n 100 --no-pager` |
 | Blank SPA | `bash deploy/hestiacp/update.sh` |

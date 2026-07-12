@@ -14,5 +14,7 @@ location /api/ {
     proxy_cache off;
 }
 
-# React Router: serve index.html for unknown paths
-error_page 404 /index.html;
+# React Router SPA: /login, /app, etc. are not real files.
+# =200 serves index.html with HTTP 200 (plain "error_page 404 /index.html"
+# often still shows a 404 in browsers / Hestia defaults).
+error_page 404 =200 /index.html;
