@@ -168,11 +168,15 @@ Never commit `.env` or `panel/data/`.
 
 Preferred path — install once, keep running via systemd:
 
+**Full guide (every command):** [`../deploy/hestiacp/README.md`](../deploy/hestiacp/README.md)
+
 ```bash
 # on VPS as root, after code is in APP_DIR:
 bash deploy/hestiacp/install.sh
 # later:
 bash deploy/hestiacp/update.sh
+# if bootstrap login fails (old unquoted # password):
+bash deploy/hestiacp/reset_admin_password.sh 'NewPass'
 ```
 
 | Setting | Value |

@@ -230,6 +230,8 @@ More: [`worker/README.md`](worker/README.md) · [`panel/README.md`](panel/README
 
 Same pattern as OpsBoard: **static SPA in `public_html` + systemd API + nginx `/api` proxy**.
 
+**Full step-by-step with every command:** [`deploy/hestiacp/README.md`](deploy/hestiacp/README.md)
+
 ### Defaults
 
 | Setting | Value |
@@ -241,52 +243,33 @@ Same pattern as OpsBoard: **static SPA in `public_html` + systemd API + nginx `/
 | API bind | `127.0.0.1:3010` |
 | systemd unit | `scrapeboard.service` |
 
-### Part 1 — HestiaCP UI
-
-1. Log in to HestiaCP  
-2. **WEB → Add Web Domain** → `scrape.cvmso.com`  
-3. Enable **SSL / Let's Encrypt**  
-4. Wait until the certificate is valid  
-
-### Part 2 — Upload code
+### Quick install (as root on the VPS)
 
 ```bash
-ssh root@YOUR_SERVER_IP 'mkdir -p /home/cvmso/apps'
-rsync -az --delete \
-  --exclude node_modules --exclude .venv --exclude panel/data \
-  --exclude '__pycache__' --exclude .git --exclude dist \
-  ./ root@YOUR_SERVER_IP:/home/cvmso/apps/scrapeboard/
-```
+mkdir -p /home/cvmso/apps
+cd /home/cvmso/apps
+git clone https://github.com/x-o-r-r-o/scrapeboard.git scrapeboard
+chown -R cvmso:cvmso scrapeboard
+git config --global --add safe.directory /home/cvmso/apps/scrapeboard
 
-Or set `REPO_URL` in `deploy/config.env` and let `install.sh` `git clone`.
-
-### Part 3 — Install (once, as root)
-
-```bash
-ssh root@YOUR_SERVER_IP
-cd /home/cvmso/apps/scrapeboard
+cd scrapeboard
 cp deploy/config.env.example deploy/config.env
-# defaults already match cvmso / scrape.cvmso.com / 3010
-# set BOOTSTRAP_ADMIN_PASSWORD to a strong value
+nano deploy/config.env   # set BOOTSTRAP_ADMIN_PASSWORD (single-quoted)
 
 bash deploy/hestiacp/install.sh
 ```
 
-What the installer does:
+Then open **https://scrape.cvmso.com** → sign in → change password → enable 2FA.
 
-1. Installs system packages (Python, git, rsync, …)  
-2. Installs **Bun** (frontend build)  
-3. Creates Python venv + installs API requirements  
-4. Builds React → rsync into `public_html`  
-5. Writes `panel/backend/.env`  
-6. Enables and starts **systemd `scrapeboard`**  
-7. Installs nginx snippet `nginx.ssl.conf_scrapeboard`  
-8. Runs `v-rebuild-web-domain cvmso scrape.cvmso.com`  
-9. Health-checks `http://127.0.0.1:3010/api/health`  
+If login fails after an older install (password with `#` truncated):
 
-Open **https://scrape.cvmso.com** → sign in → change password → enable 2FA.
+```bash
+bash deploy/hestiacp/reset_admin_password.sh 'YourNewPassword'
+systemctl restart scrapeboard
+```
 
-Deep dive: [`deploy/hestiacp/README.md`](deploy/hestiacp/README.md).
+Deep dive (DNS, Hestia UI, rsync, update, nginx, workers, troubleshooting):  
+[`deploy/hestiacp/README.md`](deploy/hestiacp/README.md)
 
 ### Service commands
 
