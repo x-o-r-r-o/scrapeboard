@@ -4,7 +4,7 @@ Precedence when a worker leases a job chunk:
   1. Assigned scrape profile (or global default profile) — engine, delays, etc.
   2. Per-worker worker_config (Admin → Workers fine-tuning)
   3. Per-job settings (engine/threads/websites/max_results overrides)
-  4. Global captcha settings (Admin → Captcha) always win for captcha_* keys
+  4. Global 2captcha / CaptchaAI settings (Admin → 2captcha / CaptchaAI) always win for captcha_* keys
 
 WorkerNode.max_browsers caps concurrent job *instances* (leases), not threads
 inside a single user instance.

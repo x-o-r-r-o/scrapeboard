@@ -908,7 +908,7 @@ export function WorkersAdminPage() {
           <h1>Workers</h1>
           <p className="subtitle">
             Assign a proxy pool and scrape profile per worker. Fine-tune overrides merge on top of the profile for each
-            lease. Captcha solvers are global under Admin → Captcha.
+            lease. 2captcha / CaptchaAI solvers are global under Admin → 2captcha / CaptchaAI.
           </p>
         </div>
       </div>
@@ -1232,7 +1232,8 @@ export function ScrapeAdminPage() {
     <div className="stack">
       <h1>Scrape settings</h1>
       <p className="muted">
-        Legacy default-profile editor. Prefer Scrape profiles. Captcha solvers are under Admin → Captcha.
+        Legacy default-profile editor. Prefer Scrape profiles. 2captcha / CaptchaAI are under Admin →
+        2captcha / CaptchaAI.
       </p>
       <form className="card" onSubmit={save} style={{ display: "grid", gap: "0.65rem", gridTemplateColumns: "repeat(auto-fit,minmax(200px,1fr))" }}>
         {Object.keys(form).map((k) =>

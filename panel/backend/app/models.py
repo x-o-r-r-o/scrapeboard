@@ -84,7 +84,7 @@ class SecuritySettings(Base):
 
 
 class CaptchaSettings(Base):
-    """Global scrape captcha solvers (primary + backup). Used for all workers/jobs."""
+    """Global 2captcha / CaptchaAI solvers (primary + backup). Used for all workers/jobs."""
 
     __tablename__ = "captcha_settings"
 

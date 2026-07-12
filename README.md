@@ -86,6 +86,8 @@ There is **no public registration**. Admins create users. Support is via Telegra
 scrapeboard/
 ├── README.md                 ← this documentation
 ├── STRUCTURE.md
+├── install.py / install.sh / install.bat / install.command
+│                             ← **start here** — panel vs worker by OS
 ├── deploy/                   ← HestiaCP install / update
 │   ├── config.env.example
 │   ├── install.sh
@@ -171,7 +173,24 @@ scrapeboard/
 
 ## Run by default
 
-Operator path for a **fresh machine** and day-to-day use. Production panel = HestiaCP + systemd. Workers = **background service** (`install_service.*`) after the first-run wizard.
+**Start here on a fresh machine:**
+
+| OS | Command |
+|----|---------|
+| **macOS / Linux** | `./install.sh` (or `bash install.sh`) |
+| **macOS (Finder)** | Double-click `install.command` |
+| **Windows** | Double-click `install.bat` (or run it from cmd) |
+| **Any (Python)** | `python3 install.py` |
+
+The installer detects the OS, asks **control panel** or **worker**, then launches the right path:
+
+| Choice | Linux | macOS | Windows |
+|--------|-------|-------|---------|
+| **Control panel → production** | `deploy/hestiacp/install.sh` (HestiaCP; root) | Not available — use Linux/Hestia | Not available — use Linux/Hestia |
+| **Control panel → local** | `panel/run.sh --reload` + frontend steps | Same | Backend venv + uvicorn + frontend steps |
+| **Worker** | `worker/setup_and_run.sh` → optional `install_service.sh` | Same (or `.command`) | `worker/setup_and_run.bat` → optional `install_service.bat` |
+
+Production panel = HestiaCP + systemd (Linux only). Workers = **background service** (`install_service.*`) after the first-run wizard.
 
 ### Prerequisites
 
@@ -184,15 +203,17 @@ Operator path for a **fresh machine** and day-to-day use. Production panel = Hes
 
 ### Default operational workflow
 
-1. **Deploy or start panel** (Hestia prod, or local API + UI below).  
+1. **`./install.sh` / `install.bat`** → control panel (Hestia prod, or local API + UI) **or** worker.  
 2. Admin: password + 2FA → packages / billing → proxy pools → **Workers → Create** → **copy token once**.  
 3. Optional: **Bot Builder** → BotFather token → **Install / refresh demos**.  
-4. On each scrape machine: `setup_and_run.*` → wizard (panel URL + token) → **`install_service.*`** (recommended).  
+4. On each scrape machine: installer → worker (or `setup_and_run.*`) → wizard → **`install_service.*`** (recommended).  
 5. Admin creates users (optional Telegram ID); grant package / user buys via Telegram.  
 6. User runs jobs in **Telegram** (`/run`) or **panel Jobs**; admin monitors workers/jobs in the panel.  
 7. User **`/stop`** (or panel Stop) to cancel; results ZIP via panel / optional Telegram delivery.
 
 ### A. Production panel (HestiaCP) — default for scrape.cvmso.com
+
+On a Hestia Linux host you can also run `./install.sh` → **Control panel** → **Production**.
 
 ```bash
 # as root on the VPS
@@ -206,6 +227,7 @@ cp deploy/config.env.example deploy/config.env
 nano deploy/config.env   # BOOTSTRAP_ADMIN_PASSWORD='…' (single-quoted)
 
 bash deploy/hestiacp/install.sh
+# or: ./install.sh  → Control panel → Production
 ```
 
 Then open **https://scrape.cvmso.com** → sign in → change password → enable 2FA.
@@ -261,6 +283,8 @@ npm run dev          # http://127.0.0.1:5173  (proxies /api → :3010)
 Production UI is a static build into Hestia `public_html` (not `npm run dev`).
 
 ### C. Worker (default: background service)
+
+Preferred: from repo root run `./install.sh` / `install.bat` → **Worker**.
 
 1. Panel → **Admin → Workers → Create** → set max browsers / proxy pool → **copy token once**.  
 2. First run on the scrape machine:
@@ -440,10 +464,10 @@ python agent.py --panel-url https://scrape.cvmso.com --token TOKEN
 #   Windows:     install_service.bat
 ```
 
-### 6. Scrape profiles & Captcha (Admin)
+### 6. Scrape profiles & 2captcha / CaptchaAI (Admin)
 
 - **Scrape profiles** — engine, threads, delays, chunk size, headless, etc. Assign to workers and packages.  
-- **Captcha** — global primary + backup solvers (2captcha / CaptchaAI). Applied to all job leases.  
+- **2captcha / CaptchaAI** — global primary + backup solvers. Applied to all job leases.  
 
 ### 7. Bot Builder (Admin → Bot builder)
 

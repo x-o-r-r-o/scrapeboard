@@ -18,11 +18,12 @@ Production install — see [`../deploy/hestiacp/README.md`](../deploy/hestiacp/R
 
 ## Run by default
 
-Full stack path (panel + worker + Telegram ops): **[root README → Run by default](../README.md#run-by-default)**.
+Full stack path (panel + worker + Telegram ops): **[root README → Run by default](../README.md#run-by-default)** — start with `./install.sh` / `install.bat`.
 
 | Mode | How |
 |------|-----|
-| **Production** | `bash deploy/hestiacp/install.sh` → systemd `scrapeboard` |
+| **Installer** | Repo root `./install.sh` / `install.bat` → Control panel |
+| **Production** | `bash deploy/hestiacp/install.sh` → systemd `scrapeboard` (Linux + Hestia only) |
 | **Local API** | `bash panel/run.sh --reload` (or manual venv + uvicorn `:3010`) |
 | **Local UI** | `cd panel/frontend && npm install && npm run dev` |
 | **Telegram** | Starts with the API process once Bot Builder has a token + enabled |

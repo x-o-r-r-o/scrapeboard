@@ -11,7 +11,7 @@ Production panel URL: **`https://scrape.cvmso.com`**
 ## Run by default
 
 1. Panel → **Admin → Workers → Create** → **copy token once**.  
-2. First run: `setup_and_run.bat` / `.sh` / `.command` (wizard → `worker_config.json`).  
+2. First run: from repo root `./install.sh` / `install.bat` → **Worker**, or `setup_and_run.bat` / `.sh` / `.command` (wizard → `worker_config.json`).  
 3. **Install background service** (recommended): `install_service.bat` / `bash install_service.sh`.  
 4. Leave it running; it heartbeats and leases jobs from the panel.
 

@@ -142,8 +142,8 @@ export function ScrapeAdminPage() {
         <div>
           <h1>Scrape profiles</h1>
           <p className="subtitle">
-            Browser, pacing, and scrape flags per package or worker. Captcha solvers are configured once under{" "}
-            <Link to="/app/admin/captcha">Captcha</Link>.
+            Browser, pacing, and scrape flags per package or worker. 2captcha / CaptchaAI are configured once
+            under <Link to="/app/admin/captcha">2captcha / CaptchaAI</Link>.
           </p>
         </div>
         <div className="page-actions">

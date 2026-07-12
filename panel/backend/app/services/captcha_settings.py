@@ -1,4 +1,4 @@
-"""Global captcha settings (singleton) + one-time migrate from scrape profiles."""
+"""Global 2captcha / CaptchaAI settings (singleton) + one-time migrate from scrape profiles."""
 
 from __future__ import annotations
 

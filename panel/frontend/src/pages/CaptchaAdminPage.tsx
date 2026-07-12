@@ -14,7 +14,12 @@ type CaptchaForm = {
   captcha_backup_key_configured?: boolean;
 };
 
-const CAPTCHA = ["none", "2captcha", "captchaai"];
+/** Provider ids accepted by the API / worker (2captcha-compatible APIs only). */
+const CAPTCHA: { value: string; label: string }[] = [
+  { value: "none", label: "none" },
+  { value: "2captcha", label: "2captcha" },
+  { value: "captchaai", label: "CaptchaAI" },
+];
 
 const emptyForm = (): CaptchaForm => ({
   captcha_provider: "none",
@@ -77,7 +82,7 @@ export function CaptchaAdminPage() {
         captcha_key_configured: saved.captcha_key_configured,
         captcha_backup_key_configured: saved.captcha_backup_key_configured,
       });
-      setMsg("Saved. These solvers apply to all scrape jobs and workers.");
+      setMsg("Saved. 2captcha / CaptchaAI settings apply to all scrape jobs and workers.");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Save failed");
     }
@@ -87,9 +92,10 @@ export function CaptchaAdminPage() {
     <div className="stack">
       <div className="page-header">
         <div>
-          <h1>Captcha</h1>
+          <h1>2captcha / CaptchaAI</h1>
           <p className="subtitle">
-            Global scrape captcha solvers (primary + backup). Configured once for all profiles and workers.
+            Global scrape solvers (primary + backup). Set once here — injected into every job lease; not
+            configured per scrape profile.
           </p>
         </div>
       </div>
@@ -99,7 +105,9 @@ export function CaptchaAdminPage() {
 
       <form className="card" onSubmit={save} style={{ display: "grid", gap: "0.85rem", maxWidth: 640 }}>
         <p className="muted" style={{ margin: 0 }}>
-          If both primary and backup are configured, backup is used when primary fails. Login reCAPTCHA is
+          Typical setup: primary <code>2captcha</code>, backup <code>captchaai</code> (or the reverse). Backup
+          runs only if primary fails. Leave host blank for defaults (
+          <code>https://2captcha.com</code> / <code>https://ocr.captchaai.com</code>). Login reCAPTCHA is
           separate under Security.
         </p>
         <div className="form-grid two">
@@ -111,8 +119,8 @@ export function CaptchaAdminPage() {
               onChange={(e) => setForm({ ...form, captcha_provider: e.target.value })}
             >
               {CAPTCHA.map((x) => (
-                <option key={x} value={x}>
-                  {x}
+                <option key={x.value} value={x.value}>
+                  {x.label}
                 </option>
               ))}
             </select>
@@ -133,10 +141,11 @@ export function CaptchaAdminPage() {
               className="input"
               value={form.captcha_host}
               onChange={(e) => setForm({ ...form, captcha_host: e.target.value })}
+              placeholder="optional"
             />
           </label>
           <label className="field">
-            Captcha retries
+            Solver retries
             <input
               className="input"
               type="number"
@@ -153,8 +162,8 @@ export function CaptchaAdminPage() {
               onChange={(e) => setForm({ ...form, captcha_backup_provider: e.target.value })}
             >
               {CAPTCHA.map((x) => (
-                <option key={x} value={x}>
-                  {x}
+                <option key={x.value} value={x.value}>
+                  {x.label}
                 </option>
               ))}
             </select>
@@ -175,6 +184,7 @@ export function CaptchaAdminPage() {
               className="input"
               value={form.captcha_backup_host}
               onChange={(e) => setForm({ ...form, captcha_backup_host: e.target.value })}
+              placeholder="optional"
             />
           </label>
         </div>

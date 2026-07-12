@@ -10,4 +10,4 @@
 
 **Workers:** `setup_and_run.*` → wizard → **`install_service.*`** (default background service) → panel URL `https://scrape.cvmso.com`. Optional Tailscale via wizard / `tailscale_enabled` in `worker_config.json` (default off).
 
-**Run everything:** [README.md → Run by default](README.md#run-by-default).
+**Start here:** `./install.sh` / `install.bat` / `python3 install.py` (panel vs worker by OS) — [README.md → Run by default](README.md#run-by-default).
