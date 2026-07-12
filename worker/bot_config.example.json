@@ -1,0 +1,23 @@
+{
+  "token": "PUT-YOUR-BOTFATHER-TOKEN-HERE",
+  "allowed_users": [123456789],
+  "notify_interval_sec": 300,
+  "scrape": {
+    "engine": "chrome",
+    "threads": 2,
+    "block_resources": "media",
+    "proxies": "proxies.txt",
+    "locations": "locations.txt",
+    "keywords": "keywords.txt",
+    "output_dir": "results",
+    "scrape_websites": "yes",
+    "max_results": 0,
+    "proxy_attempts": 3,
+    "nav_timeout": 45,
+    "min_delay": 2,
+    "max_delay": 5,
+    "cooldown_every": 25,
+    "captcha_provider": "none",
+    "captcha_key": ""
+  }
+}

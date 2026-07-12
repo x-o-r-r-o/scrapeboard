@@ -1,0 +1,129 @@
+:root {
+  --bg: #0f1419;
+  --bg2: #182028;
+  --panel: #1c2730;
+  --line: #2a3a46;
+  --text: #e8eef2;
+  --muted: #8aa0ad;
+  --accent: #3db8a0;
+  --accent2: #2a8f7c;
+  --danger: #e06c75;
+  --warn: #e5c07b;
+  --radius: 10px;
+  --font: "IBM Plex Sans", "Segoe UI", sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, monospace;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  margin: 0;
+  min-height: 100%;
+}
+
+body {
+  font-family: var(--font);
+  background:
+    radial-gradient(1200px 600px at 10% -10%, #1a3a36 0%, transparent 55%),
+    radial-gradient(900px 500px at 100% 0%, #243044 0%, transparent 50%),
+    var(--bg);
+  color: var(--text);
+}
+
+a {
+  color: var(--accent);
+  text-decoration: none;
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+}
+
+.btn {
+  border: 0;
+  border-radius: 8px;
+  padding: 0.65rem 1rem;
+  background: var(--accent);
+  color: #06221c;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.btn:hover {
+  background: #4ecfb5;
+}
+
+.btn.secondary {
+  background: transparent;
+  color: var(--text);
+  border: 1px solid var(--line);
+}
+
+.btn.danger {
+  background: var(--danger);
+  color: #1a0a0c;
+}
+
+.input {
+  width: 100%;
+  padding: 0.7rem 0.85rem;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  background: var(--bg2);
+  color: var(--text);
+}
+
+.card {
+  background: color-mix(in srgb, var(--panel) 92%, transparent);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 1.25rem;
+}
+
+.muted {
+  color: var(--muted);
+}
+
+.error {
+  color: var(--danger);
+  font-size: 0.9rem;
+}
+
+.table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.table th,
+.table td {
+  text-align: left;
+  padding: 0.65rem 0.5rem;
+  border-bottom: 1px solid var(--line);
+  font-size: 0.92rem;
+}
+
+.badge {
+  display: inline-block;
+  padding: 0.15rem 0.5rem;
+  border-radius: 999px;
+  font-size: 0.75rem;
+  background: #24353f;
+  color: var(--muted);
+}
+
+.badge.ok {
+  background: #1d3d35;
+  color: #7ddec8;
+}
+
+.badge.warn {
+  background: #3d3420;
+  color: var(--warn);
+}

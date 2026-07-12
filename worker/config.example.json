@@ -1,0 +1,60 @@
+{
+  "role": "coordinator+worker",
+  "telegram": {
+    "token": "PUT-YOUR-BOTFATHER-TOKEN-HERE",
+    "notify_interval_sec": 300
+  },
+  "cluster": {
+    "secret": "CHANGE-ME-shared-secret",
+    "bind_host": "0.0.0.0",
+    "bind_port": 8787,
+    "coordinator_url": "http://100.x.y.z:8787",
+    "worker_name": "server-1",
+    "lease_timeout_sec": 120
+  },
+  "chunk_size": 500,
+  "users": {
+    "123456789": { "role": "admin", "perms": {} },
+    "222222222": { "role": "user", "perms": { "can_run": true, "can_stop": false, "can_upload_inputs": true, "max_threads": 2, "allowed_engines": ["chrome"] } }
+  },
+  "scrape": {
+    "engine": "chrome",
+    "threads": 2,
+    "block_resources": "media",
+    "proxies": "proxies.txt",
+    "locations": "locations.txt",
+    "keywords": "keywords.txt",
+    "output_dir": "results",
+    "scrape_websites": "yes",
+    "max_results": 0,
+    "captcha_provider": "none",
+    "captcha_key": ""
+  },
+
+  "billing": {
+    "enabled": false,
+    "usdt": {
+      "enabled": false,
+      "network": "trc20",
+      "wallet_address": "YOUR-TRON-USDT-RECEIVING-ADDRESS",
+      "contract": "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t",
+      "api_base": "https://apilist.tronscanapi.com",
+      "api_key": ""
+    },
+    "manual": {
+      "enabled": false,
+      "methods": [
+        { "name": "Bank Transfer", "details": "Bank: X, IBAN: YY, Ref: your Telegram id" }
+      ]
+    },
+    "upload": { "allowed_extensions": [".txt", ".csv"], "max_upload_mb": 5 },
+
+    "packages": [
+      { "id": "basic", "name": "Basic", "tier": 1, "price_usdt": 10, "duration_days": 30, "threads": 2, "max_upload_mb": 2 },
+      { "id": "pro",   "name": "Pro",   "tier": 2, "price_usdt": 25, "duration_days": 30, "threads": 5, "max_upload_mb": 10 },
+      { "id": "max",   "name": "Max",   "tier": 3, "price_usdt": 60, "duration_days": 30, "threads": 12, "max_upload_mb": 50 }
+    ],
+
+    "used_txids": []
+  }
+}

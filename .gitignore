@@ -1,0 +1,25 @@
+# Scrapeboard — git ignore
+
+.DS_Store
+.env
+.env.*
+!.env.example
+deploy/config.env
+**/__pycache__/
+**/*.pyc
+**/.venv/
+**/node_modules/
+**/dist/
+panel/data/
+**/*.db
+**/*.db-*
+worker/logs/
+worker/results/
+worker/test_out/
+worker/test_results.csv
+worker/.setup_*_done
+.idea/
+.vscode/
+*.log
+.coverage
+htmlcov/

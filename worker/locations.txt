@@ -1,0 +1,4 @@
+# One location per line as: city,state,country
+Austin,Texas,USA
+Miami,Florida,USA
+Manchester,England,UK

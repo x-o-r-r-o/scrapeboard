@@ -1,0 +1,4 @@
+# One search keyword per line. Each keyword is searched in every location.
+dentist
+plumber
+coffee shop

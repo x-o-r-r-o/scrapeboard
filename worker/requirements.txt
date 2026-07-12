@@ -1,0 +1,8 @@
+playwright>=1.44.0
+camoufox[geoip]>=0.4.0
+requests>=2.31.0
+psutil>=5.9.0            # thorough browser/child-process cleanup on shutdown
+# After installing, download a browser engine:
+#   python -m playwright install chromium && python -m playwright install-deps
+#   python -m camoufox fetch
+# Optional, for --headed on a VPS: apt-get install -y xvfb  (then use xvfb-run)
