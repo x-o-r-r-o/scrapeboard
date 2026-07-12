@@ -66,6 +66,12 @@ ensure_bun() {
 sync_repo() {
   echo "==> App directory: $APP_DIR"
   mkdir -p "$(dirname "$APP_DIR")"
+  # Avoid "dubious ownership" when root runs install but files are owned by SITE_USER (or vice versa)
+  if [[ -d "$APP_DIR" ]]; then
+    chown -R "${SITE_USER}:${SITE_USER}" "$APP_DIR" || true
+  fi
+  git config --global --add safe.directory "$APP_DIR" 2>/dev/null || true
+
   if [[ -n "$REPO_URL" ]]; then
     if [[ ! -d "$APP_DIR/.git" ]]; then
       sudo -u "${SITE_USER}" git clone "$REPO_URL" "$APP_DIR"
