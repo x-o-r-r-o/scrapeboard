@@ -117,7 +117,7 @@ panel/
 | `/login` | public | Sign in |
 | `/setup/password` | new user | Force password change |
 | `/setup/2fa` | new user | Enable TOTP |
-| `/app` | user/admin | Dashboard |
+| `/app` | user/admin | Dashboard (live fleet / jobs / platform stats) |
 | `/app/jobs` | user/admin | Create / monitor / download jobs |
 | `/app/subscription` | user/admin | Buy / paid / current plan |
 | `/app/admin/users` | admin | Create & manage users |
@@ -298,6 +298,7 @@ GET  /api/health
 /api/settings/security
 /api/bot/*
 /api/jobs
+/api/stats/live
 ```
 
 ### Worker protocol

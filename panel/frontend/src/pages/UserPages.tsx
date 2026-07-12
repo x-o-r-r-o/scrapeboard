@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import type { FormEvent } from "react";
-import { useOutletContext } from "react-router-dom";
+import { Link, useOutletContext } from "react-router-dom";
 import { api, type User } from "../api";
 
 type Job = {
@@ -645,6 +645,9 @@ type LiveWorker = {
   name: string;
   status: string;
   online: boolean;
+  is_enabled: boolean;
+  is_draining: boolean;
+  last_seen_at: string | null;
   cpu_percent: number;
   mem_percent: number;
   disk_percent: number;
@@ -653,12 +656,16 @@ type LiveWorker = {
   disk_used_gb: number;
   disk_total_gb: number;
   load_avg_1: number;
+  load_avg_5?: number;
+  load_avg_15?: number;
   host_os: string;
   hostname: string;
   version: string;
   max_browsers: number;
   active_leases: number;
   load_ratio: number;
+  proxy_pool_id?: number | null;
+  has_proxy_pool?: boolean;
 };
 
 type LiveUser = {
@@ -669,20 +676,77 @@ type LiveUser = {
   jobs_queued: number;
   jobs_running: number;
   jobs_completed: number;
+  jobs_failed?: number;
+  jobs_stopped?: number;
   rows_saved_total: number;
   rows_saved_today: number;
   subscription: string | null;
   subscription_days_left: number | null;
+  thread_allowance?: number;
+  threads_in_use?: number;
+  threads_free?: number;
+  dedicated_worker_count?: number;
+};
+
+type LiveRecentJob = {
+  id: number;
+  public_id: string;
+  owner_id: number;
+  owner_username: string | null;
+  status: string;
+  rows_saved: number;
+  total_searches: number;
+  done_searches: number;
+  error: string | null;
+  created_at: string | null;
+  started_at: string | null;
+  finished_at: string | null;
+  chunks_pending: number;
+  chunks_leased: number;
+  chunks_done: number;
+};
+
+type LiveSystem = {
+  packages_total: number;
+  packages_active: number;
+  packages_dedicated: number;
+  subscriptions_active: number;
+  orders_pending: number;
+  users_total: number;
+  users_active: number;
+  users_with_dedicated_workers: number;
+  proxy_pools_total: number;
+  proxy_pools_active: number;
+  proxies_total: number;
+  workers_without_pool: number;
+  scrape_profiles: number;
+  captcha_configured: boolean;
+  captcha_provider: string;
+  captcha_backup_provider: string;
+  bot_enabled: boolean;
+  bot_username: string;
+  bot_token_configured: boolean;
+  bot_commands: number;
+  bot_workflows: number;
 };
 
 type LiveStats = {
   generated_at: string;
   scope: string;
+  quota: {
+    thread_allowance: number;
+    threads_in_use: number;
+    threads_free: number;
+  };
   overview: {
     workers_total: number;
     workers_online: number;
     workers_busy: number;
     workers_offline: number;
+    workers_draining?: number;
+    workers_disabled?: number;
+    capacity_total?: number;
+    capacity_used?: number;
     avg_cpu: number;
     avg_mem: number;
     avg_disk: number;
@@ -691,14 +755,45 @@ type LiveStats = {
     jobs_running: number;
     jobs_completed: number;
     jobs_failed: number;
+    jobs_stopped?: number;
     jobs_finished_today: number;
     rows_saved_today: number;
+    chunks_pending?: number;
+    chunks_leased?: number;
+    chunks_done?: number;
     users_total: number;
     users_with_running_jobs: number;
+    subscriptions_active?: number;
   };
+  system: LiveSystem | null;
+  recent_jobs: LiveRecentJob[];
   workers: LiveWorker[];
   users: LiveUser[];
 };
+
+function relativeTime(iso: string | null | undefined): string {
+  if (!iso) return "—";
+  const ms = Date.now() - new Date(iso).getTime();
+  if (!Number.isFinite(ms)) return "—";
+  const sec = Math.max(0, Math.floor(ms / 1000));
+  if (sec < 5) return "just now";
+  if (sec < 60) return `${sec}s ago`;
+  if (sec < 3600) return `${Math.floor(sec / 60)}m ago`;
+  if (sec < 86400) return `${Math.floor(sec / 3600)}h ago`;
+  return `${Math.floor(sec / 86400)}d ago`;
+}
+
+function jobStatusBadge(status: string) {
+  const cls =
+    status === "running" || status === "completed"
+      ? "ok"
+      : status === "queued"
+        ? "warn"
+        : status === "failed"
+          ? "danger"
+          : "";
+  return <span className={`badge ${cls}`}>{status}</span>;
+}
 
 function Meter({ label, value, detail }: { label: string; value: number; detail?: string }) {
   const pct = Math.max(0, Math.min(100, Number.isFinite(value) ? value : 0));
@@ -737,6 +832,7 @@ export function DashboardPage() {
   const [live, setLive] = useState<LiveStats | null>(null);
   const [sub, setSub] = useState<Sub>(null);
   const [error, setError] = useState("");
+  const isAdmin = user.role === "admin";
 
   useEffect(() => {
     let cancelled = false;
@@ -761,6 +857,13 @@ export function DashboardPage() {
   }, []);
 
   const o = live?.overview;
+  const q = live?.quota;
+  const sys = live?.system;
+  const capacityTotal = o?.capacity_total ?? 0;
+  const capacityUsed = o?.capacity_used ?? o?.active_leases ?? 0;
+  const capacityPct = capacityTotal > 0 ? (capacityUsed / capacityTotal) * 100 : 0;
+  const threadPct =
+    q && q.thread_allowance > 0 ? (q.threads_in_use / q.thread_allowance) * 100 : 0;
 
   return (
     <div className="stack">
@@ -768,7 +871,7 @@ export function DashboardPage() {
         <div>
           <h1>Dashboard</h1>
           <p className="subtitle">
-            Live stats · {user.role === "admin" ? "fleet + all users" : "your account"}
+            Live stats · {isAdmin ? "fleet + platform" : "your account"}
             {live?.generated_at ? ` · updated ${new Date(live.generated_at).toLocaleTimeString()}` : ""}
           </p>
         </div>
@@ -786,22 +889,73 @@ export function DashboardPage() {
           ) : (
             <p className="muted">No active subscription</p>
           )}
+          {isAdmin && o ? (
+            <p className="muted" style={{ marginBottom: 0 }}>
+              {o.subscriptions_active ?? 0} active subscriptions platform-wide
+            </p>
+          ) : null}
+        </div>
+        <div className="card">
+          <h3 style={{ margin: 0 }}>Thread pool</h3>
+          <p className="stat-xl">
+            {q ? q.threads_in_use : "—"}
+            <span className="muted"> / {q ? q.thread_allowance : "—"}</span>
+          </p>
+          <Meter label="" value={threadPct} detail={q ? `${q.threads_free} free` : undefined} />
         </div>
         <div className="card">
           <h3 style={{ margin: 0 }}>Jobs now</h3>
           <p className="stat-xl">
             {o ? o.jobs_running : "—"} <span className="muted">running</span>
           </p>
-          <p className="muted">{o ? `${o.jobs_queued} queued · ${o.jobs_finished_today} finished today` : "…"}</p>
-        </div>
-        <div className="card">
-          <h3 style={{ margin: 0 }}>Rows today</h3>
-          <p className="stat-xl">{o ? o.rows_saved_today.toLocaleString() : "—"}</p>
-          <p className="muted">{o ? `${o.jobs_completed} completed · ${o.jobs_failed} failed` : "…"}</p>
+          <p className="muted">
+            {o
+              ? `${o.jobs_queued} queued · ${o.jobs_stopped ?? 0} stopped · ${o.jobs_finished_today} finished today`
+              : "…"}
+          </p>
         </div>
       </div>
 
-      {user.role === "admin" && o ? (
+      <div className="grid-cards cols-3">
+        <div className="card">
+          <h3 style={{ margin: 0 }}>Rows today</h3>
+          <p className="stat-xl">{o ? o.rows_saved_today.toLocaleString() : "—"}</p>
+          <p className="muted">
+            {o ? `${o.jobs_completed} completed · ${o.jobs_failed} failed · ${o.jobs_stopped ?? 0} stopped` : "…"}
+          </p>
+        </div>
+        <div className="card">
+          <h3 style={{ margin: 0 }}>Chunks in flight</h3>
+          <p className="stat-xl">
+            {o ? (o.chunks_leased ?? 0) : "—"} <span className="muted">leased</span>
+          </p>
+          <p className="muted">
+            {o ? `${o.chunks_pending ?? 0} pending · ${(o.chunks_done ?? 0).toLocaleString()} done` : "…"}
+          </p>
+        </div>
+        {isAdmin && o ? (
+          <div className="card">
+            <h3 style={{ margin: 0 }}>Users</h3>
+            <p className="stat-xl">
+              {o.users_with_running_jobs}/{o.users_total} <span className="muted">active jobs</span>
+            </p>
+            <p className="muted">
+              {sys ? `${sys.users_active} accounts enabled · ${sys.users_with_dedicated_workers} dedicated pins` : "…"}
+            </p>
+          </div>
+        ) : (
+          <div className="card">
+            <h3 style={{ margin: 0 }}>Activity</h3>
+            <p className="muted" style={{ marginBottom: 0 }}>
+              {o
+                ? `${o.jobs_completed + (o.jobs_failed || 0) + (o.jobs_stopped ?? 0)} finished jobs all-time · storage on Jobs page`
+                : "…"}
+            </p>
+          </div>
+        )}
+      </div>
+
+      {isAdmin && o ? (
         <div className="grid-cards cols-3">
           <div className="card">
             <h3 style={{ margin: 0 }}>Workers</h3>
@@ -809,8 +963,14 @@ export function DashboardPage() {
               {o.workers_online}/{o.workers_total} <span className="muted">online</span>
             </p>
             <p className="muted">
-              {o.workers_busy} busy · {o.active_leases} leases · {o.workers_offline} offline
+              {o.workers_busy} busy · {o.workers_draining ?? 0} draining · {o.workers_disabled ?? 0} disabled ·{" "}
+              {o.workers_offline} offline
             </p>
+            <Meter
+              label="Capacity"
+              value={capacityPct}
+              detail={`${capacityUsed}/${capacityTotal} leases`}
+            />
           </div>
           <div className="card">
             <h3 style={{ margin: 0 }}>Fleet load</h3>
@@ -819,16 +979,59 @@ export function DashboardPage() {
             <Meter label="Disk avg" value={o.avg_disk} />
           </div>
           <div className="card">
-            <h3 style={{ margin: 0 }}>Users</h3>
-            <p className="stat-xl">
-              {o.users_with_running_jobs}/{o.users_total} <span className="muted">active</span>
-            </p>
-            <p className="muted">Users with at least one running job</p>
+            <h3 style={{ margin: 0 }}>Platform</h3>
+            {sys ? (
+              <>
+                <p style={{ margin: "0.35rem 0" }}>
+                  Captcha{" "}
+                  {sys.captcha_configured ? (
+                    <span className="badge ok">
+                      {sys.captcha_provider}
+                      {sys.captcha_backup_provider !== "none" ? ` + ${sys.captcha_backup_provider}` : ""}
+                    </span>
+                  ) : (
+                    <span className="badge warn">not configured</span>
+                  )}
+                  {" · "}
+                  <Link to="/app/admin/captcha">settings</Link>
+                </p>
+                <p style={{ margin: "0.35rem 0" }}>
+                  Bot{" "}
+                  {sys.bot_enabled ? (
+                    <span className="badge ok">{sys.bot_username ? `@${sys.bot_username}` : "enabled"}</span>
+                  ) : (
+                    <span className="badge">off</span>
+                  )}
+                  {!sys.bot_token_configured ? <span className="muted"> · no token</span> : null}
+                  {" · "}
+                  {sys.bot_commands} cmds · {sys.bot_workflows} workflows · <Link to="/app/admin/bot">builder</Link>
+                </p>
+                <p className="muted" style={{ marginBottom: 0 }}>
+                  {sys.packages_active}/{sys.packages_total} packages
+                  {sys.packages_dedicated ? ` · ${sys.packages_dedicated} dedicated` : ""}
+                  {" · "}
+                  {sys.proxy_pools_active} pools / {sys.proxies_total} proxies
+                  {sys.workers_without_pool ? ` · ${sys.workers_without_pool} workers no pool` : ""}
+                  {" · "}
+                  {sys.scrape_profiles} profiles
+                  {sys.orders_pending ? (
+                    <>
+                      {" · "}
+                      <Link to="/app/admin/billing">{sys.orders_pending} pending orders</Link>
+                    </>
+                  ) : (
+                    " · no pending orders"
+                  )}
+                </p>
+              </>
+            ) : (
+              <p className="muted">…</p>
+            )}
           </div>
         </div>
       ) : null}
 
-      {user.role === "admin" && live && live.workers.length > 0 ? (
+      {isAdmin && live && live.workers.length > 0 ? (
         <div className="card">
           <h3 style={{ marginTop: 0 }}>Workers — live</h3>
           <div className="table-wrap">
@@ -837,6 +1040,7 @@ export function DashboardPage() {
                 <tr>
                   <th>Worker</th>
                   <th>Status</th>
+                  <th>Last seen</th>
                   <th>Load</th>
                   <th>CPU</th>
                   <th>RAM</th>
@@ -851,9 +1055,15 @@ export function DashboardPage() {
                       <strong>{w.name}</strong>
                       <div className="muted" style={{ fontSize: "0.8rem" }}>
                         v{w.version || "—"}
+                        {w.has_proxy_pool === false ? " · no proxy pool" : ""}
                       </div>
                     </td>
                     <td>{statusBadge(w.status)}</td>
+                    <td>
+                      <span className="muted" style={{ fontSize: "0.85rem" }}>
+                        {relativeTime(w.last_seen_at)}
+                      </span>
+                    </td>
                     <td>
                       {w.active_leases}/{w.max_browsers}
                       <div className="meter" style={{ marginTop: 4 }}>
@@ -866,7 +1076,15 @@ export function DashboardPage() {
                       </div>
                     </td>
                     <td>
-                      <Meter label="" value={w.cpu_percent} detail={w.load_avg_1 ? `load ${w.load_avg_1}` : undefined} />
+                      <Meter
+                        label=""
+                        value={w.cpu_percent}
+                        detail={
+                          w.load_avg_1
+                            ? `load ${w.load_avg_1}${w.load_avg_5 != null ? ` / ${w.load_avg_5}` : ""}`
+                            : undefined
+                        }
+                      />
                     </td>
                     <td>
                       <Meter
@@ -898,16 +1116,17 @@ export function DashboardPage() {
 
       {live && live.users.length > 0 ? (
         <div className="card">
-          <h3 style={{ marginTop: 0 }}>{user.role === "admin" ? "Users — live" : "Your activity"}</h3>
+          <h3 style={{ marginTop: 0 }}>{isAdmin ? "Users — live" : "Your activity"}</h3>
           <div className="table-wrap">
             <table className="table">
               <thead>
                 <tr>
                   <th>User</th>
                   <th>Plan</th>
+                  <th>Threads</th>
                   <th>Queued</th>
                   <th>Running</th>
-                  <th>Completed</th>
+                  <th>Done</th>
                   <th>Rows today</th>
                   <th>Rows total</th>
                 </tr>
@@ -920,6 +1139,9 @@ export function DashboardPage() {
                       <div className="muted" style={{ fontSize: "0.8rem" }}>
                         {u.role}
                         {!u.is_active ? " · inactive" : ""}
+                        {(u.dedicated_worker_count ?? 0) > 0
+                          ? ` · ${u.dedicated_worker_count} dedicated worker${u.dedicated_worker_count === 1 ? "" : "s"}`
+                          : ""}
                       </div>
                     </td>
                     <td>
@@ -936,11 +1158,41 @@ export function DashboardPage() {
                         <span className="muted">—</span>
                       )}
                     </td>
+                    <td>
+                      {u.threads_in_use ?? 0}/{u.thread_allowance ?? "—"}
+                      {(u.threads_in_use ?? 0) > 0 ? (
+                        <div className="meter" style={{ marginTop: 4 }}>
+                          <div className="meter-track">
+                            <div
+                              className={`meter-fill ${
+                                (u.thread_allowance ?? 0) > 0 &&
+                                (u.threads_in_use ?? 0) / (u.thread_allowance ?? 1) >= 0.9
+                                  ? "danger"
+                                  : "ok"
+                              }`}
+                              style={{
+                                width: `${
+                                  (u.thread_allowance ?? 0) > 0
+                                    ? Math.min(100, ((u.threads_in_use ?? 0) / (u.thread_allowance ?? 1)) * 100)
+                                    : 0
+                                }%`,
+                              }}
+                            />
+                          </div>
+                        </div>
+                      ) : null}
+                    </td>
                     <td>{u.jobs_queued}</td>
                     <td>
                       {u.jobs_running > 0 ? <span className="badge ok">{u.jobs_running}</span> : u.jobs_running}
                     </td>
-                    <td>{u.jobs_completed}</td>
+                    <td>
+                      <span className="muted" style={{ fontSize: "0.85rem" }}>
+                        {u.jobs_completed} ok
+                        {(u.jobs_failed ?? 0) > 0 ? ` · ${u.jobs_failed} fail` : ""}
+                        {(u.jobs_stopped ?? 0) > 0 ? ` · ${u.jobs_stopped} stop` : ""}
+                      </span>
+                    </td>
                     <td>{u.rows_saved_today.toLocaleString()}</td>
                     <td>{u.rows_saved_total.toLocaleString()}</td>
                   </tr>
@@ -948,6 +1200,60 @@ export function DashboardPage() {
               </tbody>
             </table>
           </div>
+        </div>
+      ) : null}
+
+      {live && live.recent_jobs.length > 0 ? (
+        <div className="card">
+          <h3 style={{ marginTop: 0 }}>Recent jobs</h3>
+          <div className="table-wrap">
+            <table className="table">
+              <thead>
+                <tr>
+                  {isAdmin ? <th>Owner</th> : null}
+                  <th>Job</th>
+                  <th>Status</th>
+                  <th>Chunks</th>
+                  <th>Rows</th>
+                  <th>When</th>
+                </tr>
+              </thead>
+              <tbody>
+                {live.recent_jobs.map((j) => (
+                  <tr key={j.id}>
+                    {isAdmin ? (
+                      <td>
+                        <strong>{j.owner_username || `user ${j.owner_id}`}</strong>
+                      </td>
+                    ) : null}
+                    <td>
+                      <code style={{ fontSize: "0.8rem" }}>{j.public_id}</code>
+                      {j.error ? (
+                        <div className="muted" style={{ fontSize: "0.75rem", maxWidth: 280 }}>
+                          {j.error}
+                        </div>
+                      ) : null}
+                    </td>
+                    <td>{jobStatusBadge(j.status)}</td>
+                    <td>
+                      <span className="muted" style={{ fontSize: "0.85rem" }}>
+                        {j.chunks_pending}p / {j.chunks_leased}l / {j.chunks_done}d
+                      </span>
+                    </td>
+                    <td>{j.rows_saved.toLocaleString()}</td>
+                    <td>
+                      <span className="muted" style={{ fontSize: "0.85rem" }}>
+                        {relativeTime(j.finished_at || j.started_at || j.created_at)}
+                      </span>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <p className="muted" style={{ marginBottom: 0, marginTop: "0.75rem" }}>
+            Full history and storage by user: <Link to="/app/jobs">Jobs</Link>
+          </p>
         </div>
       ) : null}
     </div>

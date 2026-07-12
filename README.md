@@ -704,6 +704,7 @@ GET  /api/health
 /api/bot/workflows
 /api/bot/install-demos
 /api/bot/restart
+/api/stats/live                 # dashboard fleet + job aggregates (admin sees system)
 ```
 
 OpenAPI docs when API is running: `http://127.0.0.1:3010/docs` (localhost only in production bind).
