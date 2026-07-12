@@ -5,6 +5,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import require_admin, require_ready_user
+from app.bot.tg_auth import normalize_telegram_id
 from app.core.database import get_db
 from app.core.security import hash_password
 from app.models import AuditLog, Package, User, UserWorker, WorkerNode
@@ -107,7 +108,9 @@ async def create_user(
     db: AsyncSession = Depends(get_db),
 ):
     if body.role == "user":
-        tid = str(body.telegram_id).strip()
+        tid = normalize_telegram_id(body.telegram_id, allow_group=False)
+        if not tid:
+            raise HTTPException(400, "telegram_id must be a numeric Telegram user id")
         existing_tg = (await db.execute(select(User).where(User.telegram_id == tid))).scalar_one_or_none()
         if existing_tg:
             raise HTTPException(400, f"Telegram id already linked to {existing_tg.username}")
@@ -173,9 +176,10 @@ async def create_user(
         raise HTTPException(400, "Username already exists")
     if (await db.execute(select(User).where(User.email == email))).scalar_one_or_none():
         raise HTTPException(400, "Email already exists")
-    if body.telegram_id:
-        tid = str(body.telegram_id).strip()
-        if tid and not tid.isdigit():
+    tid: str | None = None
+    if body.telegram_id is not None and str(body.telegram_id).strip() != "":
+        tid = normalize_telegram_id(body.telegram_id, allow_group=False)
+        if not tid:
             raise HTTPException(400, "telegram_id must be a numeric Telegram user id")
         clash = (await db.execute(select(User).where(User.telegram_id == tid))).scalar_one_or_none()
         if clash:
@@ -185,13 +189,19 @@ async def create_user(
         email=email,
         password_hash=hash_password(body.password),
         role="admin",
-        telegram_id=(str(body.telegram_id).strip() if body.telegram_id else None) or None,
+        telegram_id=tid,
         perms=normalize_perms({**DEFAULT_USER_PERMS, **(body.perms or {})}),
         must_change_password=True,
         totp_enabled=False,
     )
     db.add(user)
-    db.add(AuditLog(actor_id=admin.id, action="user.create", detail={"username": username, "kind": "admin"}))
+    db.add(
+        AuditLog(
+            actor_id=admin.id,
+            action="user.create",
+            detail={"username": username, "kind": "admin", "telegram_id": tid},
+        )
+    )
     await db.commit()
     await db.refresh(user)
     if body.worker_ids is not None:
@@ -226,15 +236,15 @@ async def update_user(
         if tid is None or tid == "":
             user.telegram_id = None
         else:
-            tid = str(tid).strip()
-            if not tid.isdigit():
+            tid_n = normalize_telegram_id(tid, allow_group=False)
+            if not tid_n:
                 raise HTTPException(400, "telegram_id must be numeric")
             clash = (
-                await db.execute(select(User).where(User.telegram_id == tid, User.id != user.id))
+                await db.execute(select(User).where(User.telegram_id == tid_n, User.id != user.id))
             ).scalar_one_or_none()
             if clash:
                 raise HTTPException(400, f"Telegram id already linked to {clash.username}")
-            user.telegram_id = tid
+            user.telegram_id = tid_n
     if "username" in data and data["username"]:
         new_username = str(data.pop("username")).strip()
         clash = (

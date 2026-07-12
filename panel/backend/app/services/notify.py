@@ -10,6 +10,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import BotSettings, User
+from app.bot.tg_auth import normalize_telegram_id
 
 log = logging.getLogger("bot.notify")
 
@@ -65,19 +66,29 @@ async def send_document(token: str, chat_id: int | str, path: Path, caption: str
 
 async def notify_user_telegram(db: AsyncSession, user: User, text: str, document: Path | None = None) -> None:
     token = await bot_token(db)
-    if not token or not user.telegram_id:
+    tid = normalize_telegram_id(user.telegram_id, allow_group=False)
+    if not token or not tid:
         return
     settings = await db.get(BotSettings, 1)
-    await send_text(token, user.telegram_id, text)
+    await send_text(token, tid, text)
     if document and settings and settings.deliver_results_telegram:
-        await send_document(token, user.telegram_id, document, caption=document.name)
+        await send_document(token, tid, document, caption=document.name)
 
 
 async def notify_admins_telegram(db: AsyncSession, text: str) -> None:
     token = await bot_token(db)
     if not token:
         return
-    admins = (await db.execute(select(User).where(User.role == "admin", User.telegram_id.isnot(None)))).scalars().all()
+    admins = (
+        await db.execute(
+            select(User).where(
+                User.role == "admin",
+                User.is_active == True,  # noqa: E712
+                User.telegram_id.isnot(None),
+            )
+        )
+    ).scalars().all()
     for a in admins:
-        if a.telegram_id:
-            await send_text(token, a.telegram_id, text)
+        tid = normalize_telegram_id(a.telegram_id, allow_group=False)
+        if tid:
+            await send_text(token, tid, text)

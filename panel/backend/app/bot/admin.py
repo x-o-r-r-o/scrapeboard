@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.bot.tg_auth import normalize_telegram_id
 from app.core.security import generate_worker_token, hash_password, hash_worker_token
 from app.models import (
     AuditLog,
@@ -143,11 +144,12 @@ def _install_hint(token: str) -> str:
 
 async def _find_user(db: AsyncSession, key: str) -> User | None:
     key = key.strip()
-    if key.isdigit():
-        by_tg = (await db.execute(select(User).where(User.telegram_id == key))).scalar_one_or_none()
+    tid = normalize_telegram_id(key, allow_group=False)
+    if tid:
+        by_tg = (await db.execute(select(User).where(User.telegram_id == tid))).scalar_one_or_none()
         if by_tg:
             return by_tg
-        by_id = await db.get(User, int(key))
+        by_id = await db.get(User, int(tid))
         if by_id:
             return by_id
     return (await db.execute(select(User).where(User.username == key))).scalar_one_or_none()
@@ -300,8 +302,8 @@ async def handle_admin(
                 "Usage: /adduser <telegram_id> [display_name] [package_slug] [days]",
             )
             return
-        tid = args[0].strip()
-        if not tid.isdigit():
+        tid = normalize_telegram_id(args[0], allow_group=False)
+        if not tid:
             await send(token, chat_id, "telegram_id must be numeric.")
             return
         existing = (await db.execute(select(User).where(User.telegram_id == tid))).scalar_one_or_none()
@@ -395,16 +397,17 @@ async def handle_admin(
         if raw in ("none", "-", "unlink", "null"):
             target.telegram_id = None
         else:
-            if not raw.isdigit():
+            tid = normalize_telegram_id(args[1], allow_group=False)
+            if not tid:
                 await send(token, chat_id, "telegram_id must be numeric or 'none'.")
                 return
             clash = (
-                await db.execute(select(User).where(User.telegram_id == raw, User.id != target.id))
+                await db.execute(select(User).where(User.telegram_id == tid, User.id != target.id))
             ).scalar_one_or_none()
             if clash:
                 await send(token, chat_id, f"Already linked to {clash.username}.")
                 return
-            target.telegram_id = raw
+            target.telegram_id = tid
         db.add(AuditLog(actor_id=admin.id, action="user.update", detail={"user_id": target.id, "telegram_id": target.telegram_id}))
         await db.commit()
         await send(token, chat_id, f"✅ {target.username} tg={target.telegram_id or 'unlinked'}")

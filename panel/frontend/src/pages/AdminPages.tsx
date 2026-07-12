@@ -423,12 +423,13 @@ export function UsersAdminPage() {
             />
             <input
               className="input"
-              placeholder="telegram id (optional)"
+              placeholder="telegram numeric id (for /admin)"
               value={form.telegram_id}
               onChange={(e) => setForm({ ...form, telegram_id: e.target.value })}
             />
             <p className="muted" style={{ gridColumn: "1 / -1" }}>
-              Admins have full access and sign in with username/email + password + 2FA. Packages are not required.
+              Admins sign in with username/email + password + 2FA. Set Telegram numeric id (from bot /whoami) to use
+              /admin; also enable Admin commands in Bot Builder. Packages are not required.
             </p>
           </>
         )}
@@ -603,9 +604,19 @@ export function UsersAdminPage() {
               className="input"
               value={edit.telegram_id}
               onChange={(e) => setEdit({ ...edit, telegram_id: e.target.value })}
-              placeholder={edit.role === "user" ? "required for Telegram users" : "optional"}
+              placeholder={
+                edit.role === "user"
+                  ? "required numeric Telegram user id"
+                  : "numeric id from bot /whoami (for /admin)"
+              }
               required={edit.role === "user"}
             />
+            {edit.role === "admin" ? (
+              <span className="muted" style={{ fontSize: "0.8rem", marginTop: "0.25rem" }}>
+                Required for Telegram /admin. Use the numeric id from /whoami (not @username). Also enable Admin
+                commands in Bot Builder.
+              </span>
+            ) : null}
           </label>
           {edit.role === "user" ? (
             <label className="field">

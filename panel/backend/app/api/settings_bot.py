@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import get_security_settings, require_admin, require_ready_user
 from app.bot.demos import DEMO_COMMANDS, DEMO_WORKFLOWS
 from app.bot.runtime import bot_runtime
+from app.bot.tg_auth import admin_setup_hint, first_admin_telegram_id, normalize_telegram_id
 from app.core.database import get_db
 from app.models import BotCommand, BotSettings, BotWorkflow, User
 from app.schemas import (
@@ -113,7 +114,7 @@ def _token_hint(token: str) -> str:
     return f"{raw[:4]}{'•' * 8}{raw[-4:]}"
 
 
-def _settings_out(b: BotSettings) -> BotSettingsOut:
+def _settings_out(b: BotSettings, *, suggested: str | None = None, admin_hint: str = "") -> BotSettingsOut:
     snap = bot_runtime.snapshot()
     return BotSettingsOut(
         enabled=b.enabled,
@@ -128,12 +129,20 @@ def _settings_out(b: BotSettings) -> BotSettingsOut:
         public_packages=b.public_packages,
         deliver_results_telegram=b.deliver_results_telegram,
         admin_commands_enabled=b.admin_commands_enabled,
+        suggested_support_chat_id=suggested,
+        admin_setup_hint=admin_hint,
         runtime_status=str(snap.get("status") or "stopped"),
         runtime_task_running=bool(snap.get("task_running")),
         runtime_error=str(snap.get("last_error") or ""),
         runtime_last_ok_at=snap.get("last_ok_at"),  # type: ignore[arg-type]
         runtime_updates_handled=int(snap.get("updates_handled") or 0),
     )
+
+
+async def _enrich_settings(db: AsyncSession, b: BotSettings) -> BotSettingsOut:
+    suggested = await first_admin_telegram_id(db)
+    hint = await admin_setup_hint(db, b)
+    return _settings_out(b, suggested=suggested, admin_hint=hint)
 
 
 async def _validate_telegram_token(token: str) -> dict:
@@ -252,7 +261,7 @@ async def get_bot_settings(_: User = Depends(require_admin), __: User = Depends(
         db.add(b)
         await db.commit()
         await db.refresh(b)
-    return _settings_out(b)
+    return await _enrich_settings(db, b)
 
 
 @router.put("/bot/settings", response_model=BotSettingsOut)
@@ -281,12 +290,25 @@ async def update_bot_settings(
             # Prefer Telegram's username when saving a new token (unless caller sent one).
             if tg_user and not (data.get("username") or "").strip():
                 data["username"] = tg_user
+    if "support_chat_id" in data:
+        raw_sc = data["support_chat_id"]
+        data["support_chat_id"] = (
+            normalize_telegram_id(raw_sc, allow_group=True) or ""
+            if raw_sc is not None and str(raw_sc).strip() != ""
+            else ""
+        )
     for k, v in data.items():
         setattr(b, k, v)
+    # Auto-fill empty support chat from first enabled admin telegram_id.
+    if not (b.support_chat_id or "").strip():
+        suggested = await first_admin_telegram_id(db)
+        if suggested:
+            b.support_chat_id = suggested
+            log.info("Auto-filled support_chat_id from admin telegram_id=%s", suggested)
     await db.commit()
     await bot_runtime.restart()
     await db.refresh(b)
-    return _settings_out(b)
+    return await _enrich_settings(db, b)
 
 
 @router.get("/bot/status", response_model=BotRuntimeStatusOut)
@@ -302,6 +324,7 @@ async def bot_runtime_status(
         await db.commit()
         await db.refresh(b)
     snap = bot_runtime.snapshot()
+    suggested = await first_admin_telegram_id(db)
     return BotRuntimeStatusOut(
         status=str(snap.get("status") or "stopped"),
         task_running=bool(snap.get("task_running")),
@@ -313,6 +336,8 @@ async def bot_runtime_status(
         token_configured=bool(b.token),
         username=b.username or "",
         hint=_runtime_hint(b, snap),
+        admin_setup_hint=await admin_setup_hint(db, b),
+        suggested_support_chat_id=suggested,
     )
 
 

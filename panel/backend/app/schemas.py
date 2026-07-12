@@ -1,7 +1,45 @@
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, EmailStr, Field, model_validator
+from pydantic import BaseModel, EmailStr, Field, field_validator, model_validator
+
+
+def _coerce_telegram_id(value: Any, *, allow_group: bool = False) -> str | None:
+    """Shared schema coercion — keep digit strings; reject usernames."""
+    if value is None or value == "":
+        return None
+    if isinstance(value, bool):
+        raise ValueError("telegram_id must be a numeric Telegram id")
+    if isinstance(value, int):
+        s = str(value)
+    elif isinstance(value, float):
+        if not value.is_integer():
+            raise ValueError("telegram_id must be a numeric Telegram id")
+        s = str(int(value))
+    else:
+        s = str(value).strip().replace(" ", "").replace(",", "")
+        if not s:
+            return None
+        if s.startswith("@"):
+            raise ValueError("telegram_id must be numeric, not a @username")
+        if "e" in s.lower() or "." in s:
+            try:
+                f = float(s)
+            except ValueError as exc:
+                raise ValueError("telegram_id must be a numeric Telegram id") from exc
+            if not f.is_integer():
+                raise ValueError("telegram_id must be a numeric Telegram id")
+            s = str(int(f))
+    if s.startswith("-"):
+        body = s[1:]
+        if not allow_group or not body.isdigit():
+            raise ValueError("telegram_id must be a numeric Telegram user id")
+        return f"-{body}"
+    if not s.isdigit():
+        raise ValueError("telegram_id must be a numeric Telegram id")
+    if s.startswith("0") and len(s) > 1:
+        s = str(int(s))
+    return s
 
 
 class TokenResponse(BaseModel):
@@ -61,12 +99,17 @@ class UserCreate(BaseModel):
     username: str | None = Field(default=None, min_length=3, max_length=64)
     email: EmailStr | str | None = None
     password: str | None = Field(default=None, min_length=8)
-    telegram_id: str | None = None
+    telegram_id: str | int | None = None
     package_id: int | None = None
     duration_days: int | None = Field(default=None, ge=1, le=3650)
     notify: bool = False
     perms: dict[str, Any] = Field(default_factory=dict)
     worker_ids: list[int] | None = None
+
+    @field_validator("telegram_id", mode="before")
+    @classmethod
+    def _norm_telegram_id(cls, v: Any) -> str | None:
+        return _coerce_telegram_id(v, allow_group=False)
 
     @model_validator(mode="after")
     def validate_by_role(self) -> "UserCreate":
@@ -77,12 +120,12 @@ class UserCreate(BaseModel):
                 raise ValueError("Admin users require email")
             if not self.password:
                 raise ValueError("Admin users require temporary password")
+            if self.telegram_id is not None:
+                self.telegram_id = str(self.telegram_id)
         else:
-            tid = (self.telegram_id or "").strip()
+            tid = (str(self.telegram_id).strip() if self.telegram_id is not None else "")
             if not tid:
                 raise ValueError("Telegram users require telegram_id")
-            if not tid.isdigit():
-                raise ValueError("telegram_id must be a numeric Telegram user id")
             self.telegram_id = tid
         return self
 
@@ -91,12 +134,17 @@ class UserUpdate(BaseModel):
     email: EmailStr | str | None = None
     role: Literal["admin", "user"] | None = None
     is_active: bool | None = None
-    telegram_id: str | None = None
+    telegram_id: str | int | None = None
     perms: dict[str, Any] | None = None
     worker_ids: list[int] | None = None
     password: str | None = Field(default=None, min_length=8)
     reset_2fa: bool = False
     username: str | None = Field(default=None, min_length=3, max_length=64)
+
+    @field_validator("telegram_id", mode="before")
+    @classmethod
+    def _norm_telegram_id(cls, v: Any) -> str | None:
+        return _coerce_telegram_id(v, allow_group=False)
 
 
 class UserPermsSchema(BaseModel):
@@ -600,6 +648,8 @@ class BotSettingsOut(BaseModel):
     public_packages: bool
     deliver_results_telegram: bool
     admin_commands_enabled: bool
+    suggested_support_chat_id: str | None = None
+    admin_setup_hint: str = ""
     runtime_status: str = "stopped"
     runtime_task_running: bool = False
     runtime_error: str = ""
@@ -616,10 +666,23 @@ class BotSettingsUpdate(BaseModel):
     welcome_text: str | None = None
     notify_interval_sec: int | None = None
     support_enabled: bool | None = None
-    support_chat_id: str | None = None
+    support_chat_id: str | int | None = None
     public_packages: bool | None = None
     deliver_results_telegram: bool | None = None
     admin_commands_enabled: bool | None = None
+
+    @field_validator("support_chat_id", mode="before")
+    @classmethod
+    def _norm_support_chat_id(cls, v: Any) -> str | None:
+        if v is None or v == "":
+            return ""
+        try:
+            return _coerce_telegram_id(v, allow_group=True) or ""
+        except ValueError as exc:
+            raise ValueError(
+                "support_chat_id must be a numeric Telegram user id or group id "
+                "(e.g. your admin id from /whoami, or -100… for a group)"
+            ) from exc
 
 
 class BotRuntimeStatusOut(BaseModel):
@@ -633,6 +696,8 @@ class BotRuntimeStatusOut(BaseModel):
     token_configured: bool
     username: str
     hint: str = ""
+    admin_setup_hint: str = ""
+    suggested_support_chat_id: str | None = None
 
 
 class BotCommandOut(BaseModel):

@@ -66,6 +66,8 @@ type BotRuntimeStatus = {
   token_configured: boolean;
   username: string;
   hint: string;
+  admin_setup_hint?: string;
+  suggested_support_chat_id?: string | null;
 };
 
 const AUDIENCES = [
@@ -680,6 +682,11 @@ export default function BotBuilderPage() {
               {runtimeHint}
             </p>
           ) : null}
+          {(runtime?.admin_setup_hint || settings.admin_setup_hint) ? (
+            <p className="muted" style={{ margin: "0.35rem 0 0", fontSize: "0.85rem" }}>
+              {String(runtime?.admin_setup_hint || settings.admin_setup_hint)}
+            </p>
+          ) : null}
           {runtimeError ? <p className="error" style={{ margin: "0.35rem 0 0" }}>{runtimeError}</p> : null}
           <div className="item-card-meta" style={{ marginTop: "0.55rem" }}>
             <span className="chip">{commands.filter((c) => c.enabled).length}/{commands.length} commands on</span>
@@ -811,8 +818,10 @@ export default function BotBuilderPage() {
           <div>
             <h3 style={{ margin: "0 0 0.35rem" }}>Settings &amp; permissions</h3>
             <p className="muted" style={{ margin: 0, fontSize: "0.88rem" }}>
-              Live on/off is also on the header switch. Admin Telegram commands (/admin) require both the toggle
-              below and an admin account linked by Telegram ID.
+              Admin Telegram commands (/admin) need all of: Users → role=admin + Telegram numeric id, this page’s
+              “Admin Telegram commands” toggle on, and Live bot with a valid token. DM the bot /whoami to verify the
+              link. Support chat id is where /support tickets are forwarded — usually your admin Telegram user id
+              (from /whoami), or a group id like -100….
             </p>
           </div>
           <div className="form-grid two">
@@ -832,8 +841,29 @@ export default function BotBuilderPage() {
                 className="input"
                 value={String(settings.support_chat_id || "")}
                 onChange={(e) => setSettings({ ...settings, support_chat_id: e.target.value })}
-                placeholder="-100…"
+                placeholder="Admin Telegram user id or -100…"
               />
+              <span className="muted" style={{ fontSize: "0.8rem", marginTop: "0.25rem" }}>
+                Numeric id only (not @username). Empty on Save auto-fills the first enabled admin’s Telegram ID.
+                {settings.suggested_support_chat_id
+                  ? ` Suggested: ${String(settings.suggested_support_chat_id)}`
+                  : " Set an admin Telegram ID under Users first."}
+              </span>
+              {settings.suggested_support_chat_id ? (
+                <button
+                  className="btn secondary sm"
+                  type="button"
+                  style={{ marginTop: "0.35rem", alignSelf: "flex-start" }}
+                  onClick={() =>
+                    setSettings({
+                      ...settings,
+                      support_chat_id: String(settings.suggested_support_chat_id),
+                    })
+                  }
+                >
+                  Use admin Telegram ID
+                </button>
+              ) : null}
             </label>
             <label className="field full">
               Welcome text

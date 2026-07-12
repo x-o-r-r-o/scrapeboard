@@ -13,6 +13,12 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.bot.admin import ADMIN_COMMANDS, handle_admin
+from app.bot.tg_auth import (
+    find_user_by_telegram,
+    normalize_telegram_id,
+    resolve_admin,
+    resolve_support_chat_id,
+)
 from app.core.config import get_settings
 from app.core.database import SessionLocal
 from app.models import (
@@ -259,7 +265,8 @@ class TelegramBotRuntime:
         if not self._cmd_limiter.allow(str(uid)):
             return
 
-        user = (await db.execute(select(User).where(User.telegram_id == str(uid)))).scalar_one_or_none()
+        user = await find_user_by_telegram(db, uid)
+        tid_disp = normalize_telegram_id(uid, allow_group=False) or str(uid)
 
         if msg.get("document"):
             if user and not user.is_active:
@@ -275,6 +282,8 @@ class TelegramBotRuntime:
         parts = text.split()
         cmd = parts[0].lower().split("@")[0]
         args = parts[1:]
+        resolved = COMMAND_ALIASES.get(cmd, cmd)
+        is_admin_cmd = resolved in ADMIN_COMMANDS or cmd in ADMIN_COMMANDS
 
         if user and not user.is_active and cmd not in ("/whoami", "/id", "/start", "/help"):
             await self._send(token, chat_id, "⛔ Your account is disabled. Contact support.")
@@ -306,11 +315,24 @@ class TelegramBotRuntime:
             return
 
         if cmd in ("/whoami", "/id"):
-            link = f"linked as {user.username}" if user else "not linked to a panel account"
+            link = f"linked as {user.username} (role={user.role})" if user else "not linked to a panel account"
             status = ""
             if user:
                 status = " · disabled" if not user.is_active else (" · subscribed" if has_sub else " · no subscription")
-            await self._send(token, chat_id, f"Your Telegram id: {uid}\nPanel: {link}{status}")
+            admin_line = ""
+            if user and user.role == "admin":
+                flag = "on" if settings.admin_commands_enabled else "OFF — enable in Bot Builder"
+                admin_line = f"\nAdmin commands: {flag}"
+            elif not user:
+                admin_line = (
+                    "\nTo use /admin: set this id on Users → admin → Telegram ID, "
+                    "enable Admin commands, keep bot Live."
+                )
+            await self._send(
+                token,
+                chat_id,
+                f"Your Telegram id: {tid_disp}\nPanel: {link}{status}{admin_line}",
+            )
             return
 
         if cmd == "/start":
@@ -326,6 +348,30 @@ class TelegramBotRuntime:
             await self._handle_billing(db, token, chat_id, user, cmd, args, settings)
             return
 
+        # Admin Telegram commands — resolve before audience gate so denials are explicit.
+        if is_admin_cmd:
+            gate = await resolve_admin(db, uid, settings)
+            if not gate.ok:
+                log.info(
+                    "Admin cmd %s denied tg=%s reason=%s",
+                    resolved,
+                    tid_disp,
+                    gate.reason,
+                )
+                await self._send(token, chat_id, gate.message)
+                return
+            await handle_admin(
+                db=db,
+                token=token,
+                chat_id=chat_id,
+                chat_type=chat_type,
+                admin=gate.user,  # type: ignore[arg-type]
+                cmd=resolved if resolved in ADMIN_COMMANDS else cmd,
+                args=args,
+                send=self._send,
+            )
+            return
+
         meta = commands.get(cmd) or commands.get(COMMAND_ALIASES.get(cmd, ""))
         if meta and not self._audience_ok(meta.audience, user, has_sub):
             await self._send(token, chat_id, "⛔ Not allowed for your role.")
@@ -338,7 +384,7 @@ class TelegramBotRuntime:
 
         if not user:
             extra = " Send /packages to see plans." if settings.public_packages else ""
-            await self._send(token, chat_id, f"⛔ Not authorized. Your id is {uid}.{extra}")
+            await self._send(token, chat_id, f"⛔ Not authorized. Your id is {tid_disp}.{extra}")
             return
 
         if cmd == "/support":
@@ -355,24 +401,6 @@ class TelegramBotRuntime:
 
         if cmd == "/stop":
             await self._stop_job(db, token, chat_id, user)
-            return
-
-        # Admin Telegram commands — role=admin + Bot Builder flag (even if command listed for others).
-        resolved = COMMAND_ALIASES.get(cmd, cmd)
-        if resolved in ADMIN_COMMANDS or cmd in ADMIN_COMMANDS:
-            if user.role != "admin" or not settings.admin_commands_enabled:
-                await self._send(token, chat_id, "⛔ Admins only (enable admin commands in Bot Builder).")
-                return
-            await handle_admin(
-                db=db,
-                token=token,
-                chat_id=chat_id,
-                chat_type=chat_type,
-                admin=user,
-                cmd=resolved if resolved in ADMIN_COMMANDS else cmd,
-                args=args,
-                send=self._send,
-            )
             return
 
         if meta and meta.response_text:
@@ -516,13 +544,24 @@ class TelegramBotRuntime:
             await self._send(token, chat_id, "Support is not enabled.")
             return
         body = " ".join(args).strip() or "(empty)"
-        ticket = SupportTicket(user_id=user.id if user else None, telegram_id=str(uid), message=body)
+        tid = normalize_telegram_id(uid, allow_group=False) or str(uid)
+        ticket = SupportTicket(user_id=user.id if user else None, telegram_id=tid, message=body)
         db.add(ticket)
         await db.commit()
         await db.refresh(ticket)
         await self._send(token, chat_id, f"✅ Support ticket #{ticket.id} created.")
-        if settings.support_chat_id:
-            await self._send(token, int(settings.support_chat_id), f"Support #{ticket.id} from {uid}:\n{body}")
+        support_to = await resolve_support_chat_id(db, settings)
+        if support_to:
+            await self._send(
+                token,
+                support_to,
+                f"Support #{ticket.id} from {tid}:\n{body}",
+            )
+        else:
+            log.warning(
+                "Support ticket #%s created but no support_chat_id and no admin telegram_id",
+                ticket.id,
+            )
 
     async def _handle_document(self, db, token, chat_id, user, doc, caption) -> None:
         if not user:
