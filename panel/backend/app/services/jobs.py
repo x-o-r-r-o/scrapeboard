@@ -4,17 +4,19 @@ from __future__ import annotations
 
 import csv
 import io
+import math
 import secrets
+import shutil
 import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
 
-from sqlalchemy import select
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
-from app.models import Job, JobChunk, Package, User
-from app.services.billing import active_subscription, get_billing
+from app.models import Job, JobChunk, Package, User, UserWorker, WorkerNode
+from app.services.billing import active_subscription, get_billing, user_has_dedicated_worker
 from app.services.input_files import InputFileError, entries_to_bytes, validate_pair
 from app.services.worker_config import DEFAULT_CHUNK_SIZE, package_defaults_from_package
 
@@ -23,6 +25,86 @@ from app.services.perms import DEFAULT_USER_PERMS, effective_perms
 
 def utcnow() -> datetime:
     return datetime.now(timezone.utc)
+
+
+async def recomputed_done_searches(db: AsyncSession, job: Job) -> int:
+    """Sum searches from chunks in state=done (source of truth for progress)."""
+    raw = (
+        await db.execute(
+            select(func.coalesce(func.sum(JobChunk.end_index - JobChunk.start_index), 0)).where(
+                JobChunk.job_id == job.id,
+                JobChunk.state == "done",
+            )
+        )
+    ).scalar_one()
+    return min(int(job.total_searches or 0), max(0, int(raw or 0)))
+
+
+async def sync_job_done_searches(db: AsyncSession, job: Job) -> int:
+    """Persist done_searches from done chunk ranges (idempotent)."""
+    n = await recomputed_done_searches(db, job)
+    job.done_searches = n
+    return n
+
+
+def effective_chunk_size(total: int, package_chunk_size: int, parallel_slots: int) -> int:
+    """Searches per chunk: package ``chunk_size`` is a ceiling (max), never exceeded.
+
+    Default package max is ``DEFAULT_CHUNK_SIZE`` (500). We may shrink below that
+    so work can run in parallel across ``parallel_slots`` (eligible workers, or
+    for a dedicated pin the machine's ``max_browsers`` capacity):
+
+    - 200 searches, 4 slots, max 500 → chunk 50 (4×50), not one 200 chunk
+    - 2000 searches, 4 slots, max 500 → chunk 500 (4×500; more chunks if larger)
+    - 100 searches, 1 slot, max 500 → chunk 100 (no fake fleet split)
+
+    Never creates more chunks than searches (chunk size ≥ 1). Lease already
+    allows concurrent pending→leased claims of different chunks of the same job.
+    """
+    if total <= 0:
+        return 1
+    pkg = max(1, int(package_chunk_size or DEFAULT_CHUNK_SIZE))
+    slots = max(1, int(parallel_slots or 1))
+    by_parallel = max(1, math.ceil(total / slots))
+    return min(pkg, by_parallel)
+
+
+async def parallel_worker_count_for_user(db: AsyncSession, user: User) -> int:
+    """Parallel chunk slots for this user when creating a job.
+
+    Shared / unpinned dedicated: one slot per enabled non-draining worker so a
+    job can spread across the fleet (not the sum of every machine's
+    ``max_browsers``).
+
+    Dedicated with pins: only pinned machines count, and each contributes
+    ``max_browsers`` slots (concurrent leases on that box). A single pin with
+    ``max_browsers=4`` can get up to 4 chunks; we never invent slots from
+    unpinned fleet workers.
+    """
+    workers = (
+        await db.execute(
+            select(WorkerNode).where(
+                WorkerNode.is_enabled == True,  # noqa: E712
+                WorkerNode.is_draining == False,  # noqa: E712
+            )
+        )
+    ).scalars().all()
+    if not workers:
+        return 1
+    pinned_mode = False
+    if await user_has_dedicated_worker(db, user):
+        pinned = (
+            await db.execute(select(UserWorker.worker_id).where(UserWorker.user_id == user.id))
+        ).scalars().all()
+        if pinned:
+            allowed = {int(x) for x in pinned}
+            workers = [w for w in workers if w.id in allowed]
+            pinned_mode = True
+            if not workers:
+                return 1
+    if pinned_mode:
+        return max(1, sum(max(1, int(w.max_browsers or 1)) for w in workers))
+    return max(1, len(workers))
 
 
 def job_thread_count(job: Job) -> int:
@@ -128,6 +210,69 @@ def job_merge_dir(public_id: str, owner_id: int | None = None) -> Path:
     return d
 
 
+def _unlink_quiet(path: Path) -> None:
+    try:
+        if path.is_file():
+            path.unlink()
+    except OSError:
+        pass
+
+
+def purge_job_storage(
+    public_id: str,
+    owner_id: int,
+    *,
+    keywords_path: str | None = None,
+    locations_path: str | None = None,
+    result_zip: str | None = None,
+) -> None:
+    """Remove result trees and input uploads for a job from disk."""
+    cfg = get_settings()
+    result_dirs = {
+        job_result_root(public_id, owner_id),
+        cfg.results_dir / public_id,
+        cfg.results_dir / f"user_{owner_id}" / public_id,
+    }
+    for result_dir in result_dirs:
+        if result_dir.exists():
+            shutil.rmtree(result_dir, ignore_errors=True)
+
+    for upload_dir in (
+        cfg.uploads_dir / f"user_{owner_id}",
+        cfg.uploads_dir / f"tg_{owner_id}",
+    ):
+        if not upload_dir.exists():
+            continue
+        for p in upload_dir.glob(f"{public_id}*"):
+            _unlink_quiet(p)
+
+    for raw in (keywords_path, locations_path, result_zip):
+        if raw:
+            _unlink_quiet(Path(raw))
+
+
+async def purge_and_delete_job(db: AsyncSession, job: Job, *, purge_files: bool = True) -> None:
+    """Hard-delete job row + chunks, optionally wipe on-disk storage."""
+    public_id = job.public_id
+    owner_id = job.owner_id
+    keywords_path = job.keywords_path
+    locations_path = job.locations_path
+    result_zip = job.result_zip
+    # Chunks have a non-nullable FK without DB CASCADE; delete them first or
+    # SQLAlchemy tries to NULL job_id and the flush fails.
+    await db.execute(delete(JobChunk).where(JobChunk.job_id == job.id))
+    await db.delete(job)
+    await db.commit()
+    if purge_files:
+        purge_job_storage(
+            public_id,
+            owner_id,
+            keywords_path=keywords_path,
+            locations_path=locations_path,
+            result_zip=result_zip,
+        )
+
+
 async def create_job_from_bytes(
     db: AsyncSession,
     user: User,
@@ -220,9 +365,13 @@ async def create_job_from_bytes(
 
     total = len(kw_lines) * len(loc_lines)
     try:
-        chunk_size = max(1, int(getattr(pkg, "chunk_size", None) or DEFAULT_CHUNK_SIZE))
+        pkg_chunk = max(1, int(getattr(pkg, "chunk_size", None) or DEFAULT_CHUNK_SIZE))
     except (TypeError, ValueError):
-        chunk_size = DEFAULT_CHUNK_SIZE
+        pkg_chunk = DEFAULT_CHUNK_SIZE
+    parallel_workers = await parallel_worker_count_for_user(db, user)
+    chunk_size = effective_chunk_size(total, pkg_chunk, parallel_workers)
+    settings["chunk_size"] = chunk_size
+    settings["chunk_parallel_workers"] = parallel_workers
     job = Job(
         public_id=public_id,
         owner_id=user.id,

@@ -255,10 +255,10 @@ python3 install.py --role worker --update
 systemctl --user restart scrapeboard-worker
 systemctl --user status scrapeboard-worker --no-pager
 grep -E 'scrapeboard worker v' worker/logs/worker.log | tail -3
-# Expect: v0.8.1+  (0.7.0 = still the old process)
+# Expect: v0.8.2+  (0.7.0 = still the old process)
 ```
 
-Panel Admin → Workers should show **0.8.1+** within ~15s. Until then, a failed ack on `chunk_id=0` (fixed in panel) plus no cancel support can leave **1 instance running** on the dashboard.
+Panel Admin → Workers should show **0.8.2+** within ~15s. Until then, a failed ack on `chunk_id=0` (fixed in panel) plus no cancel support can leave **1 instance running** on the dashboard.
 
 Tailscale is **not** required — workers only need outbound HTTPS to the panel.
 

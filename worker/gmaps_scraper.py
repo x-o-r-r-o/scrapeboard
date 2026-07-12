@@ -536,8 +536,54 @@ class Proxy:
         return f"{self.host}:{self.port}"
 
 
+def _looks_like_host_port(hostpart: str) -> bool:
+    """True when ``hostpart`` is a plausible ``host:port`` (not a password fragment)."""
+    hostpart = (hostpart or "").strip()
+    if not hostpart or ":" not in hostpart:
+        return False
+    if hostpart.startswith("["):
+        # [IPv6]:port
+        if "]" not in hostpart:
+            return False
+        _, _, rest = hostpart.partition("]")
+        if not rest.startswith(":"):
+            return False
+        port = rest[1:]
+        return port.isdigit() and 1 <= int(port) <= 65535
+    host, port = hostpart.rsplit(":", 1)
+    if not host or not port.isdigit():
+        return False
+    try:
+        return 1 <= int(port) <= 65535
+    except ValueError:
+        return False
+
+
+def _parse_host_port_user_pass(line: str) -> tuple[str, str, str | None, str | None] | None:
+    """Parse ``host:port`` or ``host:port:user:password`` (password may contain ``:`` / ``@``).
+
+    Splits on the first three colons only so credentials stay intact.
+    """
+    parts = line.split(":", 3)
+    if len(parts) == 2:
+        return parts[0], parts[1], None, None
+    if len(parts) >= 4:
+        return parts[0], parts[1], parts[2], parts[3]
+    if len(parts) == 3:
+        # Ambiguous third field — treat as host:port only (legacy).
+        return parts[0], parts[1], None, None
+    return None
+
+
 def parse_proxy(line: str) -> Proxy | None:
-    """Parse a proxy line in any supported format (see README)."""
+    """Parse a proxy line in any supported format (see README).
+
+    Supported:
+      - ``host:port``
+      - ``host:port:user:password`` (password may contain ``@``, ``:``, etc.)
+      - ``user:password@host:port`` (password may contain ``@`` — use last ``@``)
+      - optional ``scheme://`` prefix (http, https, socks5)
+    """
     line = line.strip()
     if not line or line.startswith("#"):
         return None
@@ -548,22 +594,25 @@ def parse_proxy(line: str) -> Proxy | None:
         scheme = scheme.lower().strip()
 
     username = password = None
+    host = port = ""
 
+    # ``user:pass@host:port`` only when the RHS of the *last* @ looks like host:port.
+    # Otherwise ``@`` is inside a ``host:port:user:password`` password — do not rsplit.
     if "@" in line:
-        creds, hostpart = line.rsplit("@", 1)
-        if ":" in creds:
-            username, password = creds.split(":", 1)
-        host, port = _split_host_port(hostpart)
-    else:
-        parts = line.split(":")
-        if len(parts) == 2:
-            host, port = parts
-        elif len(parts) == 4:
-            host, port, username, password = parts
-        elif len(parts) == 3:
-            host, port = parts[0], parts[1]
+        left, right = line.rsplit("@", 1)
+        if _looks_like_host_port(right) and ":" in left:
+            username, password = left.split(":", 1)
+            host, port = _split_host_port(right)
         else:
+            parsed = _parse_host_port_user_pass(line)
+            if parsed is None:
+                return None
+            host, port, username, password = parsed
+    else:
+        parsed = _parse_host_port_user_pass(line)
+        if parsed is None:
             return None
+        host, port, username, password = parsed
 
     if not host or not port:
         return None

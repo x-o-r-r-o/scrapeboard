@@ -1076,9 +1076,6 @@ class TelegramBotRuntime:
             )
             return
 
-        def _pct(j: Job) -> float:
-            return 100.0 * j.done_searches / j.total_searches if j.total_searches else 0.0
-
         def _bar(pct: float, width: int = 10) -> str:
             filled = max(0, min(width, int(round(pct / 100.0 * width))))
             return "█" * filled + "░" * (width - filled)
@@ -1087,15 +1084,22 @@ class TelegramBotRuntime:
             s = j.settings or {}
             return str(s.get("engine") or "—")
 
+        async def _progress(j: Job) -> tuple[int, float]:
+            done = j.done_searches
+            if j.status in ("running", "queued") and j.total_searches:
+                done = await jobs_svc.recomputed_done_searches(db, j)
+            pct = 100.0 * done / j.total_searches if j.total_searches else 0.0
+            return done, pct
+
         lines: list[str] = ["📊 Your job status", ""]
         if active:
             lines.append("▶ Currently running")
             for j in active:
-                pct = _pct(j)
+                done, pct = await _progress(j)
                 lines.append(f"• {j.public_id}")
                 lines.append(f"  [{j.status}] {_bar(pct)} {pct:.1f}%")
                 lines.append(
-                    f"  searches {j.done_searches:,}/{j.total_searches:,} · "
+                    f"  searches {done:,}/{j.total_searches:,} · "
                     f"rows {j.rows_saved:,} · engine {_engine(j)}"
                 )
                 if j.started_at:
@@ -1108,11 +1112,11 @@ class TelegramBotRuntime:
 
         lines.append("📁 Recent jobs")
         for j in recent:
-            pct = _pct(j)
+            done, pct = await _progress(j)
             mark = "▶" if j.status in ("queued", "running") else "•"
             lines.append(
                 f"{mark} {j.public_id} [{j.status}] {pct:.1f}% · "
-                f"{j.done_searches}/{j.total_searches} · rows {j.rows_saved}"
+                f"{done}/{j.total_searches} · rows {j.rows_saved}"
             )
         lines.append("")
         lines.append("Tips: /status or /jobs · /stop to cancel · panel Jobs for download")

@@ -1,6 +1,5 @@
 from datetime import datetime, timezone
 from pathlib import Path
-import shutil
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse
@@ -54,7 +53,12 @@ def _worker_online(w: WorkerNode | None) -> bool:
 
 
 async def _job_out(db: AsyncSession, j: Job, *, viewer: User | None = None) -> JobOut:
-    pct = 100.0 * j.done_searches / j.total_searches if j.total_searches else 0.0
+    # For active jobs, prefer progress derived from done chunks so a stale
+    # done_searches counter cannot show 0/N while chunks are already done.
+    done_searches = j.done_searches
+    if j.status in ("running", "queued") and j.total_searches:
+        done_searches = await jobs_svc.recomputed_done_searches(db, j)
+    pct = 100.0 * done_searches / j.total_searches if j.total_searches else 0.0
     owner = await db.get(User, j.owner_id)
     exists, size = _result_meta(j)
     threads = jobs_svc.job_thread_count(j)
@@ -122,7 +126,7 @@ async def _job_out(db: AsyncSession, j: Job, *, viewer: User | None = None) -> J
         settings=j.settings or {},
         threads=threads,
         total_searches=j.total_searches,
-        done_searches=j.done_searches,
+        done_searches=done_searches,
         rows_saved=j.rows_saved,
         result_zip=None if not exists else (j.result_zip or f"results_{j.public_id}.zip"),
         result_exists=exists,
@@ -399,21 +403,13 @@ async def purge_job_files(
     j = await db.get(Job, job_id)
     if not j:
         raise HTTPException(404, "Not found")
-    cfg = get_settings()
-    for result_dir in (
-        jobs_svc.job_result_root(j.public_id, j.owner_id),
-        cfg.results_dir / j.public_id,
-    ):
-        if result_dir.exists():
-            shutil.rmtree(result_dir, ignore_errors=True)
-    # clear named uploads for this job
-    upload_dir = cfg.uploads_dir / f"user_{j.owner_id}"
-    if upload_dir.exists():
-        for p in upload_dir.glob(f"{j.public_id}*"):
-            try:
-                p.unlink()
-            except OSError:
-                pass
+    jobs_svc.purge_job_storage(
+        j.public_id,
+        j.owner_id,
+        keywords_path=j.keywords_path,
+        locations_path=j.locations_path,
+        result_zip=j.result_zip,
+    )
     j.result_zip = None
     await db.commit()
     return MessageOut(detail="Job files purged")
@@ -432,23 +428,5 @@ async def delete_job(
         raise HTTPException(404, "Not found")
     if j.status in ("queued", "running"):
         raise HTTPException(400, "Stop the job before deleting")
-    public_id = j.public_id
-    owner_id = j.owner_id
-    await db.delete(j)
-    await db.commit()
-    if purge_files:
-        cfg = get_settings()
-        for result_dir in (
-            jobs_svc.job_result_root(public_id, owner_id),
-            cfg.results_dir / public_id,
-        ):
-            if result_dir.exists():
-                shutil.rmtree(result_dir, ignore_errors=True)
-        upload_dir = cfg.uploads_dir / f"user_{owner_id}"
-        if upload_dir.exists():
-            for p in upload_dir.glob(f"{public_id}*"):
-                try:
-                    p.unlink()
-                except OSError:
-                    pass
+    await jobs_svc.purge_and_delete_job(db, j, purge_files=purge_files)
     return MessageOut(detail="Job deleted")

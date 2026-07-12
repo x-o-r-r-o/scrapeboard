@@ -120,6 +120,7 @@ class Package(Base):
     scrape_settings_id: Mapped[int | None] = mapped_column(ForeignKey("scrape_settings.id"), nullable=True)
     # Package default scrape flags (engine, delays, …). Lease base layer before worker overrides.
     scrape_defaults: Mapped[dict] = mapped_column(JSON, default=dict)
+    # Max searches per job chunk (ceiling). Create may shrink below this to spread across workers.
     chunk_size: Mapped[int] = mapped_column(Integer, default=500)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
@@ -304,7 +305,9 @@ class Job(Base):
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     owner: Mapped["User"] = relationship(back_populates="jobs")
-    chunks: Mapped[list["JobChunk"]] = relationship(back_populates="job")
+    chunks: Mapped[list["JobChunk"]] = relationship(
+        back_populates="job", cascade="all, delete-orphan"
+    )
 
 
 class JobChunk(Base):
@@ -312,7 +315,7 @@ class JobChunk(Base):
     __table_args__ = (UniqueConstraint("job_id", "chunk_id", name="uq_job_chunk"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    job_id: Mapped[int] = mapped_column(ForeignKey("jobs.id"), index=True)
+    job_id: Mapped[int] = mapped_column(ForeignKey("jobs.id", ondelete="CASCADE"), index=True)
     chunk_id: Mapped[int] = mapped_column(Integer)
     start_index: Mapped[int] = mapped_column(Integer)
     end_index: Mapped[int] = mapped_column(Integer)

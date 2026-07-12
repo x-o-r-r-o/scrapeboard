@@ -1,8 +1,8 @@
 # One proxy per line. Blank lines and # comments are ignored.
 # Accepted formats:
 #   host:port
-#   host:port:user:pass
-#   user:pass@host:port
+#   host:port:user:pass   (pass may contain @ : % * etc. — first 3 colons only)
+#   user:pass@host:port   (pass may contain @ — split on last @)
 #   http://user:pass@host:port      (scheme may be http, https or socks5)
 #
 # NOTE: with --engine camoufox every proxy MUST have user:pass.

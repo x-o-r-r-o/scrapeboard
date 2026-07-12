@@ -74,6 +74,8 @@ DEFAULT_WORKER_CONFIG: dict[str, Any] = {
     "debug": False,
 }
 
+# Package/job max searches per chunk (ceiling). Jobs may use smaller chunks to
+# spread work across workers; never exceed this when package leaves it at default.
 DEFAULT_CHUNK_SIZE = 500
 
 

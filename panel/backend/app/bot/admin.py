@@ -1043,7 +1043,10 @@ async def handle_admin(
             await send(token, chat_id, "Job not found.")
             return
         owner = await db.get(User, j.owner_id)
-        pct = 100.0 * j.done_searches / j.total_searches if j.total_searches else 0.0
+        done = j.done_searches
+        if j.status in ("running", "queued") and j.total_searches:
+            done = await jobs_svc.recomputed_done_searches(db, j)
+        pct = 100.0 * done / j.total_searches if j.total_searches else 0.0
         leased = (
             await db.execute(
                 select(JobChunk).where(JobChunk.job_id == j.id, JobChunk.state == "leased")
@@ -1059,7 +1062,7 @@ async def handle_admin(
             f"Job {j.public_id} (#{j.id})",
             f"status={j.status} {pct:.1f}%",
             f"owner={owner.username if owner else j.owner_id} tg={owner.telegram_id if owner else '-'}",
-            f"searches {j.done_searches:,}/{j.total_searches:,} · rows {j.rows_saved:,}",
+            f"searches {done:,}/{j.total_searches:,} · rows {j.rows_saved:,}",
             f"engine={s.get('engine', '—')} threads={jobs_svc.job_thread_count(j)}",
             f"leases: {', '.join(wnames) or 'none'}",
             f"created={j.created_at} started={j.started_at or '-'}",

@@ -188,20 +188,30 @@ export function JobsPage() {
 
   async function purgeFiles(jobId: number) {
     if (!confirm("Purge all result/upload files for this job?")) return;
-    await api(`/api/jobs/${jobId}/files`, { method: "DELETE" });
-    setMsg("Files purged.");
-    setFilesFor(null);
-    await refresh();
-    if (showStorage) await refreshStorage();
+    setError("");
+    try {
+      await api(`/api/jobs/${jobId}/files`, { method: "DELETE" });
+      setMsg("Files purged.");
+      setFilesFor(null);
+      await refresh();
+      if (showStorage) await refreshStorage();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Purge failed");
+    }
   }
 
   async function deleteJob(jobId: number) {
     if (!confirm("Delete this job record and purge its files?")) return;
-    await api(`/api/jobs/${jobId}?purge_files=true`, { method: "DELETE" });
-    setMsg("Job deleted.");
-    setFilesFor(null);
-    await refresh();
-    if (showStorage) await refreshStorage();
+    setError("");
+    try {
+      await api(`/api/jobs/${jobId}?purge_files=true`, { method: "DELETE" });
+      setMsg("Job deleted.");
+      setFilesFor(null);
+      await refresh();
+      if (showStorage) await refreshStorage();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Delete failed");
+    }
   }
 
   return (

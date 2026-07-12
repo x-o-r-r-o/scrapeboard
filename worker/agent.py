@@ -34,7 +34,7 @@ ROOT = Path(__file__).resolve().parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-VERSION = "0.8.1"
+VERSION = "0.8.2"
 CONFIG_NAME = "worker_config.json"
 HOST_OS = platform.system()  # Windows | Darwin | Linux
 SERVICE_NAME = "scrapeboard-worker"
@@ -530,17 +530,43 @@ class PanelClient:
         r.raise_for_status()
         return r.json()
 
-    def upload(self, job_id: str, chunk_id: int, zip_path: Path):
-        with open(zip_path, "rb") as fh:
-            r = self.requests.post(
-                f"{self.base}/api/worker-api/upload",
-                params={"job_id": job_id, "chunk_id": chunk_id},
-                headers=self.headers,
-                files={"file": (zip_path.name, fh, "application/zip")},
-                timeout=300,
-            )
-        r.raise_for_status()
-        return r.json()
+    def upload(self, job_id: str, chunk_id: int, zip_path: Path, *, retries: int = 5):
+        """Upload chunk ZIP; retry transient panel errors (502 etc.)."""
+        url = f"{self.base}/api/worker-api/upload"
+        params = {"job_id": job_id, "chunk_id": chunk_id}
+        last_err: Exception | None = None
+        for attempt in range(1, max(1, retries) + 1):
+            try:
+                with open(zip_path, "rb") as fh:
+                    r = self.requests.post(
+                        url,
+                        params=params,
+                        headers=self.headers,
+                        files={"file": (zip_path.name, fh, "application/zip")},
+                        timeout=300,
+                    )
+                if not r.ok:
+                    body = (r.text or "").strip().replace("\n", " ")[:300]
+                    print(
+                        f"[worker] upload HTTP {r.status_code} "
+                        f"job={job_id} chunk={chunk_id} "
+                        f"attempt={attempt}/{retries} body={body!r}",
+                        flush=True,
+                    )
+                r.raise_for_status()
+                return r.json()
+            except Exception as e:
+                last_err = e
+                if attempt >= retries:
+                    break
+                delay = min(2 ** (attempt - 1), 10)
+                print(
+                    f"[worker] upload retry in {delay}s after: {e}",
+                    flush=True,
+                )
+                time.sleep(delay)
+        assert last_err is not None
+        raise last_err
 
     def ack(self, job_id: str, chunk_id: int, rows: int, *, retries: int = 5):
         """Acknowledge chunk completion; retry so a transient 404/502 cannot leave a DB lease."""
@@ -1119,6 +1145,9 @@ def main(argv=None) -> int:
         )
         rows = 0
         uploaded = False
+        zip_path: Path | None = None
+        # Scrape may raise SystemExit (e.g. zero usable proxies) — catch BaseException
+        # so we still reach upload/ack and the panel can release the lease.
         try:
             rows, zip_path = run_chunk(
                 job,
@@ -1132,28 +1161,58 @@ def main(argv=None) -> int:
                     f"[worker] cancelled job={job['job_id']} chunk={chunk['id']}",
                     flush=True,
                 )
-            if zip_path and zip_path.exists() and not stop.is_set():
-                try:
-                    client.upload(job["job_id"], chunk["id"], zip_path)
-                    uploaded = True
-                    print(f"[worker] uploaded chunk={chunk['id']} user={owner_id}", flush=True)
-                except Exception as e:
-                    print(f"[worker] upload skipped/failed: {e}", flush=True)
-            elif zip_path and zip_path.exists():
-                # Best-effort upload of partial results after cancel
-                try:
-                    client.upload(job["job_id"], chunk["id"], zip_path)
-                    uploaded = True
-                    print(f"[worker] uploaded partial chunk={chunk['id']}", flush=True)
-                except Exception as e:
-                    print(f"[worker] partial upload skipped: {e}", flush=True)
+            print(
+                f"[worker] scrape finished job={job['job_id']} chunk={chunk['id']} "
+                f"rows={rows} zip={'yes' if zip_path and zip_path.exists() else 'no'} "
+                f"cancelled={stop.is_set()}",
+                flush=True,
+            )
         except Exception as e:
             print(f"[worker] chunk error user={owner_id} chunk={chunk['id']}: {e}", flush=True)
             rows = 0
+        except BaseException as e:
+            # SystemExit / KeyboardInterrupt mid-scrape: still ack below.
+            print(
+                f"[worker] chunk aborted ({type(e).__name__}) "
+                f"user={owner_id} chunk={chunk['id']}: {e}",
+                flush=True,
+            )
+            rows = 0
+
+        # Upload then ack — always, even after cancel / scrape failure / no zip.
+        if zip_path and zip_path.exists():
+            kind = "partial " if stop.is_set() else ""
+            print(
+                f"[worker] uploading {kind}chunk={chunk['id']} user={owner_id}",
+                flush=True,
+            )
+            try:
+                client.upload(job["job_id"], chunk["id"], zip_path, retries=5)
+                uploaded = True
+                print(
+                    f"[worker] uploaded {kind}chunk={chunk['id']} user={owner_id}",
+                    flush=True,
+                )
+            except Exception as e:
+                print(
+                    f"[worker] upload failed after retries chunk={chunk['id']}: {e}",
+                    flush=True,
+                )
+        else:
+            print(
+                f"[worker] no zip to upload chunk={chunk['id']} rows={rows}",
+                flush=True,
+            )
+
         try:
             # Always ack (even after cancel/no upload) so the panel releases the lease.
             # Extra retries after a successful upload — lease stickiness is worse than a delay.
             ack_retries = 8 if uploaded else 5
+            print(
+                f"[worker] acking chunk={chunk['id']} rows={rows} "
+                f"uploaded={uploaded} retries={ack_retries}",
+                flush=True,
+            )
             ack = client.ack(job["job_id"], chunk["id"], rows, retries=ack_retries)
             if ack.get("cancelled"):
                 print(f"[worker] ack cancelled chunk={chunk['id']}", flush=True)

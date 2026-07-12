@@ -505,8 +505,14 @@ async def _clear_worker_leases_for_job(
     *,
     chunk_id: int | None = None,
     rows: int = 0,
+    sync_progress: bool = False,
 ) -> int:
-    """Mark this worker's leased chunks on the job done (frees active_leases)."""
+    """Mark this worker's leased chunks on the job done (frees active_leases).
+
+    When ``sync_progress`` is True (running-job ack fallback), also recompute
+    ``job.done_searches`` from done chunk ranges so progress cannot stay at 0
+    after chunks are marked done.
+    """
     q = select(JobChunk).where(
         JobChunk.job_id == job.id,
         JobChunk.worker_id == w.id,
@@ -521,6 +527,8 @@ async def _clear_worker_leases_for_job(
             chunk.rows = rows
             job.rows_saved += rows
         chunk.leased_at = None
+    if sync_progress and chunks:
+        await jobs_svc.sync_job_done_searches(db, job)
     return len(chunks)
 
 
@@ -951,7 +959,9 @@ async def worker_lease(
     if job.status == "queued" and not await jobs_svc.can_start_job(db, job):
         return await _with_update({"chunk": None})
 
-    # Atomic claim: only one worker wins the pending → leased transition
+    # Atomic claim of one pending chunk. Different workers may hold different
+    # chunks of the same job at once — there is no global "one lease per job" lock.
+    # Only the pending→leased CAS below serializes contention on a single chunk row.
     claimed: JobChunk | None = None
     tried: set[int] = set()
     for _ in range(8):
@@ -985,6 +995,8 @@ async def worker_lease(
             await db.refresh(candidate)
             claimed = candidate
             break
+        # Lost race on this chunk; loop and take the next pending chunk of this
+        # job (or another job) so the fleet stays parallelized.
     if not claimed:
         return await _with_update({"chunk": None})
 
@@ -1159,8 +1171,27 @@ async def worker_ack(
     ).scalar_one_or_none()
     if not chunk:
         # Never 404 after a successful scrape/upload — free any leases this worker holds.
-        await _clear_worker_leases_for_job(db, w, job, rows=rows)
-        await db.commit()
+        # Recompute progress so marking chunks done cannot leave done_searches at 0.
+        await _clear_worker_leases_for_job(
+            db, w, job, rows=rows, sync_progress=job.status in ("running", "queued")
+        )
+        pending = (
+            await db.execute(
+                select(JobChunk).where(JobChunk.job_id == job.id, JobChunk.state != "done")
+            )
+        ).scalars().first()
+        if not pending and job.status == "running":
+            zip_path = await jobs_svc.finalize_job(db, job, cancelled=False)
+            owner = await db.get(User, job.owner_id)
+            if owner:
+                await notify_user_telegram(
+                    db,
+                    owner,
+                    f"✅ Job {job.public_id} complete. Businesses: {job.rows_saved}.",
+                    Path(zip_path) if zip_path else None,
+                )
+        else:
+            await db.commit()
         return {"ok": True, "cleared": True}
 
     if chunk.worker_id not in (None, w.id):
@@ -1173,11 +1204,14 @@ async def worker_ack(
         chunk.rows = rows
         chunk.worker_id = w.id
         chunk.leased_at = None
-        job.done_searches = min(
-            job.total_searches,
-            job.done_searches + (chunk.end_index - chunk.start_index),
-        )
         job.rows_saved += rows
+    elif rows and not chunk.rows:
+        chunk.rows = rows
+        job.rows_saved += rows
+
+    # Always recompute from done chunks (idempotent; heals incremental drift and
+    # any path that marked chunks done without bumping done_searches).
+    await jobs_svc.sync_job_done_searches(db, job)
 
     pending = (
         await db.execute(

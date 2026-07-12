@@ -876,7 +876,10 @@ export function PackagesAdminPage() {
           <input className="input" type="number" value={form.max_upload_mb} onChange={(e) => setForm({ ...form, max_upload_mb: Number(e.target.value) })} />
         </label>
         <label className="field">
-          Chunk size
+          Chunk size (max)
+          <span className="muted" style={{ fontWeight: 400 }}>
+            Maximum searches per chunk (default 500). Smaller jobs still split across workers when possible.
+          </span>
           <input className="input" type="number" min={1} value={form.chunk_size} onChange={(e) => setForm({ ...form, chunk_size: Number(e.target.value) || 500 })} />
         </label>
         <label className="field" style={{ gridColumn: "1 / -1" }}>
@@ -1012,7 +1015,10 @@ export function PackagesAdminPage() {
             <input className="input" type="number" value={edit.max_upload_mb} onChange={(e) => setEdit({ ...edit, max_upload_mb: Number(e.target.value) })} />
           </label>
           <label className="field">
-            Chunk size
+            Chunk size (max)
+            <span className="muted" style={{ fontWeight: 400 }}>
+              Maximum searches per chunk (default 500). Smaller jobs still split across workers when possible.
+            </span>
             <input className="input" type="number" min={1} value={edit.chunk_size || 500} onChange={(e) => setEdit({ ...edit, chunk_size: Number(e.target.value) || 500 })} />
           </label>
           <label className="field" style={{ gridColumn: "1 / -1" }}>
