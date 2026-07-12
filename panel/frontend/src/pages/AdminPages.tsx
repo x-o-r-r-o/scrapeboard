@@ -1139,6 +1139,7 @@ type WorkerRow = {
   host_os: string;
   hostname: string;
   version: string;
+  last_seen_at?: string | null;
   max_browsers: number;
   active_leases: number;
   proxy_pool_id: number | null;
@@ -1319,7 +1320,7 @@ export function WorkersAdminPage() {
     const scope = workerIds?.length ? `${workerIds.length} worker(s)` : "all workers";
     if (
       !confirm(
-        `Queue git update (ref=${ref}) for ${scope}?\nOnline agents pull on the next heartbeat, then restart.`,
+        `Queue git update (ref=${ref}) for ${scope}?\nAgents on v0.8.0+ pull on the next heartbeat/lease, then restart.\nOlder agents must be upgraded manually once.`,
       )
     ) {
       return;
@@ -1330,13 +1331,20 @@ export function WorkersAdminPage() {
     try {
       const body: Record<string, unknown> = { ref };
       if (workerIds?.length) body.worker_ids = workerIds;
-      const res = await api<{ queued: number; ref: string }>("/api/workers/request-update", {
+      const res = await api<{ queued: number; ref: string; workers?: WorkerRow[] }>("/api/workers/request-update", {
         method: "POST",
         body: JSON.stringify(body),
       });
-      setMsg(
-        `Queued update for ${res.queued} worker(s) at ref=${res.ref}. Status updates as agents heartbeat.`,
-      );
+      const failed = (res.workers || []).filter((w) => (w.update?.status || "").toLowerCase() === "failed");
+      if (failed.length) {
+        setMsg(
+          `Queued ${res.queued} at ref=${res.ref}; ${failed.length} failed immediately (agent < 0.8.0) — upgrade those VPS agents manually, then restart the service.`,
+        );
+      } else {
+        setMsg(
+          `Queued update for ${res.queued} worker(s) at ref=${res.ref}. Status updates as agents heartbeat.`,
+        );
+      }
       await refresh();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Update request failed");
@@ -1345,7 +1353,45 @@ export function WorkersAdminPage() {
     }
   }
 
-  function updateBadge(u?: WorkerUpdateInfo) {
+  async function clearWorkerUpdate(workerId: number) {
+    setError("");
+    setMsg("");
+    setUpdateBusy(true);
+    try {
+      await api(`/api/workers/${workerId}/clear-update`, { method: "POST", body: "{}" });
+      setMsg(`Cleared update state for worker #${workerId}`);
+      await refresh();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Clear update failed");
+    } finally {
+      setUpdateBusy(false);
+    }
+  }
+
+  function formatLastSeen(iso?: string | null): string {
+    if (!iso) return "never";
+    const t = new Date(iso).getTime();
+    if (Number.isNaN(t)) return "—";
+    const sec = Math.max(0, Math.round((Date.now() - t) / 1000));
+    if (sec < 5) return "just now";
+    if (sec < 60) return `${sec}s ago`;
+    if (sec < 3600) return `${Math.floor(sec / 60)}m ago`;
+    return `${Math.floor(sec / 3600)}h ago`;
+  }
+
+  function versionOk(version?: string): boolean {
+    const parts = String(version || "")
+      .split(/[^0-9]+/)
+      .filter(Boolean)
+      .map(Number);
+    if (!parts.length) return false;
+    const [a = 0, b = 0] = parts;
+    if (a > 0) return true;
+    return b >= 8;
+  }
+
+  function updateBadge(w: WorkerRow) {
+    const u = w.update;
     const status = (u?.status || "idle").toLowerCase();
     const cls =
       status === "success"
@@ -1355,7 +1401,23 @@ export function WorkersAdminPage() {
           : status === "pending" || status === "updating"
             ? "warn"
             : "";
-    return { status, cls, message: u?.message || "", ref: u?.ref || "main" };
+    const ver = w.version || "";
+    const oldAgent = !versionOk(ver);
+    let hint = u?.message || "";
+    let needsManualRestart = false;
+    if ((status === "pending" || status === "failed") && oldAgent) {
+      hint = "Manual restart required — agent < 0.8.0 ignores remote Update (git pull alone is not enough)";
+      needsManualRestart = true;
+    } else if (status === "pending" && !w.online) {
+      hint = "No recent heartbeat — worker offline; update manually or re-queue when online";
+    } else if (status === "pending" && w.online && versionOk(ver)) {
+      const requested = u?.requested_at ? new Date(u.requested_at).getTime() : 0;
+      const ageMin = requested ? (Date.now() - requested) / 60000 : 0;
+      if (ageMin >= 2) {
+        hint = hint || "Still pending after 2+ min — check agent logs";
+      }
+    }
+    return { status, cls, message: hint, ref: u?.ref || "main", oldAgent, needsManualRestart };
   }
 
   return (
@@ -1389,8 +1451,11 @@ export function WorkersAdminPage() {
           Update all workers
         </button>
         <p className="muted" style={{ margin: 0, flex: "1 1 220px", fontSize: "0.85rem" }}>
-          After you push to GitHub, queue a fleet update here. Online workers run the fixed{" "}
-          <code>install.py --role worker --update</code> path on the next heartbeat (no SSH per VPS).
+          After you push to GitHub, queue a fleet update here. Agents on <strong>v0.8.0+</strong> run{" "}
+          <code>install.py --role worker --update</code> on the next heartbeat/lease, then restart. Older agents
+          ignore remote update — on each VPS: <code>git pull</code> +{" "}
+          <code>python3 install.py --role worker --update --yes</code> (restarts the service). Stuck pending? Use{" "}
+          <strong>Clear pending</strong>.
         </p>
       </div>
       <form className="card form-grid two" onSubmit={create} style={{ alignItems: "end" }}>
@@ -1446,6 +1511,7 @@ export function WorkersAdminPage() {
           <thead>
             <tr>
               <th>Name</th>
+              <th>Version</th>
               <th>Status</th>
               <th>Update</th>
               <th>Instances</th>
@@ -1463,17 +1529,31 @@ export function WorkersAdminPage() {
               const statusCls =
                 status === "online" ? "ok" : status === "draining" ? "warn" : status === "offline" || status === "disabled" ? "danger" : "";
               const leaseLoad = (w.active_leases || 0) / Math.max(1, w.max_browsers);
-              const upd = updateBadge(w.update);
+              const upd = updateBadge(w);
+              const verOk = versionOk(w.version);
               return (
                 <tr key={w.id} style={{ background: selectedId === w.id ? "color-mix(in srgb, var(--accent) 12%, transparent)" : undefined }}>
                   <td>
                     <strong>{w.name}</strong>
                     <div className="muted" style={{ fontSize: "0.8rem" }}>
-                      v{w.version || "—"} · {w.token_prefix}…
+                      {w.token_prefix}…
                     </div>
                   </td>
                   <td>
+                    <span className={`badge ${verOk ? "ok" : "danger"}`} title={verOk ? undefined : "Needs agent ≥ 0.8.0 for remote Update"}>
+                      v{w.version || "—"}
+                    </span>
+                    {!verOk ? (
+                      <div className="muted" style={{ fontSize: "0.75rem" }}>
+                        needs ≥0.8.0 · restart after pull
+                      </div>
+                    ) : null}
+                  </td>
+                  <td>
                     <span className={`badge ${statusCls}`}>{status}</span>
+                    <div className="muted" style={{ fontSize: "0.75rem" }}>
+                      hb {formatLastSeen(w.last_seen_at)}
+                    </div>
                   </td>
                   <td>
                     <span className={`badge ${upd.cls}`} title={upd.message || undefined}>
@@ -1482,7 +1562,16 @@ export function WorkersAdminPage() {
                     {upd.status !== "idle" ? (
                       <div className="muted" style={{ fontSize: "0.75rem" }}>
                         {upd.ref}
-                        {upd.message ? ` · ${upd.message.slice(0, 80)}` : ""}
+                        {upd.message ? ` · ${upd.message.slice(0, 100)}` : ""}
+                      </div>
+                    ) : upd.oldAgent ? (
+                      <div className="muted" style={{ fontSize: "0.75rem" }}>
+                        Manual restart required for remote Update
+                      </div>
+                    ) : null}
+                    {upd.needsManualRestart ? (
+                      <div className="muted" style={{ fontSize: "0.75rem", color: "var(--danger, #c44)" }}>
+                        Manual restart required
                       </div>
                     ) : null}
                   </td>
@@ -1541,6 +1630,17 @@ export function WorkersAdminPage() {
                     >
                       Request update
                     </button>
+                    {upd.status === "pending" || upd.status === "failed" || upd.status === "updating" ? (
+                      <button
+                        className="btn secondary"
+                        type="button"
+                        disabled={updateBusy}
+                        title="Clear stuck update state after a manual upgrade/restart"
+                        onClick={() => clearWorkerUpdate(w.id)}
+                      >
+                        Clear pending
+                      </button>
+                    ) : null}
                   </td>
                 </tr>
               );

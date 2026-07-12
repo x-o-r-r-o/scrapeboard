@@ -4,6 +4,7 @@ from pathlib import Path
 from fastapi import APIRouter, Depends, File, Header, HTTPException, UploadFile
 from sqlalchemy import func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm.attributes import flag_modified
 
 from app.api.deps import require_admin, require_ready_user
 from app.core.database import get_db
@@ -45,8 +46,10 @@ from app.services.worker_config import (
 )
 from app.services.worker_update import (
     apply_worker_status_report,
+    attach_update_commands,
+    clear_update,
     get_update_state,
-    pending_update_for_heartbeat,
+    reconcile_update_state,
     request_update,
 )
 
@@ -239,7 +242,18 @@ async def delete_pool(pool_id: int, _: User = Depends(require_admin), __: User =
 
 # --- workers ---
 
-async def _enrich_worker(db: AsyncSession, w: WorkerNode, leases: dict[int, int] | None = None) -> WorkerOut:
+async def _enrich_worker(
+    db: AsyncSession,
+    w: WorkerNode,
+    leases: dict[int, int] | None = None,
+    *,
+    reconcile: bool = True,
+) -> WorkerOut:
+    if reconcile:
+        before = get_update_state(w)
+        after = reconcile_update_state(w)
+        if before.get("status") != after.get("status") or before.get("message") != after.get("message"):
+            await db.commit()
     pool_name = None
     if w.proxy_pool_id:
         pool = await db.get(ProxyPool, w.proxy_pool_id)
@@ -375,11 +389,12 @@ async def request_workers_update(
     await db.commit()
     for w in rows:
         await db.refresh(w)
-    enriched = [await _enrich_worker(db, w) for w in rows]
+    enriched = [await _enrich_worker(db, w, reconcile=False) for w in rows]
+    pending_n = sum(1 for e in enriched if e.update.status == "pending")
     return WorkerFleetUpdateResponse(
         ok=True,
         ref=enriched[0].update.ref if enriched else (body.ref or "main"),
-        queued=len(enriched),
+        queued=pending_n,
         workers=enriched,
     )
 
@@ -398,7 +413,24 @@ async def request_one_worker_update(
     request_update(w, ref=body.ref)
     await db.commit()
     await db.refresh(w)
-    return await _enrich_worker(db, w)
+    return await _enrich_worker(db, w, reconcile=False)
+
+
+@router.post("/workers/{worker_id}/clear-update", response_model=WorkerOut)
+async def clear_worker_update(
+    worker_id: int,
+    _: User = Depends(require_admin),
+    __: User = Depends(require_ready_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Admin: clear stuck pending/failed update state (e.g. after manual restart)."""
+    w = await db.get(WorkerNode, worker_id)
+    if not w:
+        raise HTTPException(404, "Not found")
+    clear_update(w)
+    await db.commit()
+    await db.refresh(w)
+    return await _enrich_worker(db, w, reconcile=False)
 
 
 # --- worker agent protocol ---
@@ -510,6 +542,7 @@ def _store_worker_log_lines(w: WorkerNode, lines: list[str], *, replace: bool = 
     meta["log_lines"] = buf
     meta["log_updated_at"] = datetime.now(timezone.utc).isoformat()
     w.meta = meta
+    flag_modified(w, "meta")
 
 
 @router.post("/worker-api/heartbeat")
@@ -573,16 +606,14 @@ async def worker_heartbeat(
                 fresh[str(pid)] = seen_at
         meta["cancel_jobs"] = fresh
         w.meta = meta
+        flag_modified(w, "meta")
     elif isinstance(queued, list):
         # Legacy list form
         cancel_jobs.extend(str(x) for x in queued)
         meta["cancel_jobs"] = {}
         w.meta = meta
+        flag_modified(w, "meta")
 
-    commands: list[str] = []
-    update_cmd = pending_update_for_heartbeat(w)
-
-    await db.commit()
     captcha = await get_captcha_settings(db)
     # Heartbeat sync uses worker machine config only (no job/package context yet)
     effective = merge_lease_settings(
@@ -602,12 +633,11 @@ async def worker_heartbeat(
         # Redacted: captcha keys only delivered inside job leases
         "worker_config": _redact_worker_config(effective),
         "cancel_jobs": sorted(set(cancel_jobs)),
-        "commands": commands,
+        "commands": [],
     }
-    if update_cmd:
-        commands.append("update")
-        out["commands"] = commands
-        out["update"] = update_cmd
+    # Pending updates + old-agent/stale reconcile (may mutate w.meta)
+    attach_update_commands(out, w)
+    await db.commit()
     return out
 
 
@@ -685,8 +715,15 @@ async def worker_lease(
     db: AsyncSession = Depends(get_db),
 ):
     w = await _auth_worker(db, authorization)
+
+    async def _with_update(payload: dict) -> dict:
+        """Deliver pending update on lease polls too (not only heartbeat)."""
+        attach_update_commands(payload, w)
+        await db.commit()
+        return payload
+
     if w.is_draining or not w.is_enabled:
-        return {"chunk": None}
+        return await _with_update({"chunk": None})
 
     # max_browsers = concurrent user-job instances (leases) this worker may hold
     active_leases = int(
@@ -701,7 +738,9 @@ async def worker_lease(
     )
     slot_cap = max(1, int(w.max_browsers or 1))
     if active_leases >= slot_cap:
-        return {"chunk": None, "slots_full": True, "active_leases": active_leases, "max_browsers": slot_cap}
+        return await _with_update(
+            {"chunk": None, "slots_full": True, "active_leases": active_leases, "max_browsers": slot_cap}
+        )
 
     # Prefer spreading across users: owners already active on this worker go last
     busy_owners = set(
@@ -773,7 +812,7 @@ async def worker_lease(
 
     job = await _next_job()
     if not job:
-        return {"chunk": None}
+        return await _with_update({"chunk": None})
 
     # reclaim stale leases (global for this worker + current job)
     stale_before = datetime.now(timezone.utc) - timedelta(seconds=120)
@@ -804,14 +843,16 @@ async def worker_lease(
         or 0
     )
     if active_leases >= slot_cap:
-        return {"chunk": None, "slots_full": True, "active_leases": active_leases, "max_browsers": slot_cap}
+        return await _with_update(
+            {"chunk": None, "slots_full": True, "active_leases": active_leases, "max_browsers": slot_cap}
+        )
 
     await db.refresh(job)
     if job.status == "stopped":
-        return {"chunk": None}
+        return await _with_update({"chunk": None})
     # Queued jobs must still fit thread quota at claim time
     if job.status == "queued" and not await jobs_svc.can_start_job(db, job):
-        return {"chunk": None}
+        return await _with_update({"chunk": None})
 
     # Atomic claim: only one worker wins the pending → leased transition
     claimed: JobChunk | None = None
@@ -821,7 +862,7 @@ async def worker_lease(
             tried.add(job.id)
             job = await _next_job(skip_ids=tried)
             if not job:
-                return {"chunk": None}
+                return await _with_update({"chunk": None})
             continue
         candidate = (
             await db.execute(
@@ -834,7 +875,7 @@ async def worker_lease(
             tried.add(job.id)
             job = await _next_job(skip_ids=tried)
             if not job:
-                return {"chunk": None}
+                return await _with_update({"chunk": None})
             continue
         now = datetime.now(timezone.utc)
         result = await db.execute(
@@ -848,7 +889,7 @@ async def worker_lease(
             claimed = candidate
             break
     if not claimed:
-        return {"chunk": None}
+        return await _with_update({"chunk": None})
 
     # Promote queued → running only after a successful claim (thread quota consumed now)
     await db.refresh(job)
@@ -859,7 +900,7 @@ async def worker_lease(
             claimed.worker_id = None
             claimed.leased_at = None
             await db.commit()
-            return {"chunk": None}
+            return await _with_update({"chunk": None})
         job.status = "running"
         job.started_at = datetime.now(timezone.utc)
         settings = dict(job.settings or {})
@@ -879,7 +920,7 @@ async def worker_lease(
                 claimed.worker_id = None
                 claimed.leased_at = None
                 await db.commit()
-                return {"chunk": None}
+                return await _with_update({"chunk": None})
 
     scrape = None  # legacy unused; package_defaults replace scrape profiles
     proxies_text = ""
@@ -913,24 +954,26 @@ async def worker_lease(
     except OSError:
         pass
 
-    return {
-        "chunk": {
-            "id": claimed.chunk_id,
-            "start": claimed.start_index,
-            "end": claimed.end_index,
-        },
-        "job": {
-            "job_id": job.public_id,
-            "owner_id": job.owner_id,
-            "keywords": keywords,
-            "locations": locations,
-            "settings": settings,
-            "proxies_text": proxies_text,
-            "ts": job.public_id,
-        },
-        "active_leases": active_leases + 1,
-        "max_browsers": slot_cap,
-    }
+    return await _with_update(
+        {
+            "chunk": {
+                "id": claimed.chunk_id,
+                "start": claimed.start_index,
+                "end": claimed.end_index,
+            },
+            "job": {
+                "job_id": job.public_id,
+                "owner_id": job.owner_id,
+                "keywords": keywords,
+                "locations": locations,
+                "settings": settings,
+                "proxies_text": proxies_text,
+                "ts": job.public_id,
+            },
+            "active_leases": active_leases + 1,
+            "max_browsers": slot_cap,
+        }
+    )
 
 
 @router.post("/worker-api/upload")

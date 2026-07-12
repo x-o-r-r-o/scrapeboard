@@ -591,6 +591,9 @@ def _run_fixed_worker_update(ref: str) -> tuple[bool, str]:
     env = os.environ.copy()
     env["SCRAPEBOARD_ASSUME_YES"] = "1"
     env["SCRAPEBOARD_UPDATE_REF"] = wanted
+    # Agent exits after update; KeepAlive/systemd restarts. Avoid install.py
+    # killing this process mid-report via service restart.
+    env["SCRAPEBOARD_SKIP_SERVICE_RESTART"] = "1"
 
     cmd = [
         sys.executable,
@@ -1272,6 +1275,9 @@ def main(argv=None) -> int:
             leased_any = False
             for _ in range(slots_free):
                 lease = client.lease()
+                # Panel may attach update on lease as well as heartbeat
+                if _maybe_apply_panel_update(lease):
+                    sys.exit(0)
                 if lease.get("slots_full"):
                     break
                 chunk = lease.get("chunk")

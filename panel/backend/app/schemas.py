@@ -505,7 +505,7 @@ class WorkerUpdate(BaseModel):
 
 
 class WorkerFleetUpdateRequest(BaseModel):
-    """Admin: queue git update on one or more workers (delivered via heartbeat)."""
+    """Admin: queue git update on one or more workers (delivered via heartbeat/lease)."""
 
     ref: str = "main"  # branch/tag/SHA, or "latest" for current-branch pull
     worker_ids: list[int] | None = None  # None / empty = all workers

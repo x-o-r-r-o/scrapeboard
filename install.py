@@ -625,6 +625,92 @@ def sync_repo_for_role(role: str, ref: str | None = None) -> int:
     return 0
 
 
+def restart_worker_service(kind: str) -> int:
+    """Restart the installed worker background service so a new VERSION is loaded.
+
+    Returns 0 on success / best-effort; non-zero if restart commands failed.
+    Skipped when SCRAPEBOARD_SKIP_SERVICE_RESTART=1 (set by agent remote-update
+    path — the agent exits and KeepAlive/systemd restarts instead).
+    """
+    if env_truthy("SCRAPEBOARD_SKIP_SERVICE_RESTART"):
+        print("==> Skipping service restart (SCRAPEBOARD_SKIP_SERVICE_RESTART=1)")
+        print("    Agent will exit; systemd / LaunchAgent / schtasks KeepAlive reloads new code.")
+        return 0
+
+    print()
+    print("==> Restarting worker service so the new agent VERSION is loaded…")
+    code = 1
+    if kind == "windows":
+        # End then Run the scheduled task created by install_service.bat
+        end = subprocess.call(
+            ["schtasks", "/End", "/TN", "ScrapeboardWorker"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        run_c = subprocess.call(
+            ["schtasks", "/Run", "/TN", "ScrapeboardWorker"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        code = 0 if run_c == 0 else max(end, run_c)
+        if code != 0:
+            print("  schtasks restart failed — is the service installed?")
+            print("  Install/restart:  worker\\install_service.bat")
+            print("  Or manually:      schtasks /End /TN ScrapeboardWorker")
+            print("                    schtasks /Run /TN ScrapeboardWorker")
+    elif kind == "macos":
+        uid = os.getuid()
+        label = f"gui/{uid}/com.scrapeboard.worker"
+        code = subprocess.call(
+            ["launchctl", "kickstart", "-k", label],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        if code != 0:
+            print(f"  launchctl kickstart failed ({label})")
+            print("  Install/restart:  bash worker/install_service.sh")
+            print(f"  Or manually:      launchctl kickstart -k {label}")
+    else:
+        # Linux systemd user unit
+        code = subprocess.call(
+            ["systemctl", "--user", "restart", "scrapeboard-worker"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        if code != 0:
+            print("  systemctl --user restart scrapeboard-worker failed")
+            print("  Install/restart:  bash worker/install_service.sh")
+            print("  Or manually:      systemctl --user restart scrapeboard-worker")
+
+    if code == 0:
+        note_installed("worker service restarted")
+        print("  Service restart requested OK.")
+    else:
+        note_manual("Restart the worker service so it loads the new VERSION (see commands above)")
+    print_worker_restart_verify_commands(kind)
+    return 0  # update itself succeeded; restart is best-effort
+
+
+def print_worker_restart_verify_commands(kind: str) -> None:
+    """Exact copy-paste commands to confirm VERSION and that the process is new."""
+    worker = ROOT / "worker"
+    print()
+    print("Verify on this machine:")
+    print(f"  cd {worker}")
+    print("  grep VERSION agent.py")
+    if kind == "windows":
+        print("  schtasks /Query /TN ScrapeboardWorker /V /FO LIST")
+        print("  findstr /C:\"scrapeboard worker v\" logs\\worker.log")
+    elif kind == "macos":
+        print(f"  launchctl print gui/$(id -u)/com.scrapeboard.worker | head")
+        print("  grep -E 'scrapeboard worker v' logs/worker.log | tail -3")
+    else:
+        print("  systemctl --user status scrapeboard-worker --no-pager")
+        print("  journalctl --user -u scrapeboard-worker -n 20 --no-pager")
+        print("  grep -E 'scrapeboard worker v' logs/worker.log | tail -3")
+    print("Panel should show agent version 0.8.0+ after the next heartbeat (~15s).")
+
+
 def run_update_mode(role: str, kind: str, ref: str | None = None) -> int:
     """Honor persisted role: sync sparse tree, then role-specific refresh hints."""
     print()
@@ -679,12 +765,30 @@ def run_update_mode(role: str, kind: str, ref: str | None = None) -> int:
         print(f"  (skip pip: no venv at {venv} — run setup_and_run first)")
         note_manual("Run worker setup_and_run to create .venv")
 
-    print()
-    print("Restart the worker service so it loads the new code:")
-    if kind == "windows":
-        print("  worker\\install_service.bat")
+    # Show VERSION on disk so operators can confirm the pull landed.
+    agent_py = worker / "agent.py"
+    if agent_py.is_file():
+        try:
+            for line in agent_py.read_text(encoding="utf-8", errors="replace").splitlines():
+                if line.startswith("VERSION"):
+                    print(f"==> On-disk {line.strip()}")
+                    break
+        except OSError:
+            pass
+
+    # Manual --update must restart the service; agent remote-update skips via env.
+    do_restart = ASSUME_YES or prompt_yes_no(
+        "Restart the worker service now so the panel sees the new VERSION?",
+        default=True,
+    )
+    if do_restart:
+        restart_worker_service(kind)
     else:
-        print("  bash worker/install_service.sh")
+        print()
+        print("Skipped service restart — panel will keep showing the old VERSION until you restart.")
+        print_worker_restart_verify_commands(kind)
+        note_manual("Restart worker service after update (see verify commands above)")
+
     print("Config/token stay in worker/worker_config.json.")
     print_install_summary()
     return 0
