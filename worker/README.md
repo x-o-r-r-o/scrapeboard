@@ -11,9 +11,10 @@ Production panel URL: **`https://scrape.cvmso.com`**
 ## Run by default
 
 1. Panel → **Admin → Workers → Create** → **copy token once**.  
-2. First run: from repo root `./install.sh` / `install.bat` → **Worker**, or `setup_and_run.bat` / `.sh` / `.command` (wizard → `worker_config.json`).  
+2. First run: from repo root `./install.sh` / `install.bat` → **Worker** (saves `.scrapeboard-role=worker`), or `setup_and_run.bat` / `.sh` / `.command` (wizard → `worker_config.json`).  
 3. **Install background service** (recommended): `install_service.bat` / `bash install_service.sh`.  
-4. Leave it running; it heartbeats and leases jobs from the panel.
+4. Leave it running; it heartbeats and leases jobs from the panel.  
+5. Later updates: `python3 install.py --role worker --update` or `bash worker/update.sh` (does not pull `panel/`).
 
 Full stack (panel + ops): **[root README → Run by default](../README.md#run-by-default)**.
 
@@ -208,16 +209,23 @@ Foreground runs (no `--service`) still use a temp work directory unless you set 
 
 ---
 
-## Update / uninstall after `git pull`
+## Update / uninstall
+
+Worker hosts should have `.scrapeboard-role=worker` (written by `install.py`). Updates use **worker sparse-checkout** (`/*` minus `panel/` and `deploy/`) so panel sources never land on scrape machines.
 
 ```bash
-cd worker
-git pull --ff-only                 # or sync this folder
-source .venv/bin/activate          # Windows: .venv\Scripts\activate
-pip install -r requirements.txt
+# From repo root (preferred):
+python3 install.py --role worker --update
+# or: bash worker/update.sh          # Windows: worker\update.bat
+
+source worker/.venv/bin/activate     # Win: worker\.venv\Scripts\activate
+# pip is refreshed by --update when a venv exists
+
 # re-apply service (keeps worker_config.json):
-bash install_service.sh            # Windows: install_service.bat
+bash worker/install_service.sh       # Windows: worker\install_service.bat
 ```
+
+If this machine is marked `panel`, worker update refuses — use `deploy/hestiacp/update.sh` on the panel VPS, or reconfigure with `python3 install.py --role worker --force-role --update`.
 
 Uninstall service only (config stays):
 

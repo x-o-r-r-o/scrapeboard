@@ -8,6 +8,7 @@ from app.bot.runtime import bot_runtime
 from app.core.database import get_db
 from app.models import BotCommand, BotSettings, BotWorkflow, User
 from app.schemas import (
+    BotCommandCreate,
     BotCommandOut,
     BotCommandUpdate,
     BotSettingsOut,
@@ -25,11 +26,57 @@ from app.services.captcha_settings import get_captcha_settings
 
 router = APIRouter(tags=["settings-bot"])
 
+BUILTIN_COMMAND_KEYS = frozenset(c["key"] for c in DEMO_COMMANDS)
+# Critical built-ins: edit/settings allowed; hard delete blocked (disable instead).
+PROTECTED_COMMAND_KEYS = frozenset({"start", "stop", "help"})
+ALLOWED_AUDIENCES = frozenset({"everyone", "users", "admins", "subscribers"})
+
 
 def _slugify_key(raw: str) -> str:
     key = "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in (raw or "").strip().lower())
     key = key.strip("_-")[:64]
     return key or "workflow"
+
+
+def _normalize_command(raw: str) -> str:
+    c = (raw or "").strip().lower().split()[0] if (raw or "").strip() else ""
+    c = c.split("@")[0]
+    if not c:
+        raise HTTPException(400, "command is required")
+    if not c.startswith("/"):
+        c = f"/{c}"
+    body = c[1:]
+    if not body or not all(ch.isalnum() or ch == "_" for ch in body):
+        raise HTTPException(400, "command must be /name with letters, numbers, or underscore")
+    if len(c) > 64:
+        raise HTTPException(400, "command too long")
+    return c
+
+
+def _validate_audience(audience: str | None) -> str | None:
+    if audience is None:
+        return None
+    a = (audience or "").strip().lower()
+    if a not in ALLOWED_AUDIENCES:
+        raise HTTPException(400, f"audience must be one of: {', '.join(sorted(ALLOWED_AUDIENCES))}")
+    return a
+
+
+def _command_out(row: BotCommand) -> BotCommandOut:
+    builtin = row.key in BUILTIN_COMMAND_KEYS
+    return BotCommandOut(
+        id=row.id,
+        key=row.key,
+        command=row.command,
+        title=row.title,
+        description=row.description,
+        response_text=row.response_text or "",
+        enabled=row.enabled,
+        audience=row.audience,
+        sort_order=row.sort_order,
+        is_builtin=builtin,
+        handler="builtin" if builtin else "static",
+    )
 
 
 def _captcha_out(row) -> CaptchaSettingsOut:
@@ -150,7 +197,56 @@ async def update_bot_settings(
 
 @router.get("/bot/commands", response_model=list[BotCommandOut])
 async def list_commands(_: User = Depends(require_admin), __: User = Depends(require_ready_user), db: AsyncSession = Depends(get_db)):
-    return (await db.execute(select(BotCommand).order_by(BotCommand.sort_order))).scalars().all()
+    rows = (await db.execute(select(BotCommand).order_by(BotCommand.sort_order, BotCommand.id))).scalars().all()
+    return [_command_out(r) for r in rows]
+
+
+@router.get("/bot/commands/{command_id}", response_model=BotCommandOut)
+async def get_command(
+    command_id: int,
+    _: User = Depends(require_admin),
+    __: User = Depends(require_ready_user),
+    db: AsyncSession = Depends(get_db),
+):
+    c = await db.get(BotCommand, command_id)
+    if not c:
+        raise HTTPException(404, "Not found")
+    return _command_out(c)
+
+
+@router.post("/bot/commands", response_model=BotCommandOut)
+async def create_command(
+    body: BotCommandCreate,
+    _: User = Depends(require_admin),
+    __: User = Depends(require_ready_user),
+    db: AsyncSession = Depends(get_db),
+):
+    command = _normalize_command(body.command)
+    key = _slugify_key(body.key) if (body.key or "").strip() else _slugify_key(command.lstrip("/"))
+    if key in BUILTIN_COMMAND_KEYS:
+        raise HTTPException(400, f"key '{key}' is reserved for a built-in command")
+    audience = _validate_audience(body.audience) or "everyone"
+    existing_key = (await db.execute(select(BotCommand).where(BotCommand.key == key))).scalar_one_or_none()
+    if existing_key:
+        raise HTTPException(400, f"Command key '{key}' already exists")
+    existing_cmd = (await db.execute(select(BotCommand).where(BotCommand.command == command))).scalar_one_or_none()
+    if existing_cmd:
+        raise HTTPException(400, f"Command '{command}' already exists")
+    title = (body.title or "").strip() or command.lstrip("/")
+    c = BotCommand(
+        key=key,
+        command=command,
+        title=title,
+        description=body.description or "",
+        response_text=body.response_text or "",
+        enabled=bool(body.enabled),
+        audience=audience,
+        sort_order=int(body.sort_order or 0),
+    )
+    db.add(c)
+    await db.commit()
+    await db.refresh(c)
+    return _command_out(c)
 
 
 @router.patch("/bot/commands/{command_id}", response_model=BotCommandOut)
@@ -164,11 +260,60 @@ async def update_command(
     c = await db.get(BotCommand, command_id)
     if not c:
         raise HTTPException(404, "Not found")
-    for k, v in body.model_dump(exclude_unset=True).items():
+    data = body.model_dump(exclude_unset=True)
+    if "audience" in data:
+        data["audience"] = _validate_audience(data["audience"])
+    if "command" in data:
+        if c.key in BUILTIN_COMMAND_KEYS:
+            raise HTTPException(400, "Cannot change the slash trigger of a built-in command")
+        new_cmd = _normalize_command(data["command"])
+        clash = (
+            await db.execute(select(BotCommand).where(BotCommand.command == new_cmd, BotCommand.id != c.id))
+        ).scalar_one_or_none()
+        if clash:
+            raise HTTPException(400, f"Command '{new_cmd}' already exists")
+        data["command"] = new_cmd
+    for k, v in data.items():
         setattr(c, k, v)
     await db.commit()
     await db.refresh(c)
-    return c
+    return _command_out(c)
+
+
+@router.post("/bot/commands/{command_id}/toggle", response_model=BotCommandOut)
+async def toggle_command(
+    command_id: int,
+    _: User = Depends(require_admin),
+    __: User = Depends(require_ready_user),
+    db: AsyncSession = Depends(get_db),
+):
+    c = await db.get(BotCommand, command_id)
+    if not c:
+        raise HTTPException(404, "Not found")
+    c.enabled = not c.enabled
+    await db.commit()
+    await db.refresh(c)
+    return _command_out(c)
+
+
+@router.delete("/bot/commands/{command_id}", response_model=MessageOut)
+async def delete_command(
+    command_id: int,
+    _: User = Depends(require_admin),
+    __: User = Depends(require_ready_user),
+    db: AsyncSession = Depends(get_db),
+):
+    c = await db.get(BotCommand, command_id)
+    if not c:
+        raise HTTPException(404, "Not found")
+    if c.key in PROTECTED_COMMAND_KEYS:
+        raise HTTPException(
+            400,
+            f"Built-in {c.command} cannot be deleted. Disable it in settings, or edit its copy instead.",
+        )
+    await db.delete(c)
+    await db.commit()
+    return MessageOut(detail="Command deleted")
 
 
 @router.get("/bot/workflows", response_model=list[BotWorkflowOut])

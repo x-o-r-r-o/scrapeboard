@@ -86,13 +86,15 @@ There is **no public registration**. Admins create users. Support is via Telegra
 scrapeboard/
 ├── README.md                 ← this documentation
 ├── STRUCTURE.md
+├── .scrapeboard-role         ← local machine role panel|worker (gitignored)
 ├── install.py / install.sh / install.bat / install.command
-│                             ← **start here** — panel vs worker by OS
+│                             ← **start here** — panel vs worker by OS; --update honors role
 ├── deploy/                   ← HestiaCP install / update
 │   ├── config.env.example
 │   ├── install.sh
 │   ├── update.sh
 │   ├── lib/common.sh
+│   ├── lib/role.sh           ← role file + sparse-checkout helpers
 │   └── hestiacp/
 │       ├── README.md
 │       ├── install.sh
@@ -108,6 +110,7 @@ scrapeboard/
     ├── gmaps_scraper.py      ← browser scrape engine
     ├── setup_and_run.*       ← first-run wizard (+ optional service install)
     ├── install_service.*     ← **default** background service (login/boot)
+    ├── update.sh / update.bat← worker-role git sync (no panel/)
     ├── requirements.txt
     ├── SCRAPER.md
     └── worker_config.json    ← created on first run (gitignored)
@@ -238,7 +241,8 @@ Then open **https://scrape.cvmso.com** → sign in → change password → enabl
 | Logs | `journalctl -u scrapeboard -f` |
 | Restart | `systemctl restart scrapeboard` |
 | Stop | `systemctl stop scrapeboard` |
-| Update | `bash deploy/hestiacp/update.sh` (pulls with sparse-checkout; excludes `worker/`) |
+| Update | `bash deploy/hestiacp/update.sh` (role=panel sparse-checkout; excludes `worker/`) |
+
 
 Telegram bot runs **inside the panel API process** (no separate bot service). Full steps: [`deploy/hestiacp/README.md`](deploy/hestiacp/README.md).
 
@@ -735,26 +739,32 @@ OpenAPI docs when API is running: `http://127.0.0.1:3010/docs` (localhost only i
 
 ## Updating
 
+Each host has a durable **machine role** in `.scrapeboard-role` (`panel` or `worker`, gitignored) set on first install. Override with `SCRAPEBOARD_ROLE=panel|worker`. Updates refuse to run the wrong role’s sync (use `--force-role` / `FORCE_ROLE_SWITCH=1` only when intentionally reconfiguring).
+
+| Role | Sparse-checkout | Update command |
+|------|-----------------|----------------|
+| **panel** | Keep all except `worker/` | `bash deploy/hestiacp/update.sh` |
+| **worker** | Keep root install helpers + `worker/`; exclude `panel/` and `deploy/` | `python3 install.py --role worker --update` or `bash worker/update.sh` |
+
 ```bash
 # Panel VPS — sync code, then as root:
 bash /home/cvmso/apps/scrapeboard/deploy/hestiacp/update.sh
 ```
 
-Update **keeps** existing `panel/backend/.env` (secrets preserved), rebuilds frontend, restarts systemd, refreshes nginx snippet.
+Update **keeps** existing `panel/backend/.env` (secrets preserved), rebuilds frontend, restarts systemd, refreshes nginx snippet. Never pulls `worker/` onto the panel host.
 
 **Workers** (each scrape machine):
 
 ```bash
-cd worker
-git pull --ff-only                 # or sync the worker/ folder
-source .venv/bin/activate          # Win: .venv\Scripts\activate
-pip install -r requirements.txt
-# restart service (config + token stay in worker_config.json):
-bash install_service.sh            # re-install/restart LaunchAgent / systemd user unit
-# Windows: install_service.bat
+# From repo root (preferred — applies worker sparse-checkout, then pip):
+python3 install.py --role worker --update
+# or: bash worker/update.sh          # Windows: worker\update.bat
+
+# Then restart the service (config + token stay in worker_config.json):
+bash worker/install_service.sh       # Windows: worker\install_service.bat
 ```
 
-Or uninstall → pull → reinstall: `bash install_service.sh --uninstall` then `bash install_service.sh`.
+Or uninstall → update → reinstall: `bash worker/install_service.sh --uninstall` then update, then `bash worker/install_service.sh`.
 
 ---
 

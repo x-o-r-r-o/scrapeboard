@@ -1,13 +1,16 @@
 # Scrapeboard — git ignore
 #
-# Local full-repo clones keep worker/ for development. Production panel
-# deploys (deploy/hestiacp) use sparse-checkout / post-sync removal so
-# worker/ is never installed on the control-panel host.
+# Local full-repo clones may keep panel/ + worker/ for development.
+# Production hosts persist machine role in .scrapeboard-role (panel|worker)
+# and use role-based sparse-checkout:
+#   panel  → exclude worker/
+#   worker → exclude panel/ and deploy/
 
 .DS_Store
 .env
 .env.*
 !.env.example
+.scrapeboard-role
 deploy/config.env
 **/__pycache__/
 **/*.pyc

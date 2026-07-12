@@ -21,6 +21,22 @@ const CAPTCHA: { value: string; label: string }[] = [
   { value: "captchaai", label: "CaptchaAI" },
 ];
 
+/** Matches worker CaptchaSolver.HOSTS — used when host override is blank. */
+const DEFAULT_HOSTS: Record<string, string> = {
+  "2captcha": "https://2captcha.com",
+  captchaai: "https://ocr.captchaai.com",
+};
+
+function defaultHostFor(provider: string): string | null {
+  return DEFAULT_HOSTS[provider] ?? null;
+}
+
+function hostOverrideHint(provider: string): string {
+  const def = defaultHostFor(provider);
+  if (def) return `Leave blank for default: ${def}`;
+  return "Leave blank for the selected provider’s default URL";
+}
+
 const emptyForm = (): CaptchaForm => ({
   captcha_provider: "none",
   captcha_key: "",
@@ -106,9 +122,9 @@ export function CaptchaAdminPage() {
       <form className="card" onSubmit={save} style={{ display: "grid", gap: "0.85rem", maxWidth: 640 }}>
         <p className="muted" style={{ margin: 0 }}>
           Typical setup: primary <code>2captcha</code>, backup <code>captchaai</code> (or the reverse). Backup
-          runs only if primary fails. Leave host blank for defaults (
-          <code>https://2captcha.com</code> / <code>https://ocr.captchaai.com</code>). Login reCAPTCHA is
-          separate under Security.
+          runs only if primary fails. Host override fields are optional free-text API base URLs — leave them
+          blank unless you use a mirror, proxy, or self-hosted compatible endpoint. Login reCAPTCHA is separate
+          under Security.
         </p>
         <div className="form-grid two">
           <label className="field">
@@ -135,14 +151,29 @@ export function CaptchaAdminPage() {
               placeholder="blank = keep"
             />
           </label>
-          <label className="field">
-            Primary host override
+          <label className="field" style={{ gridColumn: "1 / -1" }}>
+            Primary API host override
             <input
               className="input"
               value={form.captcha_host}
               onChange={(e) => setForm({ ...form, captcha_host: e.target.value })}
-              placeholder="optional"
+              placeholder={hostOverrideHint(form.captcha_provider)}
+              autoComplete="off"
+              spellCheck={false}
             />
+            <span className="muted" style={{ fontSize: "0.75rem", fontWeight: 400 }}>
+              Optional custom API base URL (type a full URL — not a dropdown). Leave blank to use the provider
+              default
+              {defaultHostFor(form.captcha_provider) ? (
+                <>
+                  {" "}
+                  (<code>{defaultHostFor(form.captcha_provider)}</code>)
+                </>
+              ) : (
+                " (pick a provider above)"
+              )}
+              . Rarely needed — only for a mirror, proxy, or self-hosted 2captcha-compatible endpoint.
+            </span>
           </label>
           <label className="field">
             Solver retries
@@ -154,6 +185,7 @@ export function CaptchaAdminPage() {
               onChange={(e) => setForm({ ...form, captcha_retries: Number(e.target.value) })}
             />
           </label>
+          <div aria-hidden="true" />
           <label className="field">
             Backup provider
             <select
@@ -178,14 +210,28 @@ export function CaptchaAdminPage() {
               placeholder="blank = keep"
             />
           </label>
-          <label className="field">
-            Backup host override
+          <label className="field" style={{ gridColumn: "1 / -1" }}>
+            Backup API host override
             <input
               className="input"
               value={form.captcha_backup_host}
               onChange={(e) => setForm({ ...form, captcha_backup_host: e.target.value })}
-              placeholder="optional"
+              placeholder={hostOverrideHint(form.captcha_backup_provider)}
+              autoComplete="off"
+              spellCheck={false}
             />
+            <span className="muted" style={{ fontSize: "0.75rem", fontWeight: 400 }}>
+              Same as primary: optional free-text base URL for the backup solver. Leave blank for
+              {defaultHostFor(form.captcha_backup_provider) ? (
+                <>
+                  {" "}
+                  <code>{defaultHostFor(form.captcha_backup_provider)}</code>
+                </>
+              ) : (
+                " the selected backup provider’s default"
+              )}
+              . No options list — paste a URL only if you need a non-default endpoint.
+            </span>
           </label>
         </div>
         <button className="btn" type="submit">

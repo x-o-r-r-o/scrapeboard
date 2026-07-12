@@ -89,7 +89,7 @@ git config --global --add safe.directory /home/cvmso/apps/scrapeboard
 cd /home/cvmso/apps/scrapeboard
 ```
 
-**Panel vs worker:** the control panel only needs `panel/`, `deploy/`, and top-level docs. Install/update configure **git sparse-checkout** to exclude `worker/` and remove it if present. Scrape agents are installed separately from the repo’s `worker/` folder on worker hosts — never required on the Hestia panel VPS. Local development clones may keep the full repo including `worker/`.
+**Panel vs worker:** each host persists `.scrapeboard-role` (`panel` \| `worker`, gitignored; override `SCRAPEBOARD_ROLE`). The control panel only needs `panel/`, `deploy/`, and top-level docs. Install/update configure **git sparse-checkout** to exclude `worker/` and remove it if present. Scrape agents use role `worker` (sparse excludes `panel/` and `deploy/`) via `install.py --role worker` / `worker/update.sh` — never required on the Hestia panel VPS. Local development clones may keep the full repo until you opt into sparse-checkout.
 
 ### 2b. Create `deploy/config.env`
 
@@ -131,7 +131,7 @@ What it does:
 
 1. Installs system packages (Python, git, rsync, …)
 2. Installs **Bun** (frontend build only)
-3. Syncs repo (`git pull` as `cvmso` when `REPO_URL` is set) with **sparse-checkout excluding `worker/`**, then removes `worker/` if still present
+3. Syncs repo (`git pull` as `cvmso` when `REPO_URL` is set), writes `.scrapeboard-role=panel`, applies **sparse-checkout excluding `worker/`**, then removes `worker/` if still present
 4. Writes quoted `panel/backend/.env` (`ENVIRONMENT=production`)
 5. Creates Python venv + installs API requirements
 6. Builds React → rsync into `public_html`
@@ -222,11 +222,13 @@ v-rebuild-web-domain cvmso scrape.cvmso.com
 
 ## 5. Update after code changes
 
+Requires `.scrapeboard-role=panel` (written on first install). If the file says `worker`, update exits with an error — this is a panel VPS only.
+
 ```bash
 ssh root@YOUR_SERVER_IP
 cd /home/cvmso/apps/scrapeboard
 chown -R cvmso:cvmso /home/cvmso/apps/scrapeboard
-# Prefer update.sh (re-applies sparse-checkout, drops worker/, rebuilds, restarts).
+# Prefer update.sh (asserts role=panel, re-applies sparse-checkout, drops worker/, rebuilds, restarts).
 # A bare git pull is OK after the first install/update has enabled sparse-checkout.
 bash deploy/hestiacp/update.sh
 ```
@@ -252,6 +254,7 @@ ssh root@YOUR_SERVER_IP 'bash /home/cvmso/apps/scrapeboard/deploy/hestiacp/updat
 | Item | Path |
 |------|------|
 | App | `/home/cvmso/apps/scrapeboard` |
+| Machine role | `/home/cvmso/apps/scrapeboard/.scrapeboard-role` (`panel`; gitignored) |
 | Deploy config | `/home/cvmso/apps/scrapeboard/deploy/config.env` |
 | API env | `/home/cvmso/apps/scrapeboard/panel/backend/.env` |
 | DB / uploads / results | `/home/cvmso/apps/scrapeboard/panel/data/` |
@@ -275,26 +278,25 @@ v-rebuild-web-domain cvmso scrape.cvmso.com
 
 ## 8. After panel is up — workers
 
-Panel servers **never need** `worker/` in `APP_DIR`. On each scrape host, clone/copy the repo’s `worker/` folder (or the full repo for development) and run setup there.
+Panel servers **never need** `worker/` in `APP_DIR`. On each scrape host, clone the repo (or use `install.py --role worker`), persist `.scrapeboard-role=worker`, and apply worker sparse-checkout so `panel/` and `deploy/` are not pulled.
 
 1. Panel → **Admin → Workers → Create** → copy token once.
 2. On the worker machine (Windows / macOS / Linux):
 
 ```bash
-# Copy or clone only what you need on the scrape host, e.g.:
-#   git clone https://github.com/x-o-r-r-o/scrapeboard.git && cd scrapeboard/worker
+# Preferred: from repo root
+./install.sh --role worker          # or: python3 install.py --role worker
+# Accept worker sparse-checkout when prompted (excludes panel/ + deploy/)
+
+# Or manually:
 cd worker
 # Windows: setup_and_run.bat
 # macOS:   open setup_and_run.command   or  bash setup_and_run.sh
 # Linux:   bash setup_and_run.sh
 
-# Or:
-python3 -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
-python agent.py --setup
-# Panel URL: https://scrape.cvmso.com
-# Token:     (from panel)
-# Optional Tailscale: see worker/README.md (default off)
+# Updates later (worker sparse pull — does not fetch panel sources):
+#   python3 install.py --role worker --update
+#   bash worker/update.sh    # Windows: worker\update.bat
 
 # Default: install as background service (starts at login, keeps leasing jobs)
 #   macOS/Linux:  bash install_service.sh
@@ -365,10 +367,13 @@ grep '^BOOTSTRAP_ADMIN_PASSWORD=' /home/cvmso/apps/scrapeboard/panel/backend/.en
 | `deploy/hestiacp/update.sh` | Pull/build/restart; keeps `.env` |
 | `deploy/hestiacp/reset_admin_password.sh` | Reset admin password in DB |
 | `deploy/lib/common.sh` | Shared helpers (`env_quote`, systemd, nginx, …) |
+| `deploy/lib/role.sh` | Machine role + panel/worker sparse-checkout |
 | `deploy/config.env.example` | Template → copy to `config.env` |
 | `deploy/hestiacp/nginx.ssl.conf_scrapeboard` | `/api/` proxy snippet |
 | `panel/run.sh` | Local API start (`uvicorn` :3010) |
 | `worker/setup_and_run.*` | Worker first-run wizard |
 | `worker/install_service.*` | Worker background service (default) |
+| `worker/update.*` / `install.py --update` | Role-based git sync (worker excludes panel/) |
+| `.scrapeboard-role` | Local `panel` \| `worker` (gitignored; set on first install) |
 
 Project overview: [`../../README.md`](../../README.md)

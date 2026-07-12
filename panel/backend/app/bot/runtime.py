@@ -32,6 +32,44 @@ from app.services.notify import send_document, send_text
 
 log = logging.getLogger("bot.runtime")
 
+# Slash commands implemented in code (DB rows only gate enable/audience/help/copy).
+CODE_HANDLED_COMMANDS = frozenset(
+    {
+        "/whoami",
+        "/id",
+        "/start",
+        "/help",
+        "/packages",
+        "/plans",
+        "/buy",
+        "/paid",
+        "/subscription",
+        "/me",
+        "/renew",
+        "/support",
+        "/run",
+        "/status",
+        "/stats",
+        "/jobs",
+        "/stop",
+        "/servers",
+        "/pending",
+        "/approve",
+        "/users",
+        "/grant",
+        "/revoke",
+        "/extend",
+        "/disable",
+        "/enable",
+    }
+)
+COMMAND_ALIASES = {
+    "/id": "/whoami",
+    "/plans": "/packages",
+    "/me": "/subscription",
+    "/renew": "/subscription",
+}
+
 
 class RateLimiter:
     def __init__(self, max_calls: int, per_seconds: float):
@@ -157,10 +195,23 @@ class TelegramBotRuntime:
             else:
                 has_sub = bool(await billing_svc.active_subscription(db, user))
 
-        commands = {
-            c.command: c
-            for c in (await db.execute(select(BotCommand).where(BotCommand.enabled == True))).scalars().all()  # noqa: E712
+        commands_all = {
+            c.command: c for c in (await db.execute(select(BotCommand))).scalars().all()
         }
+        commands = {k: v for k, v in commands_all.items() if v.enabled}
+
+        def _row_for(slash: str):
+            if slash in commands_all:
+                return commands_all[slash]
+            alias = COMMAND_ALIASES.get(slash)
+            if alias and alias in commands_all:
+                return commands_all[alias]
+            return None
+
+        row = _row_for(cmd)
+        if row is not None and not row.enabled:
+            await self._send(token, chat_id, "This command is disabled.")
+            return
 
         if cmd in ("/whoami", "/id"):
             link = f"linked as {user.username}" if user else "not linked to a panel account"
@@ -183,9 +234,14 @@ class TelegramBotRuntime:
             await self._handle_billing(db, token, chat_id, user, cmd, args, settings)
             return
 
-        meta = commands.get(cmd)
+        meta = commands.get(cmd) or commands.get(COMMAND_ALIASES.get(cmd, ""))
         if meta and not self._audience_ok(meta.audience, user, has_sub):
             await self._send(token, chat_id, "⛔ Not allowed for your role.")
+            return
+
+        # Custom / static-reply commands (DB-only; no Python handler).
+        if meta and meta.response_text and cmd not in CODE_HANDLED_COMMANDS:
+            await self._send(token, chat_id, meta.response_text)
             return
 
         if not user:

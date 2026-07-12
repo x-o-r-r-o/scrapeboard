@@ -5,10 +5,16 @@ import { api } from "../api";
 type BotSettings = Record<string, unknown>;
 type Command = {
   id: number;
+  key: string;
   command: string;
   title: string;
+  description: string;
+  response_text: string;
   enabled: boolean;
   audience: string;
+  sort_order: number;
+  is_builtin?: boolean;
+  handler?: "builtin" | "static";
 };
 type WorkflowStep = Record<string, string>;
 type Workflow = {
@@ -36,7 +42,21 @@ type WorkflowDraft = {
   steps: WorkflowStep[];
 };
 
+type CommandDraft = {
+  key: string;
+  command: string;
+  title: string;
+  description: string;
+  response_text: string;
+  enabled: boolean;
+  audience: string;
+  sort_order: number;
+};
+
 type Tab = "connection" | "commands" | "workflows";
+
+const AUDIENCES = ["everyone", "users", "subscribers", "admins"] as const;
+const PROTECTED_COMMAND_KEYS = new Set(["start", "stop", "help"]);
 
 const EMPTY_DRAFT: WorkflowDraft = {
   key: "",
@@ -46,6 +66,17 @@ const EMPTY_DRAFT: WorkflowDraft = {
   sort_order: 100,
   trigger: "command:/start",
   steps: [{ action: "" }],
+};
+
+const EMPTY_CMD_DRAFT: CommandDraft = {
+  key: "",
+  command: "",
+  title: "",
+  description: "",
+  response_text: "",
+  enabled: true,
+  audience: "everyone",
+  sort_order: 100,
 };
 
 const STEP_KINDS = ["action", "say", "if", "wait"] as const;
@@ -75,6 +106,19 @@ function toDraft(w: Workflow): WorkflowDraft {
     sort_order: w.sort_order ?? 0,
     trigger: String(w.definition?.trigger || "command:/start"),
     steps,
+  };
+}
+
+function toCommandDraft(c: Command): CommandDraft {
+  return {
+    key: c.key,
+    command: c.command,
+    title: c.title || "",
+    description: c.description || "",
+    response_text: c.response_text || "",
+    enabled: c.enabled,
+    audience: c.audience || "everyone",
+    sort_order: c.sort_order ?? 0,
   };
 }
 
@@ -222,6 +266,108 @@ function StepEditor({
   );
 }
 
+function CommandFormFields({
+  draft,
+  onChange,
+  lockKey,
+  lockCommand,
+}: {
+  draft: CommandDraft;
+  onChange: (d: CommandDraft) => void;
+  lockKey?: boolean;
+  lockCommand?: boolean;
+}) {
+  return (
+    <div className="form-grid two">
+      <label className="field">
+        Key
+        <input
+          className="input"
+          value={draft.key}
+          onChange={(e) => onChange({ ...draft, key: e.target.value })}
+          placeholder="hello (optional — derived from command)"
+          disabled={lockKey}
+        />
+      </label>
+      <label className="field">
+        Command
+        <input
+          className="input"
+          required
+          value={draft.command}
+          onChange={(e) => onChange({ ...draft, command: e.target.value })}
+          placeholder="/hello"
+          disabled={lockCommand}
+        />
+      </label>
+      <label className="field">
+        Title
+        <input
+          className="input"
+          required
+          value={draft.title}
+          onChange={(e) => onChange({ ...draft, title: e.target.value })}
+        />
+      </label>
+      <label className="field">
+        Audience
+        <select
+          className="input"
+          value={draft.audience}
+          onChange={(e) => onChange({ ...draft, audience: e.target.value })}
+        >
+          {AUDIENCES.map((a) => (
+            <option key={a} value={a}>
+              {a}
+            </option>
+          ))}
+        </select>
+      </label>
+      <label className="field full">
+        Description
+        <textarea
+          className="input"
+          rows={2}
+          value={draft.description}
+          onChange={(e) => onChange({ ...draft, description: e.target.value })}
+          placeholder="Shown in Bot Builder and help context"
+        />
+      </label>
+      <label className="field full">
+        Response text
+        <textarea
+          className="input"
+          rows={3}
+          value={draft.response_text}
+          onChange={(e) => onChange({ ...draft, response_text: e.target.value })}
+          placeholder={
+            lockCommand
+              ? "Optional fallback / usage hint (built-in handler still runs)"
+              : "Message Telegram sends for this custom command"
+          }
+        />
+      </label>
+      <label className="field">
+        Sort order
+        <input
+          className="input"
+          type="number"
+          value={draft.sort_order}
+          onChange={(e) => onChange({ ...draft, sort_order: Number(e.target.value) || 0 })}
+        />
+      </label>
+      <label className="check-row" style={{ alignItems: "center" }}>
+        <input
+          type="checkbox"
+          checked={draft.enabled}
+          onChange={(e) => onChange({ ...draft, enabled: e.target.checked })}
+        />
+        Enabled
+      </label>
+    </div>
+  );
+}
+
 export default function BotBuilderPage() {
   const [settings, setSettings] = useState<BotSettings>({});
   const [token, setToken] = useState("");
@@ -235,6 +381,10 @@ export default function BotBuilderPage() {
   const [createDraft, setCreateDraft] = useState<WorkflowDraft>(EMPTY_DRAFT);
   const [editId, setEditId] = useState<number | null>(null);
   const [editDraft, setEditDraft] = useState<WorkflowDraft | null>(null);
+  const [cmdCreating, setCmdCreating] = useState(false);
+  const [cmdCreateDraft, setCmdCreateDraft] = useState<CommandDraft>(EMPTY_CMD_DRAFT);
+  const [cmdEditId, setCmdEditId] = useState<number | null>(null);
+  const [cmdEditDraft, setCmdEditDraft] = useState<CommandDraft | null>(null);
 
   async function refresh() {
     const [s, c, w] = await Promise.all([
@@ -330,6 +480,64 @@ export default function BotBuilderPage() {
     }
   }
 
+  async function createCommand(e: FormEvent) {
+    e.preventDefault();
+    setError("");
+    setMsg("");
+    try {
+      await api("/api/bot/commands", {
+        method: "POST",
+        body: JSON.stringify({
+          key: cmdCreateDraft.key,
+          command: cmdCreateDraft.command,
+          title: cmdCreateDraft.title,
+          description: cmdCreateDraft.description,
+          response_text: cmdCreateDraft.response_text,
+          enabled: cmdCreateDraft.enabled,
+          audience: cmdCreateDraft.audience,
+          sort_order: cmdCreateDraft.sort_order,
+        }),
+      });
+      setCmdCreateDraft(EMPTY_CMD_DRAFT);
+      setCmdCreating(false);
+      setMsg("Command created. Runtime picks up enabled commands on the next message.");
+      await refresh();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Create failed");
+    }
+  }
+
+  async function saveCommand(e: FormEvent) {
+    e.preventDefault();
+    if (cmdEditId == null || !cmdEditDraft) return;
+    setError("");
+    setMsg("");
+    try {
+      const body: Record<string, unknown> = {
+        title: cmdEditDraft.title,
+        description: cmdEditDraft.description,
+        response_text: cmdEditDraft.response_text,
+        enabled: cmdEditDraft.enabled,
+        audience: cmdEditDraft.audience,
+        sort_order: cmdEditDraft.sort_order,
+      };
+      const editing = commands.find((c) => c.id === cmdEditId);
+      if (editing && !editing.is_builtin) {
+        body.command = cmdEditDraft.command;
+      }
+      await api(`/api/bot/commands/${cmdEditId}`, {
+        method: "PATCH",
+        body: JSON.stringify(body),
+      });
+      setCmdEditId(null);
+      setCmdEditDraft(null);
+      setMsg("Command updated.");
+      await refresh();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Update failed");
+    }
+  }
+
   const enabled = Boolean(settings.enabled);
   const tokenOk = Boolean(settings.token_configured);
   const username = String(settings.username || "");
@@ -340,7 +548,7 @@ export default function BotBuilderPage() {
         <div>
           <h1>Bot builder</h1>
           <p className="subtitle">
-            Connect your Telegram bot (BotFather token), toggle commands, and manage workflows — same control surface
+            Connect your Telegram bot (BotFather token), manage commands, and edit workflows — same control surface
             style as Omnidesk bots.
           </p>
         </div>
@@ -538,41 +746,165 @@ export default function BotBuilderPage() {
 
       {tab === "commands" ? (
         <div className="stack">
-          {commands.length === 0 ? (
+          <div className="page-actions">
+            <button
+              className="btn"
+              type="button"
+              onClick={() => {
+                setCmdCreating(true);
+                setCmdCreateDraft({
+                  ...EMPTY_CMD_DRAFT,
+                  sort_order: (commands.reduce((m, c) => Math.max(m, c.sort_order || 0), 0) || 0) + 10,
+                });
+                setCmdEditId(null);
+                setCmdEditDraft(null);
+              }}
+            >
+              Add command
+            </button>
+          </div>
+
+          {cmdCreating ? (
+            <form className="card stack" onSubmit={createCommand}>
+              <h3 style={{ margin: 0 }}>New command</h3>
+              <p className="muted" style={{ margin: 0, fontSize: "0.88rem" }}>
+                Custom commands reply with <strong>response text</strong>. Built-in handlers (/start, /run, …) stay
+                code-backed — add those via Import demos if missing.
+              </p>
+              <CommandFormFields draft={cmdCreateDraft} onChange={setCmdCreateDraft} />
+              <div className="page-actions">
+                <button className="btn" type="submit">
+                  Create command
+                </button>
+                <button className="btn secondary" type="button" onClick={() => setCmdCreating(false)}>
+                  Cancel
+                </button>
+              </div>
+            </form>
+          ) : null}
+
+          {cmdEditId != null && cmdEditDraft ? (
+            <form className="card stack" onSubmit={saveCommand}>
+              <h3 style={{ margin: 0 }}>
+                Edit command · <code>{cmdEditDraft.key}</code>
+              </h3>
+              {commands.find((c) => c.id === cmdEditId)?.is_builtin ? (
+                <p className="muted" style={{ margin: 0, fontSize: "0.88rem" }}>
+                  Built-in handler — you can edit title, description, audience, response hint, and enable/disable. The
+                  slash trigger is fixed.
+                </p>
+              ) : null}
+              <CommandFormFields
+                draft={cmdEditDraft}
+                onChange={setCmdEditDraft}
+                lockKey
+                lockCommand={Boolean(commands.find((c) => c.id === cmdEditId)?.is_builtin)}
+              />
+              <div className="page-actions">
+                <button className="btn" type="submit">
+                  Save command
+                </button>
+                <button
+                  className="btn secondary"
+                  type="button"
+                  onClick={() => {
+                    setCmdEditId(null);
+                    setCmdEditDraft(null);
+                  }}
+                >
+                  Cancel
+                </button>
+              </div>
+            </form>
+          ) : null}
+
+          {commands.length === 0 && !cmdCreating ? (
             <div className="card empty-state">
               <strong>No commands yet</strong>
-              <p className="muted">Import demos to load /start, /buy, /run, and more.</p>
+              <p className="muted">Import demos to load /start, /buy, /run, and more — or add a custom reply command.</p>
             </div>
           ) : (
             <div className="grid-cards">
-              {commands.map((c) => (
-                <div key={c.id} className="card item-card">
-                  <div className="item-card-top">
-                    <div>
-                      <code>/{c.command.replace(/^\//, "")}</code>
-                      <div style={{ marginTop: "0.25rem", fontWeight: 600 }}>{c.title}</div>
+              {commands.map((c) => {
+                const protectedCmd = PROTECTED_COMMAND_KEYS.has(c.key);
+                return (
+                  <div key={c.id} className="card item-card">
+                    <div className="item-card-top">
+                      <div>
+                        <code>/{c.command.replace(/^\//, "")}</code>
+                        <div style={{ marginTop: "0.25rem", fontWeight: 600 }}>{c.title}</div>
+                        {c.description ? (
+                          <p className="muted" style={{ margin: "0.35rem 0 0", fontSize: "0.88rem", lineHeight: 1.4 }}>
+                            {c.description}
+                          </p>
+                        ) : null}
+                      </div>
+                      <label className="switch" title={c.enabled ? "Disable" : "Enable"}>
+                        <input
+                          type="checkbox"
+                          checked={c.enabled}
+                          onChange={async () => {
+                            await api(`/api/bot/commands/${c.id}/toggle`, { method: "POST" });
+                            await refresh();
+                          }}
+                        />
+                        <span />
+                      </label>
                     </div>
-                    <label className="switch" title={c.enabled ? "Disable" : "Enable"}>
-                      <input
-                        type="checkbox"
-                        checked={c.enabled}
-                        onChange={async () => {
-                          await api(`/api/bot/commands/${c.id}`, {
-                            method: "PATCH",
-                            body: JSON.stringify({ enabled: !c.enabled }),
-                          });
-                          await refresh();
+                    <div className="item-card-meta">
+                      <span className="chip">{c.audience}</span>
+                      <span className="chip">order {c.sort_order ?? 0}</span>
+                      {c.is_builtin ? <span className="chip">built-in</span> : <span className="chip">custom</span>}
+                      <span className="chip">{c.handler === "builtin" ? "code handler" : "static reply"}</span>
+                      <span className={`badge ${c.enabled ? "ok" : ""}`}>{c.enabled ? "On" : "Off"}</span>
+                    </div>
+                    <div className="page-actions" style={{ marginTop: "0.65rem" }}>
+                      <button
+                        className="btn secondary sm"
+                        type="button"
+                        onClick={() => {
+                          setCmdCreating(false);
+                          setCmdEditId(c.id);
+                          setCmdEditDraft(toCommandDraft(c));
                         }}
-                      />
-                      <span />
-                    </label>
+                      >
+                        Edit
+                      </button>
+                      <button
+                        className="btn secondary sm"
+                        type="button"
+                        disabled={protectedCmd}
+                        onClick={async () => {
+                          if (protectedCmd) return;
+                          const warn = c.is_builtin
+                            ? `Delete built-in “${c.title}” (${c.command})? Import demos can restore it later.`
+                            : `Delete command “${c.title}” (${c.command})?`;
+                          if (!confirm(warn)) return;
+                          setError("");
+                          try {
+                            await api(`/api/bot/commands/${c.id}`, { method: "DELETE" });
+                            if (cmdEditId === c.id) {
+                              setCmdEditId(null);
+                              setCmdEditDraft(null);
+                            }
+                            setMsg("Command deleted.");
+                            await refresh();
+                          } catch (err) {
+                            setError(err instanceof Error ? err.message : "Delete failed");
+                          }
+                        }}
+                        title={
+                          protectedCmd
+                            ? "Critical built-in — disable or edit settings instead of delete"
+                            : "Delete command"
+                        }
+                      >
+                        {protectedCmd ? "Protected" : "Delete"}
+                      </button>
+                    </div>
                   </div>
-                  <div className="item-card-meta">
-                    <span className="chip">{c.audience}</span>
-                    <span className={`badge ${c.enabled ? "ok" : ""}`}>{c.enabled ? "On" : "Off"}</span>
-                  </div>
-                </div>
-              ))}
+                );
+              })}
             </div>
           )}
         </div>

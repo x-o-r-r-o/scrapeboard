@@ -597,11 +597,25 @@ class BotCommandOut(BaseModel):
     enabled: bool
     audience: str
     sort_order: int
+    is_builtin: bool = False
+    handler: Literal["builtin", "static"] = "static"
 
     model_config = {"from_attributes": True}
 
 
+class BotCommandCreate(BaseModel):
+    key: str = ""
+    command: str
+    title: str = ""
+    description: str = ""
+    response_text: str = ""
+    enabled: bool = True
+    audience: str = "everyone"
+    sort_order: int = 0
+
+
 class BotCommandUpdate(BaseModel):
+    command: str | None = None
     title: str | None = None
     description: str | None = None
     response_text: str | None = None

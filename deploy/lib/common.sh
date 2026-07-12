@@ -63,36 +63,16 @@ ensure_bun() {
   install -m 755 /root/.bun/bin/bun /usr/local/bin/bun
 }
 
-# Panel servers never need the scrape worker runtime (separate hosts).
-# Sparse-checkout keeps worker/ out of the tree on every pull; rm is a safety net
-# for rsync uploads or older full clones.
+# Role-based sync: panel hosts never pull worker/; worker hosts never pull panel/.
+# shellcheck source=role.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/role.sh"
 
 enable_panel_sparse_checkout() {
-  # Durable: exclude worker/ from the panel checkout (safe on re-update).
-  [[ -d "$APP_DIR/.git" ]] || return 0
-  echo "==> Panel sparse-checkout (exclude worker/)..."
-  if ! sudo -u "${SITE_USER}" git -C "$APP_DIR" sparse-checkout init --no-cone 2>/dev/null; then
-    echo "    (warn) sparse-checkout unavailable; will remove worker/ after sync"
-    return 0
-  fi
-  if sudo -u "${SITE_USER}" git -C "$APP_DIR" sparse-checkout set --no-cone '/*' '!/worker/' 2>/dev/null; then
-    return 0
-  fi
-  # Fallback for older git: write patterns file then reapply
-  {
-    echo '/*'
-    echo '!/worker/'
-  } | sudo -u "${SITE_USER}" tee "${APP_DIR}/.git/info/sparse-checkout" >/dev/null
-  sudo -u "${SITE_USER}" git -C "$APP_DIR" sparse-checkout reapply 2>/dev/null \
-    || sudo -u "${SITE_USER}" git -C "$APP_DIR" read-tree -mu HEAD 2>/dev/null \
-    || true
+  enable_role_sparse_checkout panel
 }
 
 ensure_no_worker_on_panel() {
-  if [[ -e "${APP_DIR}/worker" ]]; then
-    echo "==> Removing ${APP_DIR}/worker (panel deploy is panel-only; install workers on scrape hosts)"
-    rm -rf "${APP_DIR}/worker"
-  fi
+  ensure_role_tree panel
 }
 
 sync_repo() {
@@ -104,14 +84,18 @@ sync_repo() {
   fi
   git config --global --add safe.directory "$APP_DIR" 2>/dev/null || true
 
+  # Hestia install/update is always the control-panel role
+  assert_scrapeboard_role panel "$APP_DIR"
+
   if [[ -n "$REPO_URL" ]]; then
     if [[ ! -d "$APP_DIR/.git" ]]; then
       # Clone without checking out, then sparse-checkout so worker/ never lands on the panel host
       sudo -u "${SITE_USER}" git clone --no-checkout "$REPO_URL" "$APP_DIR"
-      enable_panel_sparse_checkout
+      write_scrapeboard_role panel "$APP_DIR"
+      enable_role_sparse_checkout panel
       sudo -u "${SITE_USER}" git -C "$APP_DIR" checkout
     else
-      enable_panel_sparse_checkout
+      enable_role_sparse_checkout panel
       sudo -u "${SITE_USER}" git -C "$APP_DIR" pull --ff-only
     fi
   else
@@ -120,8 +104,9 @@ sync_repo() {
       echo "  $APP_DIR"
       exit 1
     fi
+    write_scrapeboard_role panel "$APP_DIR"
   fi
-  ensure_no_worker_on_panel
+  ensure_role_tree panel
   chown -R "${SITE_USER}:${SITE_USER}" "$(dirname "$APP_DIR")"
 }
 
@@ -327,6 +312,7 @@ print_done() {
  API:      127.0.0.1:${API_PORT}  (systemd: ${SERVICE_NAME})
  App dir:  ${APP_DIR}
  Workers:  install from repo worker/ on scrape hosts (not on this panel server)
+ Role file: ${APP_DIR}/.scrapeboard-role (= panel; do not commit)
 
  Manage:
    systemctl status ${SERVICE_NAME}
