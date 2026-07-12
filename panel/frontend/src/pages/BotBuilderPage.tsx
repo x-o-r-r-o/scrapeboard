@@ -820,8 +820,10 @@ export default function BotBuilderPage() {
             <p className="muted" style={{ margin: 0, fontSize: "0.88rem" }}>
               Admin Telegram commands (/admin) need all of: Users → role=admin + Telegram numeric id, this page’s
               “Admin Telegram commands” toggle on, and Live bot with a valid token. DM the bot /whoami to verify the
-              link. Support chat id is where /support tickets are forwarded — usually your admin Telegram user id
-              (from /whoami), or a group id like -100….
+              link. Support chat id receives new/follow-up /support tickets. Admins reply with /reply
+              id …, by replying to the forwarded Support #N message, or from Admin → Support in the
+              panel — the user is notified on Telegram instantly. Close with /close or the panel Close
+              button. Usually your admin Telegram user id (from /whoami), or a group id like -100….
             </p>
           </div>
           <div className="form-grid two">

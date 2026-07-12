@@ -114,12 +114,13 @@ export function JobsPage() {
     e.preventDefault();
     setError("");
     setMsg("");
-    const fd = new FormData(e.currentTarget);
+    const form = e.currentTarget;
+    const fd = new FormData(form);
     fd.set("engine", engine);
     fd.set("threads", String(threads));
     try {
       const created = await api<Job>("/api/jobs", { method: "POST", body: fd });
-      e.currentTarget.reset();
+      form.reset();
       if (created.waiting_for_threads) {
         setMsg(
           `Job queued — waiting for free threads (${created.threads} needed). ` +
@@ -291,6 +292,11 @@ export function JobsPage() {
             Locations file
             <input className="input" type="file" name="locations" accept=".txt,.csv" required />
           </label>
+          <p className="muted" style={{ margin: 0, gridColumn: "1 / -1" }}>
+            UTF-8 <code>.txt</code> / <code>.csv</code>: one keyword or <code>city,state,country</code> per line
+            (# comments OK). CSV may use a <code>keyword</code>/<code>query</code> or <code>location</code> header
+            column. Invalid files are rejected before the job is queued.
+          </p>
           <label className="field">
             Engine
             <select className="input" value={engine} onChange={(e) => setEngine(e.target.value)}>
@@ -1272,16 +1278,37 @@ export function SubscriptionPage() {
       features?: string[];
     }>
   >([]);
-  const [billing, setBilling] = useState<{ enabled: boolean; usdt_enabled: boolean; usdt_wallet: string; manual_enabled: boolean; manual_methods: Array<{ name: string; details: string }> } | null>(null);
+  const [billing, setBilling] = useState<{
+    enabled: boolean;
+    usdt_enabled: boolean;
+    usdt_wallet: string;
+    usdt_bep20_enabled?: boolean;
+    usdt_bep20_wallet?: string;
+    networks?: Array<{ key: string; label: string; wallet: string }>;
+    manual_enabled: boolean;
+    manual_methods: Array<{ name: string; details: string }>;
+  } | null>(null);
   const [instructions, setInstructions] = useState("");
   const [txid, setTxid] = useState("");
+  const [buyNetwork, setBuyNetwork] = useState("");
   const [msg, setMsg] = useState("");
   const [error, setError] = useState("");
 
   async function refresh() {
     setSub(await api<Sub>("/api/subscriptions/me").catch(() => null));
     setPackages(await api<Array<{ id: number; slug: string; name: string; price_usdt: number; threads: number; duration_days: number }>>("/api/packages").catch(() => []));
-    setBilling(await api<{ enabled: boolean; usdt_enabled: boolean; usdt_wallet: string; manual_enabled: boolean; manual_methods: Array<{ name: string; details: string }> }>("/api/billing/public").catch(() => null));
+    const b = await api<{
+      enabled: boolean;
+      usdt_enabled: boolean;
+      usdt_wallet: string;
+      usdt_bep20_enabled?: boolean;
+      usdt_bep20_wallet?: string;
+      networks?: Array<{ key: string; label: string; wallet: string }>;
+      manual_enabled: boolean;
+      manual_methods: Array<{ name: string; details: string }>;
+    }>("/api/billing/public").catch(() => null);
+    setBilling(b);
+    if (b?.networks?.length === 1) setBuyNetwork(b.networks[0].key);
   }
 
   useEffect(() => {
@@ -1292,9 +1319,11 @@ export function SubscriptionPage() {
     setError("");
     setMsg("");
     try {
+      const body: Record<string, string> = { package_slug: slug };
+      if (buyNetwork) body.network = buyNetwork;
       const res = await api<{ instructions: string }>("/api/orders/buy", {
         method: "POST",
-        body: JSON.stringify({ package_slug: slug }),
+        body: JSON.stringify(body),
       });
       setInstructions(res.instructions);
       setMsg("Order created. Follow payment instructions below.");
@@ -1335,6 +1364,19 @@ export function SubscriptionPage() {
       {billing?.enabled ? (
         <div className="card">
           <h3>Packages</h3>
+          {(billing.networks?.length || 0) > 0 ? (
+            <label className="field" style={{ maxWidth: 320, marginBottom: "0.75rem" }}>
+              Payment network
+              <select className="input" value={buyNetwork} onChange={(e) => setBuyNetwork(e.target.value)}>
+                {(billing.networks?.length || 0) > 1 ? <option value="">Select…</option> : null}
+                {(billing.networks || []).map((n) => (
+                  <option key={n.key} value={n.key}>
+                    {n.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+          ) : null}
           <table className="table">
             <thead>
               <tr>
@@ -1375,13 +1417,24 @@ export function SubscriptionPage() {
             </tbody>
           </table>
           {instructions ? <pre style={{ whiteSpace: "pre-wrap", color: "var(--muted)" }}>{instructions}</pre> : null}
-          {billing.usdt_enabled ? (
+          {billing.usdt_enabled || billing.usdt_bep20_enabled ? (
             <form onSubmit={paid} style={{ display: "flex", gap: "0.75rem", flexWrap: "wrap", marginTop: "0.75rem" }}>
-              <input className="input" style={{ maxWidth: 360 }} placeholder="USDT TxID" value={txid} onChange={(e) => setTxid(e.target.value)} />
+              <input
+                className="input"
+                style={{ maxWidth: 360 }}
+                placeholder="USDT TxID (TRC-20 or BEP-20)"
+                value={txid}
+                onChange={(e) => setTxid(e.target.value)}
+              />
               <button className="btn" type="submit">
                 Verify payment
               </button>
             </form>
+          ) : null}
+          {billing.usdt_enabled || billing.usdt_bep20_enabled ? (
+            <p className="muted" style={{ fontSize: "0.85rem", marginTop: "0.5rem" }}>
+              Auto-grant after ≥20 on-chain confirmations. If confirmations are still low, wait and retry.
+            </p>
           ) : null}
         </div>
       ) : (

@@ -255,6 +255,12 @@ class BillingSettingsOut(BaseModel):
     usdt_contract: str
     usdt_api_base: str
     usdt_api_key_configured: bool
+    usdt_bep20_enabled: bool = False
+    usdt_bep20_wallet: str = ""
+    usdt_bep20_contract: str = "0x55d398326f99059fF775485246999027B3197955"
+    usdt_bep20_api_base: str = "https://api.bscscan.com/api"
+    usdt_bep20_api_key_configured: bool = False
+    usdt_bep20_rpc_url: str = "https://bsc-dataseed.binance.org/"
     manual_enabled: bool
     manual_methods: list
     allowed_extensions: list
@@ -268,6 +274,12 @@ class BillingSettingsUpdate(BaseModel):
     usdt_contract: str | None = None
     usdt_api_base: str | None = None
     usdt_api_key: str | None = None
+    usdt_bep20_enabled: bool | None = None
+    usdt_bep20_wallet: str | None = None
+    usdt_bep20_contract: str | None = None
+    usdt_bep20_api_base: str | None = None
+    usdt_bep20_api_key: str | None = None
+    usdt_bep20_rpc_url: str | None = None
     manual_enabled: bool | None = None
     manual_methods: list | None = None
     allowed_extensions: list | None = None
@@ -769,3 +781,51 @@ class BotWorkflowUpdate(BaseModel):
 
 class MessageOut(BaseModel):
     detail: str
+
+
+class SupportMessageOut(BaseModel):
+    id: int
+    ticket_id: int
+    sender: str
+    admin_user_id: int | None = None
+    body: str
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class SupportTicketOut(BaseModel):
+    id: int
+    user_id: int | None = None
+    telegram_id: str
+    message: str
+    status: str
+    created_at: datetime
+    updated_at: datetime | None = None
+    closed_at: datetime | None = None
+    closed_by_id: int | None = None
+    messages: list[SupportMessageOut] = []
+
+    model_config = {"from_attributes": True}
+
+
+class SupportTicketListOut(BaseModel):
+    id: int
+    user_id: int | None = None
+    telegram_id: str
+    message: str
+    status: str
+    created_at: datetime
+    updated_at: datetime | None = None
+    closed_at: datetime | None = None
+    message_count: int = 0
+
+    model_config = {"from_attributes": True}
+
+
+class SupportReplyIn(BaseModel):
+    message: str = Field(min_length=1, max_length=4000)
+
+
+class SupportCloseIn(BaseModel):
+    reason: str = Field(default="", max_length=2000)

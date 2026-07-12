@@ -5,6 +5,7 @@ import { PasswordSetupPage, TotpSetupPage } from "./pages/SetupPages";
 import { DashboardPage, JobsPage, SubscriptionPage } from "./pages/UserPages";
 import { BillingAdminPage } from "./pages/BillingAdminPage";
 import BotBuilderPage from "./pages/BotBuilderPage";
+import { SupportAdminPage } from "./pages/SupportAdminPage";
 import {
   PackagesAdminPage,
   SecurityAdminPage,
@@ -31,6 +32,7 @@ export default function App() {
           <Route path="admin/proxies" element={<ProxiesAdminPage />} />
           <Route path="admin/workers" element={<WorkersAdminPage />} />
           <Route path="admin/captcha" element={<CaptchaAdminPage />} />
+          <Route path="admin/support" element={<SupportAdminPage />} />
           <Route path="admin/security" element={<SecurityAdminPage />} />
           <Route path="admin/bot" element={<BotBuilderPage />} />
         </Route>

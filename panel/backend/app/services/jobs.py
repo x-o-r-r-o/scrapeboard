@@ -14,7 +14,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
 from app.models import Job, JobChunk, Package, User
-from app.services.billing import active_subscription
+from app.services.billing import active_subscription, get_billing
+from app.services.input_files import InputFileError, entries_to_bytes, validate_pair
 from app.services.worker_config import DEFAULT_CHUNK_SIZE, package_defaults_from_package
 
 from app.services.perms import DEFAULT_USER_PERMS, effective_perms
@@ -133,6 +134,10 @@ async def create_job_from_bytes(
     kw_bytes: bytes,
     loc_bytes: bytes,
     overrides: dict | None = None,
+    *,
+    keywords_name: str | None = None,
+    locations_name: str | None = None,
+    check_ext: bool = False,
 ) -> Job:
     perms = effective_perms(user)
     if not perms.get("can_run") and user.role != "admin":
@@ -153,6 +158,19 @@ async def create_job_from_bytes(
     max_bytes = max(1, max_mb) * 1024 * 1024
     if len(kw_bytes) + len(loc_bytes) > max_bytes:
         raise ValueError(f"Upload exceeds plan limit ({max_mb} MB)")
+
+    billing = await get_billing(db)
+    try:
+        kw_lines, loc_lines = validate_pair(
+            kw_bytes,
+            loc_bytes,
+            keywords_name=keywords_name,
+            locations_name=locations_name,
+            configured_extensions=billing.allowed_extensions,
+            check_ext=check_ext,
+        )
+    except InputFileError as e:
+        raise ValueError(str(e)) from e
 
     pkg = None
     package_engines = None
@@ -191,27 +209,14 @@ async def create_job_from_bytes(
     if ae and ae != "all" and settings["engine"] not in ae and user.role != "admin":
         raise PermissionError(f"Engine {settings['engine']} not allowed")
 
-    cfg = get_settings()
     job_dir = cfg.uploads_dir / f"user_{user.id}"
     job_dir.mkdir(parents=True, exist_ok=True)
     public_id = f"{user.id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{secrets.token_hex(3)}"
     kw_path = job_dir / f"{public_id}_keywords.txt"
     loc_path = job_dir / f"{public_id}_locations.txt"
-    kw_path.write_bytes(kw_bytes)
-    loc_path.write_bytes(loc_bytes)
-
-    kw_lines = [
-        ln.strip()
-        for ln in kw_bytes.decode("utf-8", errors="ignore").splitlines()
-        if ln.strip() and not ln.startswith("#")
-    ]
-    loc_lines = [
-        ln.strip()
-        for ln in loc_bytes.decode("utf-8", errors="ignore").splitlines()
-        if ln.strip() and not ln.startswith("#")
-    ]
-    if not kw_lines or not loc_lines:
-        raise ValueError("Keywords and locations must be non-empty")
+    # Persist normalized UTF-8 line files only after validation succeeds.
+    kw_path.write_bytes(entries_to_bytes(kw_lines))
+    loc_path.write_bytes(entries_to_bytes(loc_lines))
 
     total = len(kw_lines) * len(loc_lines)
     try:

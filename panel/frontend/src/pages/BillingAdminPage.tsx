@@ -85,6 +85,12 @@ export function BillingAdminPage() {
     usdt_contract: "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t",
     usdt_api_base: "https://apilist.tronscanapi.com",
     usdt_api_key: "",
+    usdt_bep20_enabled: false,
+    usdt_bep20_wallet: "",
+    usdt_bep20_contract: "0x55d398326f99059fF775485246999027B3197955",
+    usdt_bep20_api_base: "https://api.bscscan.com/api",
+    usdt_bep20_api_key: "",
+    usdt_bep20_rpc_url: "https://bsc-dataseed.binance.org/",
     manual_enabled: false,
     manual_methods_json: "[]",
     max_upload_mb: 5,
@@ -156,6 +162,14 @@ export function BillingAdminPage() {
       usdt_contract: String(settings.usdt_contract || ""),
       usdt_api_base: String(settings.usdt_api_base || ""),
       usdt_api_key: "",
+      usdt_bep20_enabled: Boolean(settings.usdt_bep20_enabled),
+      usdt_bep20_wallet: String(settings.usdt_bep20_wallet || ""),
+      usdt_bep20_contract: String(
+        settings.usdt_bep20_contract || "0x55d398326f99059fF775485246999027B3197955",
+      ),
+      usdt_bep20_api_base: String(settings.usdt_bep20_api_base || "https://api.bscscan.com/api"),
+      usdt_bep20_api_key: "",
+      usdt_bep20_rpc_url: String(settings.usdt_bep20_rpc_url || "https://bsc-dataseed.binance.org/"),
       manual_enabled: Boolean(settings.manual_enabled),
       manual_methods_json: JSON.stringify(settings.manual_methods || [], null, 2),
       max_upload_mb: Number(settings.max_upload_mb || 5),
@@ -203,11 +217,17 @@ export function BillingAdminPage() {
         usdt_wallet: form.usdt_wallet,
         usdt_contract: form.usdt_contract,
         usdt_api_base: form.usdt_api_base,
+        usdt_bep20_enabled: form.usdt_bep20_enabled,
+        usdt_bep20_wallet: form.usdt_bep20_wallet,
+        usdt_bep20_contract: form.usdt_bep20_contract,
+        usdt_bep20_api_base: form.usdt_bep20_api_base,
+        usdt_bep20_rpc_url: form.usdt_bep20_rpc_url,
         manual_enabled: form.manual_enabled,
         manual_methods: methods,
         max_upload_mb: form.max_upload_mb,
       };
       if (form.usdt_api_key) body.usdt_api_key = form.usdt_api_key;
+      if (form.usdt_bep20_api_key) body.usdt_bep20_api_key = form.usdt_bep20_api_key;
       await api("/api/billing/settings", { method: "PUT", body: JSON.stringify(body) });
     }, "Billing settings saved.");
   }
@@ -933,18 +953,19 @@ export function BillingAdminPage() {
             <input type="checkbox" checked={form.enabled} onChange={(e) => setForm({ ...form, enabled: e.target.checked })} /> Billing enabled
           </label>
           <label>
-            <input type="checkbox" checked={form.usdt_enabled} onChange={(e) => setForm({ ...form, usdt_enabled: e.target.checked })} /> USDT TRC-20
+            <input type="checkbox" checked={form.usdt_enabled} onChange={(e) => setForm({ ...form, usdt_enabled: e.target.checked })} /> USDT
+            TRC-20 (Tron)
           </label>
           <label className="field">
-            Wallet address
+            TRC-20 wallet address
             <input className="input" value={form.usdt_wallet} onChange={(e) => setForm({ ...form, usdt_wallet: e.target.value })} />
           </label>
           <label className="field">
-            API base
+            TronScan API base
             <input className="input" value={form.usdt_api_base} onChange={(e) => setForm({ ...form, usdt_api_base: e.target.value })} />
           </label>
           <label className="field">
-            API key (optional)
+            TronScan API key (optional)
             <input
               className="input"
               type="password"
@@ -952,6 +973,60 @@ export function BillingAdminPage() {
               onChange={(e) => setForm({ ...form, usdt_api_key: e.target.value })}
             />
           </label>
+          <label>
+            <input
+              type="checkbox"
+              checked={form.usdt_bep20_enabled}
+              onChange={(e) => setForm({ ...form, usdt_bep20_enabled: e.target.checked })}
+            />{" "}
+            USDT BEP-20 (BNB Smart Chain)
+          </label>
+          <label className="field">
+            BEP-20 wallet address
+            <input
+              className="input"
+              value={form.usdt_bep20_wallet}
+              onChange={(e) => setForm({ ...form, usdt_bep20_wallet: e.target.value })}
+              placeholder="0x…"
+            />
+          </label>
+          <label className="field">
+            BEP-20 USDT contract
+            <input
+              className="input"
+              value={form.usdt_bep20_contract}
+              onChange={(e) => setForm({ ...form, usdt_bep20_contract: e.target.value })}
+            />
+          </label>
+          <label className="field">
+            BscScan API base
+            <input
+              className="input"
+              value={form.usdt_bep20_api_base}
+              onChange={(e) => setForm({ ...form, usdt_bep20_api_base: e.target.value })}
+            />
+          </label>
+          <label className="field">
+            BscScan API key (recommended)
+            <input
+              className="input"
+              type="password"
+              value={form.usdt_bep20_api_key}
+              onChange={(e) => setForm({ ...form, usdt_bep20_api_key: e.target.value })}
+            />
+          </label>
+          <label className="field">
+            BSC RPC URL (fallback)
+            <input
+              className="input"
+              value={form.usdt_bep20_rpc_url}
+              onChange={(e) => setForm({ ...form, usdt_bep20_rpc_url: e.target.value })}
+            />
+          </label>
+          <p className="muted" style={{ margin: 0, fontSize: "0.85rem" }}>
+            TRC-20 and BEP-20 both auto-verify via /paid after ≥20 on-chain confirmations. Admin /approve remains a
+            fallback for manual payments.
+          </p>
           <label>
             <input type="checkbox" checked={form.manual_enabled} onChange={(e) => setForm({ ...form, manual_enabled: e.target.checked })} /> Manual
             payments

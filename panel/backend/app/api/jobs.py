@@ -260,6 +260,9 @@ async def create_job(
             await keywords.read(),
             await locations.read(),
             overrides,
+            keywords_name=keywords.filename,
+            locations_name=locations.filename,
+            check_ext=True,
         )
     except PermissionError as e:
         raise HTTPException(403, str(e)) from e

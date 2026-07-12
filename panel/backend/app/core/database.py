@@ -103,6 +103,32 @@ def _migrate_sqlite(sync_conn) -> None:
     if bot_workflows and "sort_order" not in bot_workflows:
         sync_conn.execute(text("ALTER TABLE bot_workflows ADD COLUMN sort_order INTEGER DEFAULT 0"))
 
+    support_tickets = _sqlite_columns(sync_conn, "support_tickets")
+    if support_tickets:
+        for col, decl in (
+            ("updated_at", "DATETIME"),
+            ("closed_at", "DATETIME"),
+            ("closed_by_id", "INTEGER"),
+        ):
+            if col not in support_tickets:
+                sync_conn.execute(text(f"ALTER TABLE support_tickets ADD COLUMN {col} {decl}"))
+
+    billing = _sqlite_columns(sync_conn, "billing_settings")
+    if billing:
+        for col, decl in (
+            ("usdt_bep20_enabled", "BOOLEAN DEFAULT 0"),
+            ("usdt_bep20_wallet", "VARCHAR(128) DEFAULT ''"),
+            (
+                "usdt_bep20_contract",
+                "VARCHAR(128) DEFAULT '0x55d398326f99059fF775485246999027B3197955'",
+            ),
+            ("usdt_bep20_api_base", "VARCHAR(255) DEFAULT 'https://api.bscscan.com/api'"),
+            ("usdt_bep20_api_key", "VARCHAR(255) DEFAULT ''"),
+            ("usdt_bep20_rpc_url", "VARCHAR(255) DEFAULT 'https://bsc-dataseed.binance.org/'"),
+        ):
+            if col not in billing:
+                sync_conn.execute(text(f"ALTER TABLE billing_settings ADD COLUMN {col} {decl}"))
+
 
 async def init_db() -> None:
     from app import models  # noqa: F401

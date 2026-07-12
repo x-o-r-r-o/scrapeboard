@@ -34,6 +34,7 @@ router = APIRouter(tags=["billing"])
 
 class BuyRequest(BaseModel):
     package_slug: str
+    network: str | None = None  # trc20 | bep20
 
 
 class PaidRequest(BaseModel):
@@ -225,6 +226,13 @@ async def get_billing_settings(
         usdt_contract=b.usdt_contract,
         usdt_api_base=b.usdt_api_base,
         usdt_api_key_configured=bool(b.usdt_api_key),
+        usdt_bep20_enabled=bool(getattr(b, "usdt_bep20_enabled", False)),
+        usdt_bep20_wallet=getattr(b, "usdt_bep20_wallet", "") or "",
+        usdt_bep20_contract=getattr(b, "usdt_bep20_contract", None)
+        or "0x55d398326f99059fF775485246999027B3197955",
+        usdt_bep20_api_base=getattr(b, "usdt_bep20_api_base", None) or "https://api.bscscan.com/api",
+        usdt_bep20_api_key_configured=bool(getattr(b, "usdt_bep20_api_key", "") or ""),
+        usdt_bep20_rpc_url=getattr(b, "usdt_bep20_rpc_url", None) or "https://bsc-dataseed.binance.org/",
         manual_enabled=b.manual_enabled,
         manual_methods=b.manual_methods or [],
         allowed_extensions=b.allowed_extensions or [],
@@ -239,6 +247,11 @@ async def billing_public(user: User = Depends(require_ready_user), db: AsyncSess
         "enabled": b.enabled,
         "usdt_enabled": b.usdt_enabled,
         "usdt_wallet": b.usdt_wallet if b.usdt_enabled else "",
+        "usdt_bep20_enabled": bool(getattr(b, "usdt_bep20_enabled", False)),
+        "usdt_bep20_wallet": (getattr(b, "usdt_bep20_wallet", "") or "")
+        if getattr(b, "usdt_bep20_enabled", False)
+        else "",
+        "networks": billing_svc.available_usdt_networks(b),
         "manual_enabled": b.manual_enabled,
         "manual_methods": b.manual_methods if b.manual_enabled else [],
     }
@@ -734,10 +747,27 @@ async def buy_package(
     ok, why = await billing_svc.can_purchase(db, user, pkg)
     if not ok:
         raise HTTPException(400, why)
-    method = "usdt" if b.usdt_enabled else ("manual" if b.manual_enabled else "")
+    nets = billing_svc.available_usdt_networks(b)
+    network, net_err = billing_svc.resolve_network(b, body.network)
+    if body.network and net_err:
+        raise HTTPException(400, net_err)
+    if network:
+        method = billing_svc.method_for_network(network)
+    elif b.manual_enabled:
+        method = billing_svc.METHOD_MANUAL
+    elif nets:
+        raise HTTPException(400, net_err or "Choose a network: trc20 or bep20")
+    else:
+        method = ""
     order = await billing_svc.create_order(db, user, pkg, method)
-    instructions = await billing_svc.payment_instructions(db, pkg)
-    return {"order_id": order.id, "instructions": instructions, "package": PackageOut.model_validate(pkg)}
+    instructions, _qr = await billing_svc.payment_instructions(db, pkg, order=order, network=network)
+    return {
+        "order_id": order.id,
+        "network": network,
+        "payment_method": method,
+        "instructions": instructions,
+        "package": PackageOut.model_validate(pkg),
+    }
 
 
 @router.post("/orders/paid")
@@ -747,10 +777,8 @@ async def submit_paid(
     db: AsyncSession = Depends(get_db),
 ):
     b = await _billing(db)
-    if not b.usdt_enabled or not b.usdt_wallet:
-        raise HTTPException(400, "USDT payments not enabled")
     if not billing_svc.valid_txid(body.txid):
-        raise HTTPException(400, "Invalid TRON transaction id")
+        raise HTTPException(400, "Invalid transaction id")
     if await billing_svc.txid_used(db, body.txid):
         raise HTTPException(400, "Transaction already used")
 
@@ -761,29 +789,28 @@ async def submit_paid(
     ).scalars().first()
     if not order:
         raise HTTPException(400, "No pending order — buy a package first")
+    net = billing_svc.network_from_method(order.payment_method)
+    if net not in (billing_svc.NETWORK_TRC20, billing_svc.NETWORK_BEP20):
+        raise HTTPException(400, "On-chain verify is only for TRC-20 / BEP-20 orders")
+    if net == billing_svc.NETWORK_TRC20 and (not b.usdt_enabled or not b.usdt_wallet):
+        raise HTTPException(400, "USDT TRC-20 payments not enabled")
+    if net == billing_svc.NETWORK_BEP20 and (
+        not getattr(b, "usdt_bep20_enabled", False) or not (getattr(b, "usdt_bep20_wallet", "") or "").strip()
+    ):
+        raise HTTPException(400, "USDT BEP-20 payments not enabled")
     pkg = await db.get(Package, order.package_id)
     if not pkg:
         raise HTTPException(400, "Package missing")
 
-    ok, detail, amount = await billing_svc.verify_trc20_payment(
-        body.txid,
-        b.usdt_wallet,
-        pkg.price_usdt,
-        b.usdt_api_base,
-        b.usdt_api_key,
-        b.usdt_contract,
-    )
+    ok, detail, amount = await billing_svc.verify_usdt_payment(net, body.txid, b, float(pkg.price_usdt))
     if not ok:
         raise HTTPException(400, detail)
 
-    db.add(PaymentTxid(txid=body.txid, user_id=user.id, order_id=order.id))
-    order.status = "paid"
-    order.txid = body.txid
-    order.payment_method = "usdt"
-    await db.commit()
-    sub = await billing_svc.activate_subscription(db, user, pkg)
+    sub = await billing_svc.fulfill_paid_order(
+        db, user=user, order=order, pkg=pkg, txid=body.txid.strip(), network=net
+    )
     return {
-        "detail": f"Payment verified ({amount:.2f} USDT)",
+        "detail": f"Payment verified ({amount:.2f} USDT) — {detail}",
         "subscription": _sub_out(sub),
     }
 
@@ -867,6 +894,7 @@ async def approve_order(
         raise HTTPException(404, "User/package missing")
     order.status = "approved"
     order.payment_method = order.payment_method or "manual"
+    user.perms = normalize_perms({**(user.perms or {}), **DEFAULT_USER_PERMS, "telegram_user": True})
     await db.commit()
     sub = await billing_svc.activate_subscription(db, user, pkg)
     from app.services.notify import notify_user_telegram
@@ -875,6 +903,10 @@ async def approve_order(
         db,
         user,
         f"✅ Your {pkg.name} subscription is active until {sub.expires_at.date()}.",
+        reply_markup=billing_svc.user_reply_keyboard(
+            is_admin=user.role == "admin",
+            has_sub=True,
+        ),
     )
     return {"detail": "Approved", "expires_at": sub.expires_at.isoformat()}
 

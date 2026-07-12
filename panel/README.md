@@ -90,7 +90,9 @@ Assign or change a subscription package from the Users table (**Assign package**
 ### Billing
 
 - Packages (slug, USDT price, days, threads, upload MB, tier)  
-- USDT TRC-20 TxID verify + manual methods + admin approve/grant  
+- USDT TRC-20 / BEP-20 TxID verify (≥20 confirmations auto-grant) + QR + manual methods + admin approve/grant fallback
+- Persistent Telegram reply keyboard (Buy / Packages / Run / …) plus inline package & network pickers  
+- New Telegram users auto-provisioned on `/start` so they can buy without admin linking  
 - Upgrade-only while subscribed; admins bypass plan checks  
 
 ### Infra
@@ -105,6 +107,7 @@ Assign or change a subscription package from the Users table (**Assign package**
 ### Jobs
 
 - Upload keywords + locations → queued chunks leased by workers  
+- **Input validation before queue:** `.txt` / `.csv`, UTF-8, non-empty; one entry per line (`#` comments ignored). Optional CSV header columns: `keyword`/`query` (keywords) or `location` (locations). Invalid uploads return a clear error and **do not** create or lease a job. Telegram: `/formats` (also appended on `/help`).  
 - **Shared per-user thread pool:** sum of threads across running jobs ≤ plan/perm allowance; extras wait in queue  
 - Edit **queued** job threads/engine to fit free capacity (`PATCH /api/jobs/{id}`)  
 - Results stored under `results/user_{id}/{public_id}/`  
@@ -114,8 +117,9 @@ Assign or change a subscription package from the Users table (**Assign package**
 
 ### Telegram Bot Builder
 
-- Connect BotFather token, toggle commands/audiences  
-- Demo workflows, support chat, optional result delivery  
+- Connect BotFather token, toggle commands/audiences
+- Demo workflows, support chat, optional result delivery
+- **Admin → Support**: list open/closed tickets, view thread, reply, close (user notified on Telegram)
 
 ### Telegram admin
 
@@ -123,9 +127,9 @@ Panel users with **`role=admin`** and a linked **`telegram_id`** can manage the 
 
 **Setup**
 
-1. Create/link an admin in **Admin → Users** and set their Telegram ID (send `/whoami` to the bot to see yours).  
-2. Bot Builder → paste token → enable bot → turn on **Admin commands**.  
-3. **Install / refresh demos** so admin slash commands appear in Bot Builder (or rely on bootstrap seeding missing keys).  
+1. Create/link an admin in **Admin → Users** and set their Telegram ID (send `/whoami` to the bot to see yours).
+2. Bot Builder → paste token → enable bot → turn on **Admin commands**.
+3. **Install / refresh demos** so admin slash commands appear in Bot Builder (or rely on bootstrap seeding missing keys).
 4. DM the bot `/admin` for the menu + reply keyboard.
 
 **Auth gate**
@@ -141,18 +145,25 @@ Every admin action checks: sender `telegram_id` → enabled `User` with `role=ad
 | Workers | `/workers` (`/servers`), `/worker`, `/addworker`, `/editworker`, `/workerdrain`, `/workeron`, `/workeroff`, `/workertoken` |
 | Packages | `/adminpkgs`, `/addpkg`, `/editpkg`, `/disablepkg` |
 | Jobs | `/alljobs`, `/job`, `/adminstop` |
+| Support | `/tickets`, `/ticket`, `/reply`, `/close` (or reply to a forwarded `Support #N` message) |
 | Proxies | `/proxies`, `/proxy <id> on\|off` |
 | Captcha / bot | `/captcha` `[off]`, `/botstatus`, `/boton`, `/botoff` |
 
 Worker tokens are never echoed in group chats — they are DM’d to the admin’s private chat when possible.
 
+**Support ticket flow**
+
+1. User (linked): `/support <message>` → ticket stored + forwarded to `support_chat_id`.
+2. Follow-ups: another `/support …` appends to the user’s open ticket.
+3. Admin (Telegram or panel): reply → user gets an instant Telegram message; `/close` or panel Close → user notified; further user messages open a **new** ticket.
+
 **Panel-only leftovers**
 
-- Proxy list text / pool assign UI, full worker `worker_config` / package `scrape_defaults` editors  
-- Captcha API keys & provider hosts (Telegram can only show status / turn solvers off)  
-- BotFather token, security (reCAPTCHA/lockout), creating panel admin accounts with passwords  
-- Hard-delete workers (panel has no delete API — disable via `/workeroff`)  
-- Job purge/storage cleanup, dedicated-worker pin UI beyond simple fields  
+- Proxy list text / pool assign UI, full worker `worker_config` / package `scrape_defaults` editors
+- Captcha API keys & provider hosts (Telegram can only show status / turn solvers off)
+- BotFather token, security (reCAPTCHA/lockout), creating panel admin accounts with passwords
+- Hard-delete workers (panel has no delete API — disable via `/workeroff`)
+- Job purge/storage cleanup, dedicated-worker pin UI beyond simple fields
 
 Normal scrape flows (`/run`, `/stop`, `/status`, …) are unchanged for non-admin Telegram users.
 
@@ -174,6 +185,7 @@ Normal scrape flows (`/run`, `/stop`, `/status`, …) are unchanged for non-admi
 | `/app/admin/proxies` | admin | Proxy pools |
 | `/app/admin/workers` | admin | Workers + per-worker scrape flags |
 | `/app/admin/captcha` | admin | Global scrape captcha solvers |
+| `/app/admin/support` | admin | Support tickets (reply / close → Telegram notify) |
 | `/app/admin/security` | admin | Login reCAPTCHA + lockout |
 | `/app/admin/bot` | admin | Bot Builder |
 

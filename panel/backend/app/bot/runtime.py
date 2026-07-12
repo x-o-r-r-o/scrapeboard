@@ -17,8 +17,8 @@ from app.bot.tg_auth import (
     find_user_by_telegram,
     normalize_telegram_id,
     resolve_admin,
-    resolve_support_chat_id,
 )
+from app.bot.tg_commands import sync_telegram_command_menu
 from app.core.config import get_settings
 from app.core.database import SessionLocal
 from app.models import (
@@ -27,13 +27,19 @@ from app.models import (
     Job,
     Order,
     Package,
-    PaymentTxid,
-    SupportTicket,
     User,
 )
 from app.services import billing as billing_svc
 from app.services import jobs as jobs_svc
-from app.services.notify import send_document, send_text
+from app.services import support as support_svc
+from app.services.input_files import (
+    InputFileError,
+    check_extension,
+    entries_to_bytes,
+    formats_help_text,
+    parse_entries,
+)
+from app.services.notify import send_document, send_photo, send_text
 
 log = logging.getLogger("bot.runtime")
 
@@ -44,6 +50,7 @@ CODE_HANDLED_COMMANDS = frozenset(
         "/id",
         "/start",
         "/help",
+        "/formats",
         "/packages",
         "/plans",
         "/buy",
@@ -107,6 +114,9 @@ class TelegramBotRuntime:
         self._pay_limiter = RateLimiter(5, 600)
         self._inputs: dict[int, dict[str, Path]] = {}  # user.id -> keywords/locations paths
         self._webhook_cleared_for: str | None = None
+        self._commands_menu_token: str | None = None
+        self._commands_menu_admin_chats: set[int] = set()
+        self._commands_menu_dirty: bool = True
         self.status: str = "stopped"  # stopped|idle|polling|error
         self.last_error: str = ""
         self.last_ok_at: float | None = None
@@ -149,6 +159,51 @@ class TelegramBotRuntime:
         await self.stop()
         self.start()
 
+    def invalidate_command_menu(self) -> None:
+        """Mark Telegram setMyCommands scopes stale (settings/commands/admins changed)."""
+        self._commands_menu_dirty = True
+        self._commands_menu_token = None
+
+    async def refresh_command_menu(self, db: AsyncSession | None = None, token: str | None = None) -> None:
+        """Push public vs admin-scoped BotFather menus. Safe to call from API handlers."""
+        try:
+            if db is not None:
+                if not token:
+                    settings = await db.get(BotSettings, 1)
+                    if not settings or not settings.token:
+                        return
+                    token = settings.token
+                applied = await sync_telegram_command_menu(
+                    db,
+                    token,
+                    previous_admin_chats=self._commands_menu_admin_chats,
+                )
+                self._commands_menu_admin_chats = applied
+                self._commands_menu_token = token
+                self._commands_menu_dirty = False
+                return
+
+            async with SessionLocal() as session:
+                settings = await session.get(BotSettings, 1)
+                if not settings or not settings.token:
+                    return
+                tok = token or settings.token
+                applied = await sync_telegram_command_menu(
+                    session,
+                    tok,
+                    previous_admin_chats=self._commands_menu_admin_chats,
+                )
+                self._commands_menu_admin_chats = applied
+                self._commands_menu_token = tok
+                self._commands_menu_dirty = False
+        except Exception:
+            log.exception("refresh_command_menu failed")
+
+    async def _ensure_command_menu(self, db: AsyncSession, token: str) -> None:
+        if not self._commands_menu_dirty and self._commands_menu_token == token:
+            return
+        await self.refresh_command_menu(db, token)
+
     async def _loop(self) -> None:
         try:
             while not self._stop.is_set():
@@ -165,6 +220,7 @@ class TelegramBotRuntime:
                             await asyncio.sleep(5)
                             continue
                         token = settings.token
+                        await self._ensure_command_menu(db, token)
                     await self._ensure_polling_mode(token)
                     updates = await self._get_updates(token)
                     for u in updates:
@@ -247,7 +303,18 @@ class TelegramBotRuntime:
     async def _send(self, token: str, chat_id: int, text: str, *, reply_markup: dict | None = None) -> None:
         await send_text(token, chat_id, text, reply_markup=reply_markup)
 
+    async def _send_payment(self, token: str, chat_id: int, text: str, qr: bytes | None) -> None:
+        if qr:
+            ok = await send_photo(token, chat_id, qr, caption=text)
+            if ok:
+                return
+        await self._send(token, chat_id, text)
+
     async def _handle_update(self, db: AsyncSession, token: str, update: dict) -> None:
+        if update.get("callback_query"):
+            await self._handle_callback(db, token, update["callback_query"])
+            return
+
         msg = update.get("message") or update.get("edited_message")
         if not msg:
             return
@@ -267,6 +334,7 @@ class TelegramBotRuntime:
 
         user = await find_user_by_telegram(db, uid)
         tid_disp = normalize_telegram_id(uid, allow_group=False) or str(uid)
+        display_name = (frm.get("username") or frm.get("first_name") or "").strip() or None
 
         if msg.get("document"):
             if user and not user.is_active:
@@ -279,13 +347,43 @@ class TelegramBotRuntime:
         if not text:
             return
 
+        # Persistent reply-keyboard labels → slash commands
+        mapped = billing_svc.resolve_menu_text(text)
+        if mapped:
+            text = mapped
+
+        # Admin reply-to a forwarded "Support #N …" message → instant user notify.
+        reply_src = msg.get("reply_to_message") or {}
+        reply_blob = (reply_src.get("text") or reply_src.get("caption") or "").strip()
+        ticket_from_reply = support_svc.parse_ticket_id_from_forward(reply_blob)
+        if ticket_from_reply is not None and not text.startswith("/"):
+            gate = await resolve_admin(db, uid, settings)
+            if gate.ok:
+                try:
+                    ticket = await support_svc.admin_reply(
+                        db,
+                        ticket_id=ticket_from_reply,
+                        body=text,
+                        admin=gate.user,
+                    )
+                    await self._send(
+                        token,
+                        chat_id,
+                        f"✅ Replied to ticket #{ticket.id} (user notified on Telegram).",
+                    )
+                except LookupError as exc:
+                    await self._send(token, chat_id, str(exc))
+                except ValueError as exc:
+                    await self._send(token, chat_id, str(exc))
+                return
+
         parts = text.split()
         cmd = parts[0].lower().split("@")[0]
         args = parts[1:]
         resolved = COMMAND_ALIASES.get(cmd, cmd)
         is_admin_cmd = resolved in ADMIN_COMMANDS or cmd in ADMIN_COMMANDS
 
-        if user and not user.is_active and cmd not in ("/whoami", "/id", "/start", "/help"):
+        if user and not user.is_active and cmd not in ("/whoami", "/id", "/start", "/help", "/formats"):
             await self._send(token, chat_id, "⛔ Your account is disabled. Contact support.")
             return
 
@@ -323,11 +421,6 @@ class TelegramBotRuntime:
             if user and user.role == "admin":
                 flag = "on" if settings.admin_commands_enabled else "OFF — enable in Bot Builder"
                 admin_line = f"\nAdmin commands: {flag}"
-            elif not user:
-                admin_line = (
-                    "\nTo use /admin: set this id on Users → admin → Telegram ID, "
-                    "enable Admin commands, keep bot Live."
-                )
             await self._send(
                 token,
                 chat_id,
@@ -336,16 +429,46 @@ class TelegramBotRuntime:
             return
 
         if cmd == "/start":
-            await self._flow_start(db, token, chat_id, user, settings)
+            await self._flow_start(db, token, chat_id, user, settings, uid=uid, display_name=display_name)
             return
 
         if cmd == "/help":
-            await self._send(token, chat_id, self._help_text(commands, settings, user, has_sub))
+            help_body = self._help_text(commands, settings, user, has_sub)
+            formats = formats_help_text()
+            menu = await self._menu_markup(db, user, settings)
+            await self._send(
+                token,
+                chat_id,
+                f"{help_body}\n\nUse the menu buttons below, or type a command.\n\n{formats}",
+                reply_markup=menu,
+            )
+            return
+
+        if cmd == "/formats":
+            b = await billing_svc.get_billing(db)
+            sub = await billing_svc.active_subscription(db, user) if user else None
+            cap = None
+            if user and user.role == "admin":
+                cap = b.max_upload_mb
+            elif sub:
+                cap = sub.max_upload_mb
+            elif user:
+                cap = b.max_upload_mb
+            await self._send(
+                token,
+                chat_id,
+                formats_help_text(
+                    max_upload_mb=cap,
+                    extensions=b.allowed_extensions,
+                ),
+            )
             return
 
         # billing open commands
         if cmd in ("/packages", "/plans", "/buy", "/paid", "/subscription", "/me", "/renew"):
-            await self._handle_billing(db, token, chat_id, user, cmd, args, settings)
+            await self._handle_billing(
+                db, token, chat_id, user, cmd, args, settings, uid=uid, display_name=display_name
+            )
             return
 
         # Admin Telegram commands — resolve before audience gate so denials are explicit.
@@ -370,6 +493,10 @@ class TelegramBotRuntime:
                 args=args,
                 send=self._send,
             )
+            # First successful admin DM often unlocks BotCommandScopeChat.
+            if chat_type == "private" and int(chat_id) not in self._commands_menu_admin_chats:
+                self.invalidate_command_menu()
+                await self._ensure_command_menu(db, token)
             return
 
         meta = commands.get(cmd) or commands.get(COMMAND_ALIASES.get(cmd, ""))
@@ -383,7 +510,7 @@ class TelegramBotRuntime:
             return
 
         if not user:
-            extra = " Send /packages to see plans." if settings.public_packages else ""
+            extra = " Send /start to create your account, then /packages to see plans."
             await self._send(token, chat_id, f"⛔ Not authorized. Your id is {tid_disp}.{extra}")
             return
 
@@ -410,45 +537,250 @@ class TelegramBotRuntime:
         if cmd.startswith("/"):
             await self._send(token, chat_id, "Unknown or disabled command. Send /help.")
 
-    async def _flow_start(self, db, token, chat_id, user, settings) -> None:
-        if not user:
-            msg = "No panel account linked. Ask an admin to create your user and set your Telegram ID."
-        else:
-            msg = settings.welcome_text or "Welcome!"
-            msg += f"\nAccount: {user.username} ({user.role})."
-            sub = await billing_svc.active_subscription(db, user)
-            if user.role == "admin":
-                msg += "\nAdmin — no subscription required."
-            elif sub:
-                msg += f"\nPlan: {sub.package_name} until {sub.expires_at.date()}."
+    async def _menu_markup(self, db, user: User | None, settings: BotSettings | None = None) -> dict:
+        """Persistent reply keyboard for the user's current access state."""
+        is_admin = bool(user and user.role == "admin")
+        has_sub = False
+        if user and user.is_active:
+            if is_admin:
+                has_sub = True
             else:
-                msg += "\nNo subscription. Send /packages."
-            msg += "\nUpload keywords/locations files, then /run."
-        await self._send(token, chat_id, msg)
+                has_sub = bool(await billing_svc.active_subscription(db, user))
+        support_on = True
+        if settings is not None:
+            support_on = bool(getattr(settings, "support_enabled", True))
+        return billing_svc.user_reply_keyboard(
+            is_admin=is_admin,
+            has_sub=has_sub,
+            support_enabled=support_on,
+        )
 
-    async def _handle_billing(self, db, token, chat_id, user, cmd, args, settings) -> None:
+    async def _send_menu(self, db, token: str, chat_id: int, text: str, user: User | None, settings=None) -> None:
+        await self._send(token, chat_id, text, reply_markup=await self._menu_markup(db, user, settings))
+
+    async def _flow_start(
+        self,
+        db,
+        token,
+        chat_id,
+        user,
+        settings,
+        *,
+        uid: Any = None,
+        display_name: str | None = None,
+    ) -> None:
+        # Auto-provision a panel user so buyers can browse/buy without admin linking.
+        if not user and uid is not None:
+            try:
+                user = await billing_svc.ensure_telegram_user(db, uid, display_name=display_name)
+            except Exception:
+                log.exception("ensure_telegram_user failed")
+                await self._send(
+                    token,
+                    chat_id,
+                    "Could not create your account. Try again or contact support.",
+                )
+                return
+
+        if not user:
+            await self._send(
+                token,
+                chat_id,
+                "Welcome! Use the menu below or send /packages to see subscription plans.",
+                reply_markup=billing_svc.user_reply_keyboard(has_sub=False),
+            )
+            return
+
+        msg = settings.welcome_text or "Welcome!"
+        msg += f"\nAccount: {user.username} ({user.role})."
+        sub = await billing_svc.active_subscription(db, user)
+        menu = await self._menu_markup(db, user, settings)
+
+        if user.role == "admin":
+            msg += "\nAdmin — no subscription required."
+            msg += "\nUpload keywords + locations (.txt/.csv), then Run. See Formats."
+            msg += "\nTap Admin for the admin command menu."
+            await self._send(token, chat_id, msg, reply_markup=menu)
+            return
+
+        if sub:
+            msg += f"\nPlan: {sub.package_name} until {sub.expires_at.date()}."
+            msg += "\nUpload keywords + locations (.txt/.csv), then Run. See Formats."
+            await self._send(token, chat_id, msg, reply_markup=menu)
+            return
+
+        # New / unsubscribed: sell packages instead of "ask admin for telegram id"
+        msg += "\nNo active subscription — pick a package to get access."
+        await self._send(token, chat_id, msg, reply_markup=menu)
+
+        pkgs = (await db.execute(select(Package).where(Package.is_active == True))).scalars().all()  # noqa: E712
+        if not pkgs:
+            await self._send(token, chat_id, "(No packages configured yet — check back soon.)")
+            return
+
+        # Inline package picker (reply keyboard stays — do not remove_keyboard)
+        await self._send(
+            token,
+            chat_id,
+            billing_svc.format_packages_list(pkgs),
+            reply_markup=billing_svc.packages_inline_keyboard(pkgs),
+        )
+
+    async def _answer_callback(self, token: str, callback_id: str, text: str = "") -> None:
+        try:
+            payload: dict[str, Any] = {"callback_query_id": callback_id}
+            if text:
+                payload["text"] = text[:200]
+            async with httpx.AsyncClient(timeout=15) as client:
+                await client.post(
+                    f"https://api.telegram.org/bot{token}/answerCallbackQuery",
+                    json=payload,
+                )
+        except Exception:
+            log.exception("answerCallbackQuery failed")
+
+    async def _handle_callback(self, db: AsyncSession, token: str, cq: dict) -> None:
+        data = str(cq.get("data") or "")
+        frm = cq.get("from") or {}
+        uid = frm.get("id")
+        msg = cq.get("message") or {}
+        chat = msg.get("chat") or {}
+        chat_id = chat.get("id")
+        cb_id = cq.get("id")
+        if uid is None or chat_id is None or not cb_id:
+            return
+        if not self._cmd_limiter.allow(str(uid)):
+            await self._answer_callback(token, cb_id, "Slow down")
+            return
+
+        display_name = (frm.get("username") or frm.get("first_name") or "").strip() or None
+        user = await find_user_by_telegram(db, uid)
+        if not user:
+            try:
+                user = await billing_svc.ensure_telegram_user(db, uid, display_name=display_name)
+            except Exception:
+                await self._answer_callback(token, cb_id, "Account error")
+                return
+
+        if data.startswith("buy:"):
+            slug = data[4:].strip()
+            await self._answer_callback(token, cb_id)
+            await self._buy_package(db, token, chat_id, user, slug, network=None)
+            return
+        if data.startswith("buynet:"):
+            parts = data.split(":")
+            if len(parts) >= 3:
+                slug, network = parts[1], parts[2]
+                await self._answer_callback(token, cb_id)
+                await self._buy_package(db, token, chat_id, user, slug, network=network)
+                return
+        await self._answer_callback(token, cb_id, "Unknown action")
+
+    async def _buy_package(
+        self,
+        db,
+        token,
+        chat_id,
+        user: User,
+        slug: str,
+        *,
+        network: str | None,
+    ) -> None:
         b = await billing_svc.get_billing(db)
+        if not b.enabled:
+            await self._send(token, chat_id, "Billing is disabled.")
+            return
+        pkg = (
+            await db.execute(select(Package).where(Package.slug == slug, Package.is_active == True))  # noqa: E712
+        ).scalar_one_or_none()
+        if not pkg:
+            await self._send(token, chat_id, "Unknown package. /packages")
+            return
+        ok, why = await billing_svc.can_purchase(db, user, pkg)
+        if not ok:
+            await self._send(token, chat_id, f"⛔ {why}")
+            return
+
+        nets = billing_svc.available_usdt_networks(b)
+        net, net_err = billing_svc.resolve_network(b, network)
+
+        # Step 2: always pick network when USDT nets exist and none was chosen yet
+        if not network and nets:
+            if len(nets) == 1:
+                # Still show a one-button picker so the step order is visible
+                await self._send(
+                    token,
+                    chat_id,
+                    f"Step 2/3 — confirm payment network for {pkg.name} ({pkg.price_usdt} USDT):",
+                    reply_markup=billing_svc.network_inline_keyboard(pkg.slug, nets),
+                )
+                return
+            await self._send(
+                token,
+                chat_id,
+                f"Step 2/3 — choose a payment network for {pkg.name} ({pkg.price_usdt} USDT):",
+                reply_markup=billing_svc.network_inline_keyboard(pkg.slug, nets),
+            )
+            return
+
+        if network and net_err:
+            await self._send(token, chat_id, f"⛔ {net_err}")
+            return
+
+        if not net and not b.manual_enabled:
+            await self._send(token, chat_id, f"⛔ {net_err or 'No payment method configured.'}")
+            return
+
+        if net:
+            method = billing_svc.method_for_network(net)
+        elif b.manual_enabled:
+            method = billing_svc.METHOD_MANUAL
+        else:
+            await self._send(token, chat_id, f"⛔ {net_err or 'Choose a network.'}")
+            return
+
+        order = await billing_svc.create_order(db, user, pkg, method)
+        text, qr = await billing_svc.payment_instructions(db, pkg, order=order, network=net)
+        caption = f"Step 3/3 — pay & submit TxID\n\n{text}"
+        await self._send_payment(token, chat_id, caption, qr)
+
+    async def _handle_billing(
+        self,
+        db,
+        token,
+        chat_id,
+        user,
+        cmd,
+        args,
+        settings,
+        *,
+        uid: Any = None,
+        display_name: str | None = None,
+    ) -> None:
+        b = await billing_svc.get_billing(db)
+
+        # Auto-link on billing commands so /packages and /buy work for new Telegram users.
+        if not user and uid is not None and cmd in ("/packages", "/plans", "/buy", "/renew", "/paid", "/subscription", "/me"):
+            try:
+                user = await billing_svc.ensure_telegram_user(db, uid, display_name=display_name)
+            except Exception:
+                log.exception("ensure_telegram_user failed on %s", cmd)
+
         if cmd in ("/packages", "/plans"):
             if not settings.public_packages and not user:
-                await self._send(token, chat_id, "⛔ Packages only for linked users.")
+                await self._send(token, chat_id, "⛔ Packages only for linked users. Send /start first.")
                 return
             pkgs = (await db.execute(select(Package).where(Package.is_active == True))).scalars().all()  # noqa: E712
             if not pkgs:
                 await self._send(token, chat_id, "No packages configured.")
                 return
-            lines = ["Available packages:"]
-            for p in sorted(pkgs, key=lambda x: x.tier):
-                lines.append(
-                    f"• {p.name} ({p.slug}) — {p.price_usdt} USDT / {p.duration_days}d | "
-                    f"threads {p.threads}, upload {p.max_upload_mb}MB"
-                )
-            lines.append("\nBuy: /buy <slug>")
-            await self._send(token, chat_id, "\n".join(lines))
+            text = billing_svc.format_packages_list(pkgs)
+            await self._send(token, chat_id, text, reply_markup=billing_svc.packages_inline_keyboard(pkgs))
             return
 
         if cmd in ("/subscription", "/me"):
             if not user:
-                await self._send(token, chat_id, "Not linked to a panel account.")
+                await self._send(token, chat_id, "Send /start to create your account.")
                 return
             if user.role == "admin":
                 await self._send(token, chat_id, "You are an admin (no subscription needed).")
@@ -467,44 +799,38 @@ class TelegramBotRuntime:
 
         if cmd in ("/buy", "/renew"):
             if not user:
-                await self._send(token, chat_id, "Link a panel account first (admin must set your Telegram ID).")
+                await self._send(token, chat_id, "Send /start to create your account, then Buy.")
                 return
             if not b.enabled:
                 await self._send(token, chat_id, "Billing is disabled.")
                 return
             if not args:
-                await self._send(token, chat_id, "Usage: /buy <package_slug>")
+                # Step 1: packages first
+                pkgs = (await db.execute(select(Package).where(Package.is_active == True))).scalars().all()  # noqa: E712
+                if not pkgs:
+                    await self._send(token, chat_id, "No packages configured.")
+                    return
+                text = "Step 1/3 — pick a package:\n\n" + billing_svc.format_packages_list(pkgs)
+                await self._send(token, chat_id, text, reply_markup=billing_svc.packages_inline_keyboard(pkgs))
                 return
-            pkg = (
-                await db.execute(select(Package).where(Package.slug == args[0], Package.is_active == True))  # noqa: E712
-            ).scalar_one_or_none()
-            if not pkg:
-                await self._send(token, chat_id, "Unknown package. /packages")
-                return
-            ok, why = await billing_svc.can_purchase(db, user, pkg)
-            if not ok:
-                await self._send(token, chat_id, f"⛔ {why}")
-                return
-            await billing_svc.create_order(db, user, pkg, "usdt" if b.usdt_enabled else "manual")
-            await self._send(token, chat_id, await billing_svc.payment_instructions(db, pkg))
+            slug = args[0]
+            network = args[1] if len(args) > 1 else None
+            await self._buy_package(db, token, chat_id, user, slug, network=network)
             return
 
         if cmd == "/paid":
             if not user:
-                await self._send(token, chat_id, "Link a panel account first.")
+                await self._send(token, chat_id, "Send /start to create your account first.")
                 return
             if not self._pay_limiter.allow(str(user.id)):
                 await self._send(token, chat_id, "Too many verification attempts. Wait a few minutes.")
-                return
-            if not b.usdt_enabled or not b.usdt_wallet:
-                await self._send(token, chat_id, "USDT not enabled.")
                 return
             if not args:
                 await self._send(token, chat_id, "Usage: /paid <txid>")
                 return
             txid = args[0].strip()
             if not billing_svc.valid_txid(txid):
-                await self._send(token, chat_id, "That doesn't look like a valid TRON TxID.")
+                await self._send(token, chat_id, "That doesn't look like a valid transaction id.")
                 return
             if await billing_svc.txid_used(db, txid):
                 await self._send(token, chat_id, "⛔ That transaction was already used.")
@@ -515,52 +841,79 @@ class TelegramBotRuntime:
                 )
             ).scalars().first()
             if not order:
-                await self._send(token, chat_id, "No pending order. /buy <slug> first.")
+                await self._send(token, chat_id, "No pending order. Buy a package first.")
+                return
+            net = billing_svc.network_from_method(order.payment_method)
+            if net not in (billing_svc.NETWORK_TRC20, billing_svc.NETWORK_BEP20):
+                await self._send(
+                    token,
+                    chat_id,
+                    "This order is manual — wait for admin /approve (TxID auto-verify is TRC-20/BEP-20 only).",
+                )
+                return
+            if net == billing_svc.NETWORK_TRC20 and (not b.usdt_enabled or not b.usdt_wallet):
+                await self._send(token, chat_id, "USDT TRC-20 not enabled.")
+                return
+            if net == billing_svc.NETWORK_BEP20 and (
+                not getattr(b, "usdt_bep20_enabled", False)
+                or not (getattr(b, "usdt_bep20_wallet", "") or "").strip()
+            ):
+                await self._send(token, chat_id, "USDT BEP-20 not enabled.")
                 return
             pkg = await db.get(Package, order.package_id)
             if not pkg:
                 await self._send(token, chat_id, "Package missing.")
                 return
-            await self._send(token, chat_id, "🔎 Verifying on-chain…")
-            ok, detail, amount = await billing_svc.verify_trc20_payment(
-                txid, b.usdt_wallet, pkg.price_usdt, b.usdt_api_base, b.usdt_api_key, b.usdt_contract
-            )
+            await self._send(token, chat_id, "🔎 Verifying on-chain (≥20 confirmations)…")
+            ok, detail, amount = await billing_svc.verify_usdt_payment(net, txid, b, float(pkg.price_usdt))
             if not ok:
                 await self._send(token, chat_id, f"❌ {detail}")
                 return
-            db.add(PaymentTxid(txid=txid, user_id=user.id, order_id=order.id))
-            order.status = "paid"
-            order.txid = txid
-            await db.commit()
-            sub = await billing_svc.activate_subscription(db, user, pkg)
-            await self._send(
+            sub = await billing_svc.fulfill_paid_order(
+                db, user=user, order=order, pkg=pkg, txid=txid, network=net
+            )
+            await self._send_menu(
+                db,
                 token,
                 chat_id,
-                f"✅ Verified ({amount:.2f} USDT). {pkg.name} active until {sub.expires_at.date()}.",
+                f"✅ Verified ({amount:.2f} USDT). {pkg.name} active until {sub.expires_at.date()}.\n{detail}",
+                user,
+                settings,
             )
 
     async def _support(self, db, token, chat_id, user, uid, args, settings) -> None:
         if not settings.support_enabled:
             await self._send(token, chat_id, "Support is not enabled.")
             return
-        body = " ".join(args).strip() or "(empty)"
-        tid = normalize_telegram_id(uid, allow_group=False) or str(uid)
-        ticket = SupportTicket(user_id=user.id if user else None, telegram_id=tid, message=body)
-        db.add(ticket)
-        await db.commit()
-        await db.refresh(ticket)
-        await self._send(token, chat_id, f"✅ Support ticket #{ticket.id} created.")
-        support_to = await resolve_support_chat_id(db, settings)
-        if support_to:
+        body = " ".join(args).strip()
+        if not body:
             await self._send(
                 token,
-                support_to,
-                f"Support #{ticket.id} from {tid}:\n{body}",
+                chat_id,
+                "Usage: /support <message>\n"
+                "Opens a ticket (or adds a follow-up to your open ticket). "
+                "Admins reply here on Telegram.",
+            )
+            return
+        tid = normalize_telegram_id(uid, allow_group=False) or str(uid)
+        ticket, _msg, created = await support_svc.create_or_append_user_message(
+            db,
+            settings=settings,
+            user=user,
+            telegram_id=tid,
+            body=body,
+        )
+        if created:
+            await self._send(
+                token,
+                chat_id,
+                f"✅ Support ticket #{ticket.id} created. An admin will reply here.",
             )
         else:
-            log.warning(
-                "Support ticket #%s created but no support_chat_id and no admin telegram_id",
-                ticket.id,
+            await self._send(
+                token,
+                chat_id,
+                f"✅ Added to open ticket #{ticket.id}.",
             )
 
     async def _handle_document(self, db, token, chat_id, user, doc, caption) -> None:
@@ -573,10 +926,20 @@ class TelegramBotRuntime:
             return
         b = await billing_svc.get_billing(db)
         fname = (doc.get("file_name") or "").lower()
-        ext = Path(fname).suffix.lower()
         allowed = b.allowed_extensions or [".txt", ".csv"]
-        if allowed and ext not in allowed:
-            await self._send(token, chat_id, f"⛔ File type not allowed. Allowed: {', '.join(allowed)}")
+        try:
+            check_extension(fname, allowed)
+        except InputFileError as e:
+            await self._send(token, chat_id, f"⛔ {e}")
+            return
+        mime = (doc.get("mime_type") or "").lower()
+        if mime.startswith(("image/", "video/", "audio/")) or mime in (
+            "application/pdf",
+            "application/zip",
+            "application/x-zip-compressed",
+        ):
+            pretty = ", ".join(allowed) if allowed else ".txt, .csv"
+            await self._send(token, chat_id, f"⛔ File must be {pretty} (not {mime or 'this type'}).")
             return
         size_mb = (doc.get("file_size") or 0) / (1024 * 1024)
         sub = await billing_svc.active_subscription(db, user)
@@ -593,7 +956,11 @@ class TelegramBotRuntime:
         elif "location" in cap_txt or "location" in fname:
             kind = "locations"
         if not kind:
-            await self._send(token, chat_id, "Send .txt with caption 'keywords' or 'locations'.")
+            await self._send(
+                token,
+                chat_id,
+                "Send a .txt or .csv with caption 'keywords' or 'locations'. See /formats.",
+            )
             return
 
         file_id = doc.get("file_id")
@@ -612,14 +979,33 @@ class TelegramBotRuntime:
                 await client.get(f"https://api.telegram.org/file/bot{settings.token}/{fp}")
             ).content
 
+        try:
+            entries = parse_entries(
+                raw,
+                kind,  # type: ignore[arg-type]
+                filename=fname,
+                check_ext=True,
+                configured_extensions=allowed,
+            )
+        except InputFileError as e:
+            await self._send(
+                token,
+                chat_id,
+                f"❌ {e}\nFix the file and re-upload. Job was not started. See /formats.",
+            )
+            return
+
         cfg = get_settings()
         dest_dir = cfg.uploads_dir / f"tg_{user.id}"
         dest_dir.mkdir(parents=True, exist_ok=True)
         dest = dest_dir / f"{kind}.txt"
-        dest.write_bytes(raw)
+        dest.write_bytes(entries_to_bytes(entries))
         self._inputs.setdefault(user.id, {})[kind] = dest
-        n = len([ln for ln in raw.decode("utf-8", errors="ignore").splitlines() if ln.strip() and not ln.startswith("#")])
-        await self._send(token, chat_id, f"✅ Saved {n} {kind}. Use /run when ready.")
+        await self._send(
+            token,
+            chat_id,
+            f"✅ Saved {len(entries)} {kind}. Upload the other file if needed, then /run.",
+        )
 
     async def _run(self, db, token, chat_id, user, args) -> None:
         perms = jobs_svc.effective_perms(user)
@@ -643,9 +1029,18 @@ class TelegramBotRuntime:
                 k, v = tok.split("=", 1)
                 overrides[k.strip().replace("-", "_")] = v
         try:
-            job = await jobs_svc.create_job_from_bytes(db, user, kw.read_bytes(), loc.read_bytes(), overrides)
+            job = await jobs_svc.create_job_from_bytes(
+                db,
+                user,
+                kw.read_bytes(),
+                loc.read_bytes(),
+                overrides,
+                keywords_name=kw.name,
+                locations_name=loc.name,
+                check_ext=False,
+            )
         except (PermissionError, ValueError) as e:
-            await self._send(token, chat_id, f"❌ {e}")
+            await self._send(token, chat_id, f"❌ {e}\nJob was not started. See /formats.")
             return
         await self._send(
             token,
@@ -777,9 +1172,10 @@ class TelegramBotRuntime:
             if c.audience == "admins" and not settings.admin_commands_enabled:
                 continue
             lines.append(f"{c.command} — {c.title or c.description}")
-        if user and user.role == "admin" and settings.admin_commands_enabled:
-            lines.append("/admin — Telegram admin menu")
-        return "\n".join(lines)
+        # Always surface formats even if the DB row is missing/disabled.
+        if not any(c.command == "/formats" for c in commands.values()):
+            lines.append("/formats — Accepted file types and format rules")
+        return "\n".join(lines) if len(lines) > 1 else "No commands available."
 
 
 bot_runtime = TelegramBotRuntime()

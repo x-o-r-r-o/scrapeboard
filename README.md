@@ -76,7 +76,7 @@ https://scrape.cvmso.com          (HestiaCP nginx + SSL)
 | **User** | Own jobs, own stats, own subscription | Same account if Telegram ID linked |
 | **Worker** | None (machine token) | None |
 
-There is **no public registration**. Admins create users. Support is via Telegram only (if configured).
+There is **no public registration**. Admins create users. Support tickets open via Telegram (`/support`) and can be managed from Telegram admin commands or **Admin → Support** in the panel; users get replies instantly on Telegram.
 
 ---
 
@@ -136,7 +136,8 @@ scrapeboard/
 - Mandatory TOTP 2FA  
 - Brute-force lockout  
 - reCAPTCHA **v2 or v3** (one mode at a time) on login  
-- Packages, USDT TRC-20 verify, manual approve, grant/extend  
+- Packages, USDT TRC-20 verify, USDT BEP-20 QR + admin approve, grant/extend
+- `/start` auto-creates a panel user linked to the Telegram id and shows packages to buy  
 - Admin proxy pools assigned to workers  
 - Worker enrollment tokens, online CPU/RAM, drain/disable  
 - Jobs: upload keywords/locations, queue, progress, stop, download ZIP  
@@ -457,7 +458,8 @@ Admins must change password and enable 2FA on first login.
 1. Create packages (slug, price USDT, days, threads, upload MB, tier)  
 2. **Billing**:
    - Enable billing  
-   - USDT TRC-20: receiving wallet (+ optional TronScan API key)  
+   - USDT TRC-20: receiving wallet (+ optional TronScan API key) — `/paid <txid>` auto-verify  
+   - USDT BEP-20 (BNB Smart Chain): receiving `0x…` wallet — bot sends QR + details; admin `/approve`  
    - Manual methods JSON, e.g.:
 
 ```json
@@ -466,8 +468,8 @@ Admins must change password and enable 2FA on first login.
 ]
 ```
 
-3. **Grant** a package to a user, or let them **Buy** + `/paid` / panel TxID verify  
-4. **Pending orders** → Approve (manual payments)  
+3. **Grant** a package to a user, or let them **Buy** (`/buy <slug> [trc20|bep20]`) + `/paid` / panel TxID verify / admin approve  
+4. **Pending orders** → Approve (manual / BEP-20 payments)  
 
 ### 4. Proxy pools (Admin → Proxy pools)
 
@@ -603,16 +605,16 @@ Click **Install / refresh demos** to load onboarding, USDT buy, manual buy, job 
 
 | Command | Who | Purpose |
 |---------|-----|---------|
-| `/start` `/help` | everyone / gated | Welcome & help |
+| `/start` `/help` `/formats` | everyone / gated | Welcome (auto-create account + packages), help, upload format rules |
 | `/whoami` | everyone | Telegram id + link status |
 | `/packages` | everyone* | List plans |
 | `/buy <slug>` | linked users | Create order + payment instructions |
-| `/paid <txid>` | linked users | On-chain USDT verify |
+| `/paid <txid>` | linked users | On-chain USDT TRC-20 verify (BEP-20: tip for admin) |
 | `/subscription` | users | Own plan |
 | `/run [k=v…]` | subscribers | Queue job from uploaded inputs |
 | `/status` | users | **Own jobs only** |
 | `/stop` | subscribers | Stop own job + partial ZIP |
-| `/support …` | users | Ticket → support chat |
+| `/support …` | users | Open/follow-up ticket → support chat; admin replies notify user here |
 | `/admin` | admins** | Admin menu + keyboard |
 | `/users` `/userinfo` `/adduser` `/deluser` … | admins** | User CRUD |
 | `/subs` `/grant` `/revoke` `/extend` | admins** | Subscriptions |
@@ -620,17 +622,27 @@ Click **Install / refresh demos** to load onboarding, USDT buy, manual buy, job 
 | `/workers` `/worker` `/addworker` `/workertoken` … | admins** | Workers (tokens DM’d privately) |
 | `/adminpkgs` `/addpkg` `/editpkg` | admins** | Packages |
 | `/alljobs` `/job` `/adminstop` | admins** | Cross-user jobs |
+| `/tickets` `/ticket` `/reply` `/close` | admins** | Support tickets (user notified on reply/close) |
 | `/proxies` `/captcha` `/botstatus` | admins** | Infra / settings (keys stay in panel) |
 
 \* if “public packages” enabled  
 \*\* only if “admin Telegram commands” enabled; runtime also requires `User.role=admin` linked via `telegram_id`. Full list: [`panel/README.md`](panel/README.md#telegram-admin).  
 
+### Support tickets
+
+1. **Bot Builder**: enable Support + set support chat id (admin Telegram id or group).
+2. **User**: `/support help me with billing` → ticket created (or follow-up on open ticket) → message to support chat.
+3. **Admin (Telegram)**: `/tickets` · `/ticket 12` · `/reply 12 …` · `/close 12` — or reply in-thread to the forwarded `Support #12` message.
+4. **Admin (panel)**: **Admin → Support** → open ticket → Reply / Close.
+5. User receives reply/close notices **instantly on Telegram**. Closed tickets stay closed; `/support` again opens a new ticket.
+
 ### Upload inputs in Telegram
 
-Send a `.txt` / `.csv` document with caption:
+Send a `.txt` / `.csv` (UTF-8) document with caption `keywords` or `locations`.
 
-- `keywords`  
-- `locations`  
+- **TXT:** one entry per line; blank lines and `#` comments ignored. Locations: `city,state,country`.
+- **CSV:** same line format, or a header column named `keyword`/`query` (keywords) or `location` (locations).
+- Invalid/empty/wrong-type files are rejected **before** a job is queued. See `/formats` (also on `/help`).
 
 Then `/run engine=chrome threads=2`.
 
@@ -652,7 +664,8 @@ Admin → Users → set **Telegram ID** (user can get it via `/whoami` on the bo
 - Active subscription required to run jobs (admins bypass)  
 - **Upgrade-only** while subscribed (same or higher tier)  
 - Thread and upload caps enforced from package + user perms  
-- USDT: verify recipient, contract, amount, confirmation; TxID single-use  
+- USDT TRC-20: verify recipient, contract, amount, confirmation; TxID single-use
+- USDT BEP-20: QR (EIP-681) + wallet details; admin approve (no auto on-chain verify yet)  
 - Manual: user pays → admin Approves in panel or `/approve`  
 
 ### Panel endpoints (authenticated)

@@ -150,7 +150,7 @@ class Order(Base):
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
     package_id: Mapped[int] = mapped_column(ForeignKey("packages.id"))
     status: Mapped[str] = mapped_column(String(32), default="pending")  # pending|paid|approved|cancelled
-    payment_method: Mapped[str] = mapped_column(String(32), default="")  # usdt|manual
+    payment_method: Mapped[str] = mapped_column(String(32), default="")  # usdt_trc20|usdt_bep20|usdt|manual
     txid: Mapped[str | None] = mapped_column(String(128), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
@@ -171,11 +171,21 @@ class BillingSettings(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
     enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    # USDT TRC-20 (Tron) — optional on-chain TxID verify via /paid
     usdt_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
     usdt_wallet: Mapped[str] = mapped_column(String(128), default="")
     usdt_contract: Mapped[str] = mapped_column(String(128), default="TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t")
     usdt_api_base: Mapped[str] = mapped_column(String(255), default="https://apilist.tronscanapi.com")
     usdt_api_key: Mapped[str] = mapped_column(String(255), default="")
+    # USDT BEP-20 (BNB Smart Chain) — QR + /paid on-chain verify (≥20 confirmations)
+    usdt_bep20_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    usdt_bep20_wallet: Mapped[str] = mapped_column(String(128), default="")
+    usdt_bep20_contract: Mapped[str] = mapped_column(
+        String(128), default="0x55d398326f99059fF775485246999027B3197955"
+    )
+    usdt_bep20_api_base: Mapped[str] = mapped_column(String(255), default="https://api.bscscan.com/api")
+    usdt_bep20_api_key: Mapped[str] = mapped_column(String(255), default="")
+    usdt_bep20_rpc_url: Mapped[str] = mapped_column(String(255), default="https://bsc-dataseed.binance.org/")
     manual_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
     manual_methods: Mapped[list] = mapped_column(JSON, default=list)
     allowed_extensions: Mapped[list] = mapped_column(JSON, default=lambda: [".txt", ".csv"])
@@ -367,8 +377,30 @@ class SupportTicket(Base):
     user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
     telegram_id: Mapped[str] = mapped_column(String(64), index=True)
     message: Mapped[str] = mapped_column(Text)
-    status: Mapped[str] = mapped_column(String(32), default="open")
+    status: Mapped[str] = mapped_column(String(32), default="open")  # open | closed
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+    closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    closed_by_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+
+    messages: Mapped[list["SupportMessage"]] = relationship(
+        back_populates="ticket",
+        order_by="SupportMessage.id",
+        cascade="all, delete-orphan",
+    )
+
+
+class SupportMessage(Base):
+    __tablename__ = "support_messages"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    ticket_id: Mapped[int] = mapped_column(ForeignKey("support_tickets.id"), index=True)
+    sender: Mapped[str] = mapped_column(String(16), default="user")  # user | admin
+    admin_user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    body: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    ticket: Mapped["SupportTicket"] = relationship(back_populates="messages")
 
 
 class AuditLog(Base):

@@ -24,6 +24,7 @@ from app.models import (
 )
 from app.services import billing as billing_svc
 from app.services import jobs as jobs_svc
+from app.services import support as support_svc
 from app.services.captcha_settings import get_captcha_settings
 from app.services.perms import DEFAULT_USER_PERMS, normalize_perms
 from app.services.worker_config import DEFAULT_WORKER_CONFIG, normalize_worker_config
@@ -72,10 +73,16 @@ ADMIN_COMMANDS = frozenset(
         "/botstatus",
         "/boton",
         "/botoff",
+        "/tickets",
+        "/ticket",
+        "/reply",
+        "/close",
     }
 )
 
 ADMIN_MENU = """🛠 Telegram admin
+
+Send /start anytime to restore the main user menu.
 
 Users
   /users [page] — list
@@ -104,6 +111,12 @@ Packages
 
 Jobs
   /alljobs [page] · /job <public_id> · /adminstop <public_id>
+
+Support
+  /tickets [open|closed|all] [page]
+  /ticket <id> · /reply <id> <message>
+  /close <id> [reason]
+  (or reply in Telegram to a forwarded Support #N message)
 
 Infra / settings
   /proxies · /proxy <id> on|off
@@ -214,6 +227,14 @@ async def _send_token_privately(
         await send(token, chat_id, "Could not DM you — link your telegram_id on the panel admin user.")
 
 
+async def _refresh_command_menu(db) -> None:
+    """Lazy import avoids circular import with runtime → admin."""
+    from app.bot.runtime import bot_runtime
+
+    bot_runtime.invalidate_command_menu()
+    await bot_runtime.refresh_command_menu(db)
+
+
 async def handle_admin(
     *,
     db: AsyncSession,
@@ -235,7 +256,7 @@ async def handle_admin(
                 "keyboard": [
                     [{"text": "/users"}, {"text": "/subs"}, {"text": "/workers"}],
                     [{"text": "/alljobs"}, {"text": "/adminpkgs"}, {"text": "/pending"}],
-                    [{"text": "/proxies"}, {"text": "/captcha"}, {"text": "/botstatus"}],
+                    [{"text": "/tickets"}, {"text": "/proxies"}, {"text": "/botstatus"}],
                     [{"text": "/help"}],
                 ],
                 "resize_keyboard": True,
@@ -410,6 +431,8 @@ async def handle_admin(
             target.telegram_id = tid
         db.add(AuditLog(actor_id=admin.id, action="user.update", detail={"user_id": target.id, "telegram_id": target.telegram_id}))
         await db.commit()
+        if target.role == "admin":
+            await _refresh_command_menu(db)
         await send(token, chat_id, f"✅ {target.username} tg={target.telegram_id or 'unlinked'}")
         return
 
@@ -512,6 +535,8 @@ async def handle_admin(
             return
         target.is_active = True
         await db.commit()
+        if target.role == "admin":
+            await _refresh_command_menu(db)
         await send(token, chat_id, f"Enabled {target.username}.")
         return
 
@@ -642,11 +667,17 @@ async def handle_admin(
             await send(token, chat_id, "User/package missing.")
             return
         order.status = "approved"
+        user.perms = normalize_perms({**(user.perms or {}), **DEFAULT_USER_PERMS, "telegram_user": True})
         await db.commit()
         sub = await billing_svc.activate_subscription(db, user, pkg)
         await send(token, chat_id, f"✅ Approved order {order.id} → {user.username} until {sub.expires_at.date()}")
         if user.telegram_id:
-            await send(token, int(user.telegram_id), f"✅ Subscription {pkg.name} active until {sub.expires_at.date()}.")
+            await send(
+                token,
+                int(user.telegram_id),
+                f"✅ Subscription {pkg.name} active until {sub.expires_at.date()}.",
+                reply_markup=billing_svc.user_reply_keyboard(is_admin=False, has_sub=True),
+            )
         return
 
     if cmd == "/reject":
@@ -1137,6 +1168,80 @@ async def handle_admin(
         settings.enabled = False
         await db.commit()
         await send(token, chat_id, "Bot enabled=False. Polling will pause until re-enabled in panel or /boton from a running process.")
+        return
+
+    # --- support tickets ---
+    if cmd == "/tickets":
+        status = "open"
+        page = 1
+        if args:
+            a0 = args[0].lower()
+            if a0 in ("open", "closed", "all"):
+                status = a0
+                if len(args) > 1 and args[1].isdigit():
+                    page = max(1, int(args[1]))
+            elif a0.isdigit():
+                page = max(1, int(a0))
+        page_size = PAGE
+        tickets = await support_svc.list_tickets(
+            db, status=status, limit=page_size, offset=(page - 1) * page_size
+        )
+        if not tickets:
+            await send(token, chat_id, f"No {status} tickets (page {page}).")
+            return
+        lines = [f"Tickets · {status} · page {page}"]
+        for t in tickets:
+            preview = (t.message or "").replace("\n", " ")[:60]
+            lines.append(f"• #{t.id} [{t.status}] tg={t.telegram_id}: {preview}")
+        lines.append("\n/ticket <id> · /reply <id> <msg> · /close <id> [reason]")
+        if len(tickets) >= page_size:
+            lines.append(f"Next: /tickets {status} {page + 1}")
+        await send(token, chat_id, "\n".join(lines))
+        return
+
+    if cmd == "/ticket":
+        if not args or not args[0].isdigit():
+            await send(token, chat_id, "Usage: /ticket <id>")
+            return
+        ticket = await support_svc.get_ticket(db, int(args[0]))
+        if not ticket:
+            await send(token, chat_id, "Ticket not found.")
+            return
+        await send(token, chat_id, support_svc.format_thread(ticket)[:4000])
+        return
+
+    if cmd == "/reply":
+        if len(args) < 2 or not args[0].isdigit():
+            await send(token, chat_id, "Usage: /reply <ticket_id> <message>")
+            return
+        try:
+            ticket = await support_svc.admin_reply(
+                db, ticket_id=int(args[0]), body=" ".join(args[1:]), admin=admin
+            )
+        except LookupError as exc:
+            await send(token, chat_id, str(exc))
+            return
+        except ValueError as exc:
+            await send(token, chat_id, str(exc))
+            return
+        await send(token, chat_id, f"✅ Replied to ticket #{ticket.id} (user notified on Telegram).")
+        return
+
+    if cmd == "/close":
+        if not args or not args[0].isdigit():
+            await send(token, chat_id, "Usage: /close <ticket_id> [reason]")
+            return
+        try:
+            ticket = await support_svc.close_ticket(
+                db,
+                ticket_id=int(args[0]),
+                admin=admin,
+                reason=" ".join(args[1:]),
+            )
+        except LookupError as exc:
+            await send(token, chat_id, str(exc))
+            return
+        await send(token, chat_id, f"✅ Ticket #{ticket.id} closed (user notified).")
         return
 
     await send(token, chat_id, f"Unhandled admin command {cmd}. Send /admin.")

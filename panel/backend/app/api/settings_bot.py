@@ -307,6 +307,7 @@ async def update_bot_settings(
             log.info("Auto-filled support_chat_id from admin telegram_id=%s", suggested)
     await db.commit()
     await bot_runtime.restart()
+    await bot_runtime.refresh_command_menu()
     await db.refresh(b)
     return await _enrich_settings(db, b)
 
@@ -392,6 +393,8 @@ async def create_command(
     db.add(c)
     await db.commit()
     await db.refresh(c)
+    bot_runtime.invalidate_command_menu()
+    await bot_runtime.refresh_command_menu(db)
     return _command_out(c)
 
 
@@ -423,6 +426,8 @@ async def update_command(
         setattr(c, k, v)
     await db.commit()
     await db.refresh(c)
+    bot_runtime.invalidate_command_menu()
+    await bot_runtime.refresh_command_menu(db)
     return _command_out(c)
 
 
@@ -439,6 +444,8 @@ async def toggle_command(
     c.enabled = not c.enabled
     await db.commit()
     await db.refresh(c)
+    bot_runtime.invalidate_command_menu()
+    await bot_runtime.refresh_command_menu(db)
     return _command_out(c)
 
 
@@ -459,6 +466,8 @@ async def delete_command(
         )
     await db.delete(c)
     await db.commit()
+    bot_runtime.invalidate_command_menu()
+    await bot_runtime.refresh_command_menu(db)
     return MessageOut(detail="Command deleted")
 
 
@@ -597,12 +606,15 @@ async def install_demos(_: User = Depends(require_admin), __: User = Depends(req
             row.is_demo = True
             row.sort_order = payload["sort_order"]
     await db.commit()
+    bot_runtime.invalidate_command_menu()
+    await bot_runtime.refresh_command_menu(db)
     return MessageOut(detail="Demo commands and workflows installed/refreshed")
 
 
 @router.post("/bot/restart", response_model=MessageOut)
 async def restart_bot(_: User = Depends(require_admin), __: User = Depends(require_ready_user)):
     await bot_runtime.restart()
+    await bot_runtime.refresh_command_menu()
     snap = bot_runtime.snapshot()
     detail = "Bot runtime restarted"
     if snap.get("task_running"):

@@ -5,6 +5,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import require_admin, require_ready_user
+from app.bot.runtime import bot_runtime
 from app.bot.tg_auth import normalize_telegram_id
 from app.core.database import get_db
 from app.core.security import hash_password
@@ -207,6 +208,9 @@ async def create_user(
     if body.worker_ids is not None:
         await _set_worker_ids(db, user.id, body.worker_ids)
         await db.commit()
+    if tid:
+        bot_runtime.invalidate_command_menu()
+        await bot_runtime.refresh_command_menu(db)
     return await _user_out(db, user, await _worker_ids_for(db, user.id))
 
 
@@ -221,6 +225,8 @@ async def update_user(
     user = await db.get(User, user_id)
     if not user:
         raise HTTPException(404, "User not found")
+    prev_role = user.role
+    prev_tg = user.telegram_id
     data = body.model_dump(exclude_unset=True)
     worker_ids = data.pop("worker_ids", None)
     if data.pop("reset_2fa", False):
@@ -271,6 +277,9 @@ async def update_user(
     db.add(AuditLog(actor_id=admin.id, action="user.update", detail={"user_id": user_id}))
     await db.commit()
     await db.refresh(user)
+    if user.role != prev_role or user.telegram_id != prev_tg or prev_role == "admin" or user.role == "admin":
+        bot_runtime.invalidate_command_menu()
+        await bot_runtime.refresh_command_menu(db)
     return await _user_out(db, user, await _worker_ids_for(db, user.id))
 
 
@@ -286,7 +295,11 @@ async def delete_user(
         raise HTTPException(404, "User not found")
     if user.id == admin.id:
         raise HTTPException(400, "Cannot delete yourself")
+    was_admin = user.role == "admin" and bool(user.telegram_id)
     await db.delete(user)
     db.add(AuditLog(actor_id=admin.id, action="user.delete", detail={"user_id": user_id}))
     await db.commit()
+    if was_admin:
+        bot_runtime.invalidate_command_menu()
+        await bot_runtime.refresh_command_menu()
     return MessageOut(detail="Deleted")
