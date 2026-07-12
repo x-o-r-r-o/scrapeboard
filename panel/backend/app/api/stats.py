@@ -277,9 +277,11 @@ async def live_stats(user: User = Depends(require_ready_user), db: AsyncSession 
                 "rows_saved_total": stats["rows_saved_total"],
                 "rows_saved_today": stats["rows_saved_today"],
                 "subscription": sub.package_name if sub else None,
-                "subscription_days_left": round((sub.expires_at - now).total_seconds() / 86400, 2)
-                if sub and sub.expires_at
-                else None,
+                "subscription_days_left": (
+                    round((_aware(sub.expires_at) - now).total_seconds() / 86400, 2)
+                    if sub and _aware(sub.expires_at)
+                    else None
+                ),
                 "thread_allowance": allowance,
                 "threads_in_use": used,
                 "threads_free": max(0, allowance - used),
