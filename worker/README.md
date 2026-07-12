@@ -255,10 +255,10 @@ python3 install.py --role worker --update
 systemctl --user restart scrapeboard-worker
 systemctl --user status scrapeboard-worker --no-pager
 grep -E 'scrapeboard worker v' worker/logs/worker.log | tail -3
-# Expect: v0.8.3+  (0.7.0 = still the old process)
+# Expect: v0.8.4+  (0.7.0 = still the old process)
 ```
 
-Panel Admin → Workers should show **0.8.3+** within ~15s. Until then, a failed ack on `chunk_id=0` (fixed in panel) plus no cancel support can leave **1 instance running** on the dashboard.
+Panel Admin → Workers should show **0.8.4+** within ~15s. Until then, a failed ack on `chunk_id=0` (fixed in panel) plus no cancel support can leave **1 instance running** on the dashboard.
 
 Tailscale is **not** required — workers only need outbound HTTPS to the panel.
 
@@ -336,6 +336,11 @@ Created by the wizard / `--setup`. Gitignored (contains the token). Heartbeats a
 | `skip_setup` | bool | `false` | Same as `--skip-setup` when true |
 | `max_browsers` | int | `2` | Max concurrent **job leases** (instances). Overwritten from panel heartbeat |
 | `tailscale_enabled` | bool | `false` | If true, agent checks/reminds Tailscale on start (alias: `tailscale`) |
+| `resource_guard` | bool | `true` | When true, refuse new leases if host CPU/RAM exceed caps (see below) |
+| `resource_cpu_max_pct` | float | `80` | Host CPU % at/above which new leases pause |
+| `resource_ram_max_pct` | float | `80` | Host RAM % at/above which new leases pause |
+| `resource_cpu_resume_pct` | float | max−10 (`70`) | CPU % at/below which leasing resumes (hysteresis) |
+| `resource_ram_resume_pct` | float | max−10 (`70`) | RAM % at/below which leasing resumes (hysteresis) |
 | `scrape` | object | `{}` | Panel-pushed scrape flags (engine, threads, delays, …). Filled on heartbeat; used as a local mirror — **leases carry the effective settings** |
 
 There is no local `engines` list key — only `default_engine` (and panel `scrape.engine`). Proxy lists are **not** stored here for panel jobs; the lease includes proxies from the assigned pool.
@@ -354,6 +359,13 @@ Used by the wizard, `setup_and_run.*`, and root `install.py` / `install.sh`. Tru
 | `SCRAPEBOARD_WORK_DIR` | wizard (`--yes`) | Optional `work_dir` in config |
 | `SCRAPEBOARD_TAILSCALE` | wizard, setup/install | Enable Tailscale in config / pass `--tailscale` |
 | `SCRAPEBOARD_ROLE` | `install.py`, `update.*` | Override `.scrapeboard-role` (`panel` \| `worker`) |
+| `SCRAPEBOARD_RESOURCE_GUARD` | agent runtime | `0`/`false` disables CPU/RAM lease backpressure; `1`/`true` forces on |
+| `SCRAPEBOARD_CPU_MAX_PCT` | agent runtime | Host CPU % cap before refusing new leases (default `80`; `≥100` disables CPU axis) |
+| `SCRAPEBOARD_RAM_MAX_PCT` | agent runtime | Host RAM % cap before refusing new leases (default `80`; `≥100` disables RAM axis) |
+| `SCRAPEBOARD_CPU_RESUME_PCT` | agent runtime | Resume leasing at/below this CPU % (default max−10) |
+| `SCRAPEBOARD_RAM_RESUME_PCT` | agent runtime | Resume leasing at/below this RAM % (default max−10) |
+
+Env resource caps override matching `worker_config.json` keys. Set a max to `100` (or higher) to disable that axis only.
 
 ### Install / setup / update flags
 
@@ -435,8 +447,8 @@ Standalone engine CLI (`gmaps_scraper.py`) is separate — see [`SCRAPER.md`](SC
 
 ## What the agent does
 
-1. `POST /api/worker-api/heartbeat` — online + CPU/RAM/disk/load + host identity + `active_chunks` (so the panel can reclaim orphan leases; may include `done_in_chunk` / `rows` for live UI progress)  
-2. `POST /api/worker-api/lease` — up to **`max_browsers` concurrent leases** (one instance per user job chunk); each lease includes keywords/locations + merged settings + proxies  
+1. `POST /api/worker-api/heartbeat` — online + CPU/RAM/disk/load + host identity + `active_chunks` (so the panel can reclaim orphan leases; may include `done_in_chunk` / `rows` for live UI progress); may set `resource_throttling` when the local resource guard is pausing new leases  
+2. `POST /api/worker-api/lease` — up to **`max_browsers` concurrent leases** (one instance per user job chunk); while CPU/RAM are over cap the agent **waits and retries** (jobs stay queued — never denied/failed/skipped; see [Resource guard](#resource-guard-agent-084)); each lease includes keywords/locations + merged settings + proxies  
 3. Runs `gmaps_scraper` for that chunk using the job’s **thread** count (browsers inside the instance)  
 4. While scraping: `POST /api/worker-api/progress` (~every 2s / each search) so Jobs UI shows climbing searches/rows before the chunk finishes  
 5. Zips CSV parts → `POST /api/worker-api/upload`  
@@ -445,6 +457,26 @@ Standalone engine CLI (`gmaps_scraper.py`) is separate — see [`SCRAPER.md`](SC
 **Panel-side thread quota:** the panel only promotes a user’s queued job when the sum of that user’s running job threads stays within their plan allowance. Unassigned users share the worker pool; dedicated-worker packages may optionally pin workers.
 
 Work directories are isolated per user: `work_root/user_{owner_id}/{job_id}/`.
+
+### Resource guard (agent **0.8.4+**)
+
+The worker already reports host **CPU/RAM** on every heartbeat. From **0.8.4** it also uses those metrics for **backpressure**:
+
+1. When host CPU **or** RAM is at/above the configured max (default **80%**), the agent **stops taking new leases** and logs `[resource] throttling cpu=… ram=…`.
+2. In-flight scrapes keep running to completion (no hard-kill on brief spikes).
+3. Leasing resumes only after **both** CPU and RAM fall to/below the resume thresholds (default **70%** = max−10 hysteresis) — logs `[resource] resume …`.
+4. Heartbeat may include `resource_throttling: true` so the panel can show busy/skip state (ignored by older panels).
+
+Metrics are **host-wide** via `psutil` (same as heartbeat telemetry). Inside Docker/K8s without cgroup-aware limits surfaced to the process, reported % may reflect the **host**, not the container quota — set caps accordingly or use host-level cgroup limits separately.
+
+Tune via `worker_config.json` or env (see tables above). Example:
+
+```bash
+export SCRAPEBOARD_CPU_MAX_PCT=75
+export SCRAPEBOARD_RAM_MAX_PCT=80
+export SCRAPEBOARD_CPU_RESUME_PCT=65
+python agent.py --service
+```
 
 ### Live progress (agent **0.8.3+**)
 
@@ -456,7 +488,7 @@ Older agents only bump panel progress on **ack** (whole chunk finished), so Jobs
 - After upload succeeds but ack fails, older agents leave the DB lease `leased`; heartbeat used to refresh that TTL forever. **0.8.1+** reports `active_chunks` and retries ack.
 - Agents still on **0.7.0** ignore cancel and lack lease cleanup — restart after update (see above).
 - Progress stuck at 0 while scraping: worker is older than **0.8.3**, or panel has not been redeployed with `/worker-api/progress`.
-
+- Worker idle while CPU/RAM high: resource guard pausing new leases (0.8.5+) — check logs for `[resource] pausing`; jobs stay queued (not failed). Lower `max_browsers` / job threads or raise caps if this lasts too long.
 ---
 
 ## Contents

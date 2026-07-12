@@ -34,11 +34,17 @@ ROOT = Path(__file__).resolve().parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-VERSION = "0.8.3"
+VERSION = "0.8.5"
 CONFIG_NAME = "worker_config.json"
 HOST_OS = platform.system()  # Windows | Darwin | Linux
 SERVICE_NAME = "scrapeboard-worker"
 REPO_ROOT = ROOT.parent  # checkout root (worker/ lives one level down)
+
+# Resource guard defaults: refuse new leases above max; resume below resume (hysteresis).
+DEFAULT_CPU_MAX_PCT = 80.0
+DEFAULT_RAM_MAX_PCT = 80.0
+DEFAULT_RESOURCE_HYSTERESIS_PCT = 10.0
+RESOURCE_LOG_INTERVAL_SEC = 15.0
 
 
 # ---------------------------------------------------------------------------
@@ -188,6 +194,9 @@ def run_setup_wizard(prompt=input) -> dict:
         "skip_setup": False,
         "max_browsers": 2,
         "tailscale_enabled": bool(want_ts),
+        "resource_guard": True,
+        "resource_cpu_max_pct": DEFAULT_CPU_MAX_PCT,
+        "resource_ram_max_pct": DEFAULT_RAM_MAX_PCT,
         "scrape": {},  # filled from panel worker settings on heartbeat
     }
     save_config(cfg)
@@ -422,7 +431,12 @@ def remind_tailscale_if_enabled(cfg: dict | None) -> None:
 
 
 def _host_stats():
-    """CPU, RAM, disk, load averages for heartbeat telemetry."""
+    """CPU, RAM, disk, load averages for heartbeat telemetry.
+
+    Uses host-wide psutil metrics (not cgroup/container limits). First
+    ``cpu_percent(interval=None)`` after process start is often 0.0 until a
+    later sample — the lease loop refreshes this every heartbeat.
+    """
     out = {
         "cpu": 0.0,
         "mem": 0.0,
@@ -471,6 +485,162 @@ def _cpu_mem():
     return s["cpu"], s["mem"]
 
 
+def _env_float(name: str) -> float | None:
+    raw = (os.environ.get(name) or "").strip()
+    if not raw:
+        return None
+    try:
+        return float(raw)
+    except ValueError:
+        print(f"[resource] ignoring invalid {name}={raw!r}", flush=True)
+        return None
+
+
+def _cfg_float(cfg: dict, key: str) -> float | None:
+    if key not in cfg or cfg[key] is None or cfg[key] == "":
+        return None
+    try:
+        return float(cfg[key])
+    except (TypeError, ValueError):
+        print(f"[resource] ignoring invalid config {key}={cfg[key]!r}", flush=True)
+        return None
+
+
+class ResourceGuard:
+    """Backpressure when host CPU/RAM exceed configurable caps.
+
+    Above ``*_max`` → pause starting *new* leases until below ``*_resume``.
+    In-flight scrapes keep running. Jobs are never failed, denied, errored, or
+    skipped — they stay queued on the panel until this worker (or another) leases.
+    """
+
+    def __init__(
+        self,
+        cpu_max: float = DEFAULT_CPU_MAX_PCT,
+        ram_max: float = DEFAULT_RAM_MAX_PCT,
+        cpu_resume: float | None = None,
+        ram_resume: float | None = None,
+        enabled: bool = True,
+    ):
+        self.cpu_max = float(cpu_max)
+        self.ram_max = float(ram_max)
+        hyst = DEFAULT_RESOURCE_HYSTERESIS_PCT
+        self.cpu_resume = float(cpu_resume if cpu_resume is not None else max(0.0, self.cpu_max - hyst))
+        self.ram_resume = float(ram_resume if ram_resume is not None else max(0.0, self.ram_max - hyst))
+        # Cap at >= 100 disables that axis; both disabled → guard off.
+        self.enabled = bool(enabled) and (self.cpu_max < 100.0 or self.ram_max < 100.0)
+        self._throttling = False
+        self._last_log = 0.0
+        self._warmed = False
+
+    @classmethod
+    def from_sources(cls, cfg: dict | None = None) -> "ResourceGuard":
+        """Resolve caps from env (wins) then worker_config.json then defaults."""
+        cfg = cfg or {}
+        cpu_max = _env_float("SCRAPEBOARD_CPU_MAX_PCT")
+        if cpu_max is None:
+            cpu_max = _cfg_float(cfg, "resource_cpu_max_pct")
+        if cpu_max is None:
+            cpu_max = DEFAULT_CPU_MAX_PCT
+        ram_max = _env_float("SCRAPEBOARD_RAM_MAX_PCT")
+        if ram_max is None:
+            ram_max = _cfg_float(cfg, "resource_ram_max_pct")
+        if ram_max is None:
+            ram_max = DEFAULT_RAM_MAX_PCT
+        cpu_resume = _env_float("SCRAPEBOARD_CPU_RESUME_PCT")
+        if cpu_resume is None:
+            cpu_resume = _cfg_float(cfg, "resource_cpu_resume_pct")
+        ram_resume = _env_float("SCRAPEBOARD_RAM_RESUME_PCT")
+        if ram_resume is None:
+            ram_resume = _cfg_float(cfg, "resource_ram_resume_pct")
+        enabled_raw = (os.environ.get("SCRAPEBOARD_RESOURCE_GUARD") or "").strip().lower()
+        if enabled_raw in ("0", "false", "no", "off"):
+            enabled = False
+        elif enabled_raw in ("1", "true", "yes", "on"):
+            enabled = True
+        elif "resource_guard" in cfg:
+            enabled = bool(cfg.get("resource_guard"))
+        else:
+            enabled = True
+        return cls(
+            cpu_max=cpu_max,
+            ram_max=ram_max,
+            cpu_resume=cpu_resume,
+            ram_resume=ram_resume,
+            enabled=enabled,
+        )
+
+    def _warm_cpu(self) -> None:
+        if self._warmed:
+            return
+        try:
+            import psutil
+
+            # Non-blocking prime so the next interval=None sample is meaningful.
+            psutil.cpu_percent(interval=None)
+        except Exception:
+            pass
+        self._warmed = True
+
+    def allow_new_work(self, stats: dict | None = None) -> bool:
+        """Return True if new leases may start. Updates throttle state + logs."""
+        if not self.enabled:
+            return True
+        self._warm_cpu()
+        s = stats if stats is not None else _host_stats()
+        try:
+            cpu = float(s.get("cpu") or 0.0)
+            ram = float(s.get("mem") or 0.0)
+        except (TypeError, ValueError):
+            return True
+
+        cpu_hot = self.cpu_max < 100.0 and cpu >= self.cpu_max
+        ram_hot = self.ram_max < 100.0 and ram >= self.ram_max
+        cpu_cool = self.cpu_max >= 100.0 or cpu <= self.cpu_resume
+        ram_cool = self.ram_max >= 100.0 or ram <= self.ram_resume
+
+        if self._throttling:
+            if cpu_cool and ram_cool:
+                self._throttling = False
+                print(
+                    f"[resource] resume cpu={cpu:.1f}% ram={ram:.1f}% "
+                    f"(resume≤{self.cpu_resume:.0f}/{self.ram_resume:.0f})",
+                    flush=True,
+                )
+        elif cpu_hot or ram_hot:
+            self._throttling = True
+
+        if self._throttling:
+            now = time.time()
+            if now - self._last_log >= RESOURCE_LOG_INTERVAL_SEC:
+                bits = [f"cpu={cpu:.1f}%", f"ram={ram:.1f}%"]
+                if cpu_hot:
+                    bits[0] += f">={self.cpu_max:.0f}"
+                if ram_hot:
+                    bits[1] += f">={self.ram_max:.0f}"
+                print(
+                    f"[resource] pausing new leases {' '.join(bits)} "
+                    f"(waiting until ≤{self.cpu_resume:.0f}/{self.ram_resume:.0f}; "
+                    f"jobs stay queued — not denied/skipped)",
+                    flush=True,
+                )
+                self._last_log = now
+            return False
+        return True
+
+    @property
+    def throttling(self) -> bool:
+        return self._throttling
+
+    def summary(self) -> str:
+        if not self.enabled:
+            return "disabled"
+        return (
+            f"cpu_max={self.cpu_max:.0f}% resume={self.cpu_resume:.0f}% "
+            f"ram_max={self.ram_max:.0f}% resume={self.ram_resume:.0f}%"
+        )
+
+
 class PanelClient:
     def __init__(self, base: str, token: str, worker_name: str = ""):
         import requests
@@ -496,7 +666,12 @@ class PanelClient:
         r.raise_for_status()
         return r.json()
 
-    def heartbeat(self, active_chunks: list[dict] | None = None):
+    def heartbeat(
+        self,
+        active_chunks: list[dict] | None = None,
+        *,
+        resource_throttling: bool | None = None,
+    ):
         stats = _host_stats()
         payload: dict = {
             "cpu": stats["cpu"],
@@ -516,6 +691,8 @@ class PanelClient:
             # Always send (even []) so the panel can reclaim orphan DB leases.
             "active_chunks": list(active_chunks or []),
         }
+        if resource_throttling is not None:
+            payload["resource_throttling"] = bool(resource_throttling)
         r = self.requests.post(
             f"{self.base}/api/worker-api/heartbeat",
             json=payload,
@@ -1152,7 +1329,12 @@ def main(argv=None) -> int:
         cfg0 = load_config() or {}
         max_slots = max(1, int(cfg0.get("max_browsers") or 2))
     except Exception:
+        cfg0 = {}
         max_slots = 2
+    resource_guard = ResourceGuard.from_sources(cfg0)
+    print(f"[resource] guard {resource_guard.summary()}", flush=True)
+    # Prime CPU sample + initial throttle state before the first lease attempt.
+    resource_guard.allow_new_work()
 
     def _instance_key(job: dict, chunk: dict) -> str:
         return f"{job.get('job_id')}:{chunk.get('id')}"
@@ -1409,13 +1591,33 @@ def main(argv=None) -> int:
         _schedule_service_restart_hint()
         return True
 
+    def _reload_resource_caps() -> None:
+        """Refresh caps from env/config without clearing throttle hysteresis."""
+        try:
+            cfg_live = load_config() or {}
+        except Exception:
+            cfg_live = {}
+        fresh = ResourceGuard.from_sources(cfg_live)
+        resource_guard.enabled = fresh.enabled
+        resource_guard.cpu_max = fresh.cpu_max
+        resource_guard.ram_max = fresh.ram_max
+        resource_guard.cpu_resume = fresh.cpu_resume
+        resource_guard.ram_resume = fresh.ram_resume
+
     while True:
         try:
-            hb = client.heartbeat(active_chunks=_active_chunk_payload())
+            # Sample once, update throttle state, then heartbeat with current flag.
+            stats = _host_stats()
+            resource_guard.allow_new_work(stats)
+            hb = client.heartbeat(
+                active_chunks=_active_chunk_payload(),
+                resource_throttling=resource_guard.throttling,
+            )
             try:
                 sync_local_config_from_panel(hb, Path(rt["config_path"]))
             except Exception as e:
                 print(f"[worker] config sync warning: {e}", flush=True)
+            _reload_resource_caps()
             _apply_cancels(hb.get("cancel_jobs") or [])
             _push_logs()
             if _maybe_apply_panel_update(hb):
@@ -1453,9 +1655,19 @@ def main(argv=None) -> int:
                 time.sleep(1)
                 continue
 
+            # Host CPU/RAM backpressure: finish in-flight scrapes; wait/retry for
+            # new leases only. Never fail/deny/skip jobs — panel keeps them queued.
+            if resource_guard.throttling or not resource_guard.allow_new_work(stats):
+                time.sleep(3)
+                continue
+
             # Fill free slots (one lease attempt per free slot per loop)
             leased_any = False
             for _ in range(slots_free):
+                # Wait out a spike between fills instead of abandoning the loop
+                # with an error — other workers may still lease; we just pause.
+                if not resource_guard.allow_new_work():
+                    break
                 lease = client.lease()
                 # Panel may attach update on lease as well as heartbeat
                 if _maybe_apply_panel_update(lease):
