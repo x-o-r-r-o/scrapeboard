@@ -2,11 +2,19 @@
 
 **Scrapeboard** is a production Google Maps lead-scraping platform with:
 
-1. **Control panel** (FastAPI + React) — users, 2FA, billing, jobs, workers, Bot Builder  
-2. **Worker agents** — scrape-only machines that pull job chunks from the panel  
+1. **Control panel** ([`panel/`](panel/)) — FastAPI + React: users, 2FA, billing, jobs, workers, Bot Builder  
+2. **Worker agents** ([`worker/`](worker/)) — scrape-only machines (Windows / macOS / Linux) that pull job chunks  
 3. **Telegram bot** — optional full bot wired to the same backend (commands, payments, jobs, support)
 
-It is designed like **OpsBoard / OmniDesk**: deploy the panel once on **HestiaCP**, run it as a **systemd** service, and keep it online until you remove it. Workers run on other servers and only talk to `https://scrape.cvmso.com`.
+Deploy the panel once on **HestiaCP** (OpsBoard / OmniDesk style). It runs as **systemd** until you remove it. Workers on other machines talk only to **`https://scrape.cvmso.com`**.
+
+| Doc | Path |
+|-----|------|
+| Panel | [`panel/README.md`](panel/README.md) |
+| Worker | [`worker/README.md`](worker/README.md) |
+| HestiaCP deploy | [`deploy/hestiacp/README.md`](deploy/hestiacp/README.md) |
+| Scrape engine flags | [`worker/SCRAPER.md`](worker/SCRAPER.md) |
+| Short map | [`STRUCTURE.md`](STRUCTURE.md) |
 
 ---
 
@@ -26,7 +34,8 @@ It is designed like **OpsBoard / OmniDesk**: deploy the panel once on **HestiaCP
 12. [API overview](#api-overview)
 13. [Operations & troubleshooting](#operations--troubleshooting)
 14. [Updating](#updating)
-15. [License / notes](#license--notes)
+15. [Environment reference](#environment-reference)
+16. [License / notes](#license--notes)
 
 ---
 
@@ -46,7 +55,7 @@ https://scrape.cvmso.com          (HestiaCP nginx + SSL)
          users, billing    chunk lease/ack    Bot Builder commands
                               │
                               ▼
-                    Worker machines (any OS)
+                    Worker machines (Windows / macOS / Linux)
                     agent.py → lease → scrape → upload ZIP → ack
 ```
 
@@ -75,8 +84,8 @@ There is **no public registration**. Admins create users. Support is via Telegra
 ```
 scrapeboard/
 ├── README.md                 ← this documentation
-├── STRUCTURE.md              ← short map
-├── deploy/                   ← HestiaCP install / update (OpsBoard-style)
+├── STRUCTURE.md
+├── deploy/                   ← HestiaCP install / update
 │   ├── config.env.example
 │   ├── install.sh
 │   ├── update.sh
@@ -86,22 +95,19 @@ scrapeboard/
 │       ├── install.sh
 │       ├── update.sh
 │       └── nginx.ssl.conf_scrapeboard
-├── panel/                    ← Scrapeboard control panel
-│   ├── backend/              ← FastAPI
-│   │   ├── app/
-│   │   ├── requirements.txt
-│   │   └── .env.example
+├── panel/                    ← control panel (see panel/README.md)
+│   ├── backend/              ← FastAPI (port 3010)
 │   ├── frontend/             ← React (Vite)
-│   ├── data/                 ← DB, uploads, results (runtime; not in git)
-│   └── README.md
-└── worker/                   ← scrape agent + engine
-    ├── agent.py              ← panel client
+│   └── data/                 ← DB, uploads, results (runtime; not in git)
+└── worker/                   ← scrape agent (see worker/README.md)
+    ├── agent.py              ← wizard + panel client
     ├── gmaps_scraper.py      ← browser scrape engine
+    ├── setup_and_run.bat     ← Windows first-run
+    ├── setup_and_run.sh      ← Linux / macOS first-run
+    ├── setup_and_run.command ← macOS Finder launcher
     ├── requirements.txt
-    ├── keywords.txt / locations.txt / proxies.txt
-    ├── mac_setup_and_test.command
-    ├── SCRAPER.md            ← detailed scrape engine docs
-    └── README.md
+    ├── SCRAPER.md
+    └── worker_config.json    ← created on first run (gitignored)
 ```
 
 ---
@@ -115,6 +121,7 @@ scrapeboard/
 - Exhaustive Maps scroll, optional website enrich (email + socials)  
 - CAPTCHA providers: none / 2captcha / CaptchaAI  
 - Resumable chunked jobs, per-location CSV, ZIP delivery  
+- First-run wizard + auto browser/package install (Windows / macOS / Linux)  
 - Clean shutdown of browsers on stop  
 
 ### Control panel
@@ -153,7 +160,7 @@ scrapeboard/
 | Workers | Per-worker bearer token over HTTPS |
 | Billing | Public wallet only; TxID replay protection; rate-limited `/paid` |
 | Jobs/files | Ownership checks; users cannot see others’ data |
-| Secrets | `.env` / `config.env` never committed |
+| Secrets | `.env` / `config.env` / `worker_config.json` never committed |
 
 ---
 
@@ -165,7 +172,7 @@ Use this only for development. Production uses HestiaCP + systemd (below).
 
 - Python 3.10+  
 - Node.js 18+ or Bun (frontend)  
-- For workers: Playwright / browsers as needed  
+- For workers: first run auto-installs Playwright / browsers as needed  
 
 ### 1. Panel API
 
@@ -179,14 +186,10 @@ cp .env.example .env
 uvicorn app.main:app --reload --host 127.0.0.1 --port 3010
 ```
 
-Health check:
-
 ```bash
 curl -s http://127.0.0.1:3010/api/health
 # {"ok":true}
 ```
-
-Default bootstrap admin (change immediately):
 
 | Field | Default (see `.env`) |
 |-------|----------------------|
@@ -204,13 +207,19 @@ npm run dev          # http://127.0.0.1:5173  (proxies /api → :3010)
 
 ### 3. Local worker (optional)
 
+In the panel: **Admin → Workers → Create** → copy token.
+
 ```bash
-# In panel: Admin → Workers → Create worker → copy token
 cd worker
+# easiest: setup_and_run.sh / .bat / .command
+# or:
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 python agent.py --panel-url http://127.0.0.1:3010 --token YOUR_TOKEN
+# first run without flags opens the wizard (use panel URL http://127.0.0.1:3010)
 ```
+
+More: [`worker/README.md`](worker/README.md) · [`panel/README.md`](panel/README.md)
 
 ---
 
@@ -218,7 +227,7 @@ python agent.py --panel-url http://127.0.0.1:3010 --token YOUR_TOKEN
 
 Same pattern as OpsBoard: **static SPA in `public_html` + systemd API + nginx `/api` proxy**.
 
-### Defaults for this project
+### Defaults
 
 | Setting | Value |
 |---------|-------|
@@ -237,8 +246,6 @@ Same pattern as OpsBoard: **static SPA in `public_html` + systemd API + nginx `/
 4. Wait until the certificate is valid  
 
 ### Part 2 — Upload code
-
-From your Mac (example):
 
 ```bash
 ssh root@YOUR_SERVER_IP 'mkdir -p /home/cvmso/apps'
@@ -265,7 +272,7 @@ bash deploy/hestiacp/install.sh
 What the installer does:
 
 1. Installs system packages (Python, git, rsync, …)  
-2. Installs **Bun** (frontend build only — same approach as OpsBoard)  
+2. Installs **Bun** (frontend build)  
 3. Creates Python venv + installs API requirements  
 4. Builds React → rsync into `public_html`  
 5. Writes `panel/backend/.env`  
@@ -275,6 +282,8 @@ What the installer does:
 9. Health-checks `http://127.0.0.1:3010/api/health`  
 
 Open **https://scrape.cvmso.com** → sign in → change password → enable 2FA.
+
+Deep dive: [`deploy/hestiacp/README.md`](deploy/hestiacp/README.md).
 
 ### Service commands
 
@@ -346,9 +355,11 @@ Assign a pool to each worker.
 ### 5. Workers (Admin → Workers)
 
 1. Create worker → **copy token once**  
-2. Note install hint:
+2. Install hint from the panel:
 
 ```bash
+python agent.py --setup
+# or:
 python agent.py --panel-url https://scrape.cvmso.com --token TOKEN
 ```
 
@@ -369,6 +380,8 @@ See [Telegram Bot Builder](#telegram-bot-builder).
 3. Optional engine/threads overrides (capped by plan)  
 4. Watch progress; **Stop** or wait for complete → **Download** ZIP  
 
+UI route map and API notes: [`panel/README.md`](panel/README.md).
+
 ---
 
 ## Worker setup
@@ -377,13 +390,16 @@ Workers are **scrape-only** and run on **Windows, macOS, or Linux**.
 
 ### First run (interactive setup + auto browser install)
 
+| OS | Command |
+|----|---------|
+| **Windows** | Double-click `worker/setup_and_run.bat` |
+| **macOS** | Double-click `worker/setup_and_run.command` (or `bash setup_and_run.sh`) |
+| **Linux** | `bash worker/setup_and_run.sh` |
+
+Or manually:
+
 ```bash
 cd worker
-# Windows:  setup_and_run.bat
-# macOS:    open setup_and_run.command   (or bash setup_and_run.sh)
-# Linux:    bash setup_and_run.sh
-
-# Or:
 python3 -m venv .venv && source .venv/bin/activate   # Win: py -3 -m venv .venv && .venv\Scripts\activate
 pip install -r requirements.txt
 python agent.py                # wizard → saves worker_config.json
@@ -393,25 +409,26 @@ python agent.py --selftest     # optional: verify browser stack
 Wizard asks for panel URL (`https://scrape.cvmso.com`), worker token, name, default engine.  
 Browsers/packages auto-install per engine on first use (same as the original scraper).
 
+```bash
+python agent.py --setup          # re-run wizard
+python agent.py --force-setup    # re-install browsers
+python agent.py --skip-setup     # never auto-install
+```
+
+Keep it running under `tmux`, `screen`, systemd, LaunchAgent, or a Windows service.
+
 ### What the agent does
 
 1. `POST /api/worker-api/heartbeat` (CPU/RAM)  
-2. `POST /api/worker-api/lease` → receives chunk + keywords/locations + settings + proxies  
-3. Runs `gmaps_scraper.execute_index_batch(...)`  
+2. `POST /api/worker-api/lease` → chunk + keywords/locations + settings + proxies  
+3. Runs `gmaps_scraper` for that chunk  
 4. Zips CSV parts → `POST /api/worker-api/upload`  
 5. `POST /api/worker-api/ack` → panel merges when all chunks done → user ZIP + optional Telegram  
 
-### macOS quick test of the scrape engine
+Full worker guide: [`worker/README.md`](worker/README.md).  
+Engine flags: [`worker/SCRAPER.md`](worker/SCRAPER.md).
 
-```bash
-cd worker
-bash mac_setup_and_test.command
-# or double-click mac_setup_and_test.command
-```
-
-Full engine flag reference: [`worker/SCRAPER.md`](worker/SCRAPER.md).
-
-### Useful worker engine commands (standalone diagnostics)
+### Standalone engine diagnostics
 
 ```bash
 cd worker
@@ -420,7 +437,7 @@ python gmaps_scraper.py --check-proxies --proxies proxies.txt
 python gmaps_scraper.py --diagnose --proxy-index 0 --engine chrome
 ```
 
-In production, prefer running via **`agent.py`** against the panel.
+In production, prefer **`agent.py`** against the panel.
 
 ---
 
@@ -587,7 +604,8 @@ OpenAPI docs when API is running: `http://127.0.0.1:3010/docs` (localhost only i
 | Blank page | Rebuild frontend + rsync (`update.sh`) |
 | Login lockout | Wait lockout window or clear `login_attempts` / adjust Security settings |
 | 2FA fails | Server time NTP (`timedatectl`); re-setup 2FA if secret changed |
-| Worker offline | Check token, HTTPS URL, firewall outbound; heartbeat every few seconds |
+| Worker offline | Check token, HTTPS URL, firewall outbound; re-run `agent.py --setup` |
+| Worker browser missing | `python agent.py --force-setup` or `--selftest --engine chrome` |
 | nginx won’t start | Remove duplicate `location /`; `nginx -t` |
 | Port in use | Change `API_PORT` in `deploy/config.env` (avoid 3000/3001), re-run update |
 | Permission denied | `chown -R cvmso:cvmso /home/cvmso/apps/scrapeboard` |
@@ -614,6 +632,8 @@ bash /home/cvmso/apps/scrapeboard/deploy/hestiacp/update.sh
 
 Update **keeps** existing `panel/backend/.env` (secrets preserved), rebuilds frontend, restarts systemd, refreshes nginx snippet.
 
+Workers: pull/sync the `worker/` folder on each machine, then restart `agent.py` (config file stays).
+
 ---
 
 ## Environment reference
@@ -632,6 +652,10 @@ Update **keeps** existing `panel/backend/.env` (secrets preserved), rebuilds fro
 ### `deploy/config.env`
 
 See `deploy/config.env.example` — Hestia user, domain, port, bootstrap password, optional `REPO_URL`.
+
+### `worker/worker_config.json`
+
+Created by the wizard (`panel_url`, `token`, `name`, `engine`). Gitignored.
 
 ---
 

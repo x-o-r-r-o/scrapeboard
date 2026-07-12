@@ -2,11 +2,12 @@
 
 | Folder | Role |
 |--------|------|
-| [`panel/`](panel/) | Scrapeboard web control panel (FastAPI + React) |
-| [`worker/`](worker/) | Worker-only scrape agent |
-| [`deploy/`](deploy/) | HestiaCP production install (OpsBoard-style) |
+| [`panel/`](panel/) | Scrapeboard web control panel (FastAPI + React) — [README](panel/README.md) |
+| [`worker/`](worker/) | Worker-only scrape agent (Windows / macOS / Linux) — [README](worker/README.md) |
+| [`deploy/`](deploy/) | HestiaCP production install (OpsBoard-style) — [README](deploy/hestiacp/README.md) |
 
-**Production:** deploy Scrapeboard once on HestiaCP (`scrape.cvmso.com`, systemd, port **3010**).  
-Workers on other machines: `--panel-url https://scrape.cvmso.com`.
+**Production:** deploy Scrapeboard once on HestiaCP (`scrape.cvmso.com`, systemd, port **3010**).
 
-See [deploy/hestiacp/README.md](deploy/hestiacp/README.md), [panel/README.md](panel/README.md), [worker/README.md](worker/README.md).
+**Workers:** first-run wizard / `setup_and_run.*` → `--panel-url https://scrape.cvmso.com`.
+
+Full docs: [README.md](README.md).
