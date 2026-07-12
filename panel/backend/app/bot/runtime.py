@@ -54,6 +54,7 @@ CODE_HANDLED_COMMANDS = frozenset(
         "/packages",
         "/plans",
         "/buy",
+        "/upgrade",
         "/paid",
         "/subscription",
         "/me",
@@ -70,8 +71,9 @@ CODE_HANDLED_COMMANDS = frozenset(
 COMMAND_ALIASES = {
     "/id": "/whoami",
     "/plans": "/packages",
+    "/upgrade": "/buy",
     "/me": "/subscription",
-    "/renew": "/subscription",
+    "/renew": "/buy",
     "/servers": "/workers",
 }
 
@@ -466,8 +468,8 @@ class TelegramBotRuntime:
             )
             return
 
-        # billing open commands
-        if cmd in ("/packages", "/plans", "/buy", "/paid", "/subscription", "/me", "/renew"):
+        # billing open commands (/packages aliases to same list as /buy|/upgrade)
+        if cmd in ("/packages", "/plans", "/buy", "/upgrade", "/paid", "/subscription", "/me", "/renew"):
             await self._handle_billing(
                 db, token, chat_id, user, cmd, args, settings, uid=uid, display_name=display_name
             )
@@ -512,7 +514,7 @@ class TelegramBotRuntime:
             return
 
         if not user:
-            extra = " Send /start to create your account, then /packages to see plans."
+            extra = " Send /start to create your account, then /buy to see plans."
             await self._send(token, chat_id, f"⛔ Not authorized. Your id is {tid_disp}.{extra}")
             return
 
@@ -588,7 +590,7 @@ class TelegramBotRuntime:
             await self._send(
                 token,
                 chat_id,
-                "Welcome! Use the menu below or send /packages to see subscription plans.",
+                "Welcome! Use the menu below or send /buy to see subscription plans.",
                 reply_markup=billing_svc.user_reply_keyboard(has_sub=False),
             )
             return
@@ -608,6 +610,7 @@ class TelegramBotRuntime:
         if sub:
             msg += f"\nPlan: {sub.package_name} until {sub.expires_at.date()}."
             msg += "\nUpload keywords + locations (.txt/.csv), then Run. See Help for formats."
+            msg += "\nTap Upgrade for a higher tier (same/lower plans are not offered)."
             await self._send(token, chat_id, msg, reply_markup=menu)
             return
 
@@ -696,7 +699,7 @@ class TelegramBotRuntime:
             await db.execute(select(Package).where(Package.slug == slug, Package.is_active == True))  # noqa: E712
         ).scalar_one_or_none()
         if not pkg:
-            await self._send(token, chat_id, "Unknown package. /packages")
+            await self._send(token, chat_id, "Unknown package. /buy")
             return
         ok, why = await billing_svc.can_purchase(db, user, pkg)
         if not ok:
@@ -761,22 +764,54 @@ class TelegramBotRuntime:
     ) -> None:
         b = await billing_svc.get_billing(db)
 
-        # Auto-link on billing commands so /packages and /buy work for new Telegram users.
-        if not user and uid is not None and cmd in ("/packages", "/plans", "/buy", "/renew", "/paid", "/subscription", "/me"):
+        # Auto-link on billing commands so /buy and /packages work for new Telegram users.
+        if not user and uid is not None and cmd in (
+            "/packages",
+            "/plans",
+            "/buy",
+            "/upgrade",
+            "/renew",
+            "/paid",
+            "/subscription",
+            "/me",
+        ):
             try:
                 user = await billing_svc.ensure_telegram_user(db, uid, display_name=display_name)
             except Exception:
                 log.exception("ensure_telegram_user failed on %s", cmd)
 
-        if cmd in ("/packages", "/plans"):
-            if not settings.public_packages and not user:
+        if cmd in ("/packages", "/plans", "/buy", "/upgrade", "/renew"):
+            if cmd in ("/packages", "/plans") and not settings.public_packages and not user:
                 await self._send(token, chat_id, "⛔ Packages only for linked users. Send /start first.")
                 return
-            pkgs = (await db.execute(select(Package).where(Package.is_active == True))).scalars().all()  # noqa: E712
+            if cmd in ("/buy", "/upgrade", "/renew"):
+                if not user:
+                    await self._send(token, chat_id, "Send /start to create your account, then Buy.")
+                    return
+                if not b.enabled:
+                    await self._send(token, chat_id, "Billing is disabled.")
+                    return
+                if args:
+                    slug = args[0]
+                    network = args[1] if len(args) > 1 else None
+                    await self._buy_package(db, token, chat_id, user, slug, network=network)
+                    return
+
+            # Shared list: /packages, /plans, and buy/upgrade with no args
+            pkgs = await billing_svc.purchasable_packages(db, user)
+            has_sub = bool(user and user.role != "admin" and await billing_svc.active_subscription(db, user))
             if not pkgs:
-                await self._send(token, chat_id, "No packages configured.")
+                if has_sub:
+                    await self._send(token, chat_id, billing_svc.top_plan_message())
+                else:
+                    await self._send(token, chat_id, "No packages configured.")
                 return
-            text = billing_svc.format_packages_list(pkgs)
+            if cmd in ("/buy", "/upgrade", "/renew"):
+                text = "Step 1/3 — pick a package:\n\n" + billing_svc.format_packages_list(
+                    pkgs, upgrade=has_sub
+                )
+            else:
+                text = billing_svc.format_packages_list(pkgs, upgrade=has_sub)
             await self._send(token, chat_id, text, reply_markup=billing_svc.packages_inline_keyboard(pkgs))
             return
 
@@ -789,7 +824,7 @@ class TelegramBotRuntime:
                 return
             sub = await billing_svc.active_subscription(db, user)
             if not sub:
-                await self._send(token, chat_id, "No subscription. Send /packages.")
+                await self._send(token, chat_id, "No subscription. Send /buy.")
                 return
             await self._send(
                 token,
@@ -797,27 +832,6 @@ class TelegramBotRuntime:
                 f"Package: {sub.package_name}\nExpires: {sub.expires_at.date()}\n"
                 f"Threads: {sub.threads} | Upload: {sub.max_upload_mb} MB",
             )
-            return
-
-        if cmd in ("/buy", "/renew"):
-            if not user:
-                await self._send(token, chat_id, "Send /start to create your account, then Buy.")
-                return
-            if not b.enabled:
-                await self._send(token, chat_id, "Billing is disabled.")
-                return
-            if not args:
-                # Step 1: packages first
-                pkgs = (await db.execute(select(Package).where(Package.is_active == True))).scalars().all()  # noqa: E712
-                if not pkgs:
-                    await self._send(token, chat_id, "No packages configured.")
-                    return
-                text = "Step 1/3 — pick a package:\n\n" + billing_svc.format_packages_list(pkgs)
-                await self._send(token, chat_id, text, reply_markup=billing_svc.packages_inline_keyboard(pkgs))
-                return
-            slug = args[0]
-            network = args[1] if len(args) > 1 else None
-            await self._buy_package(db, token, chat_id, user, slug, network=network)
             return
 
         if cmd == "/paid":
@@ -1017,7 +1031,7 @@ class TelegramBotRuntime:
         if user.role != "admin":
             sub = await billing_svc.active_subscription(db, user)
             if not sub:
-                await self._send(token, chat_id, "⛔ Subscription required. /packages")
+                await self._send(token, chat_id, "⛔ Subscription required. /buy")
                 return
         inputs = self._inputs.get(user.id) or {}
         kw = inputs.get("keywords")

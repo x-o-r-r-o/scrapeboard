@@ -734,6 +734,7 @@ type Sub = {
   days_left: number;
   is_active: boolean;
   expires_at: string;
+  tier?: number;
 } | null;
 
 type LiveWorker = {
@@ -1369,6 +1370,7 @@ export function SubscriptionPage() {
       price_usdt: number;
       threads: number;
       duration_days: number;
+      tier?: number;
       description?: string;
       headings?: string[];
       features?: string[];
@@ -1392,7 +1394,7 @@ export function SubscriptionPage() {
 
   async function refresh() {
     setSub(await api<Sub>("/api/subscriptions/me").catch(() => null));
-    setPackages(await api<Array<{ id: number; slug: string; name: string; price_usdt: number; threads: number; duration_days: number }>>("/api/packages").catch(() => []));
+    setPackages(await api<Array<{ id: number; slug: string; name: string; price_usdt: number; threads: number; duration_days: number; tier?: number }>>("/api/packages").catch(() => []));
     const b = await api<{
       enabled: boolean;
       usdt_enabled: boolean;
@@ -1444,6 +1446,11 @@ export function SubscriptionPage() {
     }
   }
 
+  const buyablePackages =
+    sub && typeof sub.tier === "number"
+      ? packages.filter((p) => (p.tier ?? 0) > (sub.tier ?? 0))
+      : packages;
+
   return (
     <div className="stack">
       <h1>Subscription</h1>
@@ -1459,8 +1466,11 @@ export function SubscriptionPage() {
       </div>
       {billing?.enabled ? (
         <div className="card">
-          <h3>Packages</h3>
-          {(billing.networks?.length || 0) > 0 ? (
+          <h3>{sub ? "Upgrade" : "Packages"}</h3>
+          {sub && buyablePackages.length === 0 ? (
+            <p className="muted">You're on the top plan — no higher packages to upgrade to.</p>
+          ) : null}
+          {(billing.networks?.length || 0) > 0 && buyablePackages.length > 0 ? (
             <label className="field" style={{ maxWidth: 320, marginBottom: "0.75rem" }}>
               Payment network
               <select className="input" value={buyNetwork} onChange={(e) => setBuyNetwork(e.target.value)}>
@@ -1473,6 +1483,7 @@ export function SubscriptionPage() {
               </select>
             </label>
           ) : null}
+          {buyablePackages.length > 0 ? (
           <table className="table">
             <thead>
               <tr>
@@ -1484,7 +1495,7 @@ export function SubscriptionPage() {
               </tr>
             </thead>
             <tbody>
-              {packages.map((p) => (
+              {buyablePackages.map((p) => (
                 <tr key={p.id}>
                   <td>
                     {p.name} <span className="muted">({p.slug})</span>
@@ -1505,13 +1516,14 @@ export function SubscriptionPage() {
                   <td>{p.threads}</td>
                   <td>
                     <button className="btn secondary" type="button" onClick={() => buy(p.slug)}>
-                      Buy
+                      {sub ? "Upgrade" : "Buy"}
                     </button>
                   </td>
                 </tr>
               ))}
             </tbody>
           </table>
+          ) : null}
           {instructions ? <pre style={{ whiteSpace: "pre-wrap", color: "var(--muted)" }}>{instructions}</pre> : null}
           {billing.usdt_enabled || billing.usdt_bep20_enabled ? (
             <form onSubmit={paid} style={{ display: "flex", gap: "0.75rem", flexWrap: "wrap", marginTop: "0.75rem" }}>

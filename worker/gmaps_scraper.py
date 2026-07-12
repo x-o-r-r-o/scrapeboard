@@ -2811,12 +2811,12 @@ def effective_max_upload_mb(cfg, uid):
 
 
 def can_purchase(cfg, uid, pkg):
-    """Upgrade-only while a subscription is active: block strictly-lower tiers."""
+    """Upgrade-only while subscribed: require strictly higher Package.tier."""
     s = get_subscription(cfg, uid)
     if s and _parse_iso_ts(s.get("expires")) > time.time():
-        if int(pkg.get("tier", 1)) < int(s.get("tier", 0)):
-            return False, ("You can't downgrade while your current subscription is "
-                           "active. You may buy the same or a higher tier.")
+        if int(pkg.get("tier", 1)) <= int(s.get("tier", 0)):
+            return False, ("Upgrade-only while subscribed — pick a higher "
+                           "tier package.")
     return True, ""
 
 

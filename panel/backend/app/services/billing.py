@@ -69,16 +69,22 @@ METHOD_MANUAL = "manual"
 # Persistent Telegram reply-keyboard labels → slash commands
 MENU_BUTTON_TO_CMD: dict[str, str] = {
     "Buy": "/buy",
-    "Packages": "/packages",
+    "Upgrade": "/buy",
     "Help": "/help",
     "Support": "/support",
     "Run": "/run",
     "Status": "/status",
     # Legacy reply-keyboard labels (no longer shown; keep for stale keyboards).
+    "Packages": "/packages",  # alias of Buy / Upgrade list
     "Jobs": "/jobs",
     "Formats": "/formats",
     "Admin": "/admin",
 }
+
+# Package ranking for upgrades: higher Package.tier wins.
+# Admin sets `tier` on each package (bootstrap: Basic=1, Pro=2, Max=3).
+# Not inferred from price_usdt, threads, or duration — use tier as the sole ladder.
+# While subscribed, purchases require pkg.tier > subscription.tier (strict upgrade).
 
 _NETWORK_ALIASES = {
     "trc20": NETWORK_TRC20,
@@ -197,12 +203,37 @@ async def package_for_user(db: AsyncSession, user: User | None) -> Package | Non
 
 
 async def can_purchase(db: AsyncSession, user: User, pkg: Package) -> tuple[bool, str]:
+    """Allow first purchase freely; while subscribed, only strictly higher Package.tier."""
     if user.role == "admin":
         return False, "Admins do not need a subscription"
     sub = await active_subscription(db, user)
-    if sub and int(pkg.tier) < int(sub.tier):
-        return False, "Upgrade-only while subscribed — pick the same or a higher tier"
+    if sub and int(pkg.tier) <= int(sub.tier):
+        return False, "Upgrade-only while subscribed — pick a higher tier package"
     return True, ""
+
+
+async def purchasable_packages(db: AsyncSession, user: User | None) -> list[Package]:
+    """Active packages the user may buy: all if unsubscribed; only higher tier if subscribed.
+
+    Tier ladder is Package.tier (integer). See module comment above MENU_BUTTON_TO_CMD.
+    Admins see the full active catalog (purchase itself is blocked by can_purchase).
+    """
+    pkgs = (
+        await db.execute(
+            select(Package).where(Package.is_active == True).order_by(Package.tier)  # noqa: E712
+        )
+    ).scalars().all()
+    if user is None or user.role == "admin":
+        return list(pkgs)
+    sub = await active_subscription(db, user)
+    if not sub:
+        return list(pkgs)
+    current = int(sub.tier)
+    return [p for p in pkgs if int(p.tier) > current]
+
+
+def top_plan_message() -> str:
+    return "You're on the top plan — no higher packages to upgrade to."
 
 
 async def activate_subscription(
@@ -915,24 +946,26 @@ def user_reply_keyboard(
 
     Status covers job progress (typed /jobs still works). Help includes upload
     formats (typed /formats still works). Jobs/Formats are not shown as buttons.
+    Buy and Packages are one action: guests see Buy; subscribers see Upgrade
+    (typed Packages still aliases to the same filtered list).
     """
     if is_admin:
         rows: list[list[dict]] = [
-            [{"text": "Run"}, {"text": "Status"}, {"text": "Buy"}, {"text": "Packages"}],
+            [{"text": "Run"}, {"text": "Status"}, {"text": "Buy"}],
             [{"text": "Admin"}, {"text": "Help"}],
         ]
         if support_enabled:
             rows[1].insert(1, {"text": "Support"})
     elif has_sub:
         rows = [
-            [{"text": "Run"}, {"text": "Status"}, {"text": "Buy"}],
+            [{"text": "Run"}, {"text": "Status"}, {"text": "Upgrade"}],
             [{"text": "Help"}],
         ]
         if support_enabled:
             rows[1].insert(0, {"text": "Support"})
     else:
         rows = [
-            [{"text": "Buy"}, {"text": "Packages"}],
+            [{"text": "Buy"}],
             [{"text": "Help"}],
         ]
         if support_enabled:
@@ -950,12 +983,12 @@ def resolve_menu_text(text: str) -> str | None:
     return MENU_BUTTON_TO_CMD.get(key)
 
 
-def format_packages_list(pkgs: list[Package]) -> str:
-    lines = ["Available packages:"]
+def format_packages_list(pkgs: list[Package], *, upgrade: bool = False) -> str:
+    lines = ["Upgrade options:" if upgrade else "Available packages:"]
     for p in sorted(pkgs, key=lambda x: x.tier):
         lines.append(
             f"• {p.name} ({p.slug}) — {p.price_usdt} USDT / {p.duration_days}d | "
-            f"threads {p.threads}, upload {p.max_upload_mb}MB"
+            f"threads {p.threads}, upload {p.max_upload_mb}MB · tier {p.tier}"
         )
     lines.append("\nTap a package below, or: /buy <slug>")
     lines.append("Then choose TRC-20 or BEP-20 → pay → /paid <txid>")

@@ -105,6 +105,8 @@ class Package(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     slug: Mapped[str] = mapped_column(String(64), unique=True)
     name: Mapped[str] = mapped_column(String(128))
+    # Ladder for upgrades: higher number = higher plan. Purchases while subscribed
+    # require pkg.tier > subscription.tier (not price/threads/duration).
     tier: Mapped[int] = mapped_column(Integer, default=1)
     price_usdt: Mapped[float] = mapped_column(Float, default=0)
     duration_days: Mapped[int] = mapped_column(Integer, default=30)
