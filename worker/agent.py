@@ -34,7 +34,7 @@ ROOT = Path(__file__).resolve().parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-VERSION = "0.8.2"
+VERSION = "0.8.3"
 CONFIG_NAME = "worker_config.json"
 HOST_OS = platform.system()  # Windows | Darwin | Linux
 SERVICE_NAME = "scrapeboard-worker"
@@ -604,6 +604,31 @@ class PanelClient:
         assert last_err is not None
         raise last_err
 
+    def progress(
+        self,
+        job_id: str,
+        chunk_id: int,
+        *,
+        done_in_chunk: int,
+        rows: int,
+    ):
+        """Best-effort mid-chunk progress (panel ignores failures)."""
+        url = f"{self.base}/api/worker-api/progress"
+        payload = {
+            "job_id": job_id,
+            "chunk_id": chunk_id,
+            "done_in_chunk": int(done_in_chunk),
+            "rows": int(rows),
+        }
+        r = self.requests.post(
+            url,
+            json=payload,
+            headers=self.headers,
+            timeout=15,
+        )
+        r.raise_for_status()
+        return r.json()
+
     def push_logs(self, lines: list[str], *, replace: bool = False):
         if not lines:
             return None
@@ -875,6 +900,7 @@ def run_chunk(
     work_dir: Path,
     skip_setup: bool = False,
     stop: threading.Event | None = None,
+    on_progress=None,
 ) -> tuple[int, Path | None]:
     import gmaps_scraper as gs
 
@@ -911,6 +937,7 @@ def run_chunk(
         str(out_dir),
         ts,
         stop_event,
+        on_progress=on_progress,
     )
     zip_path = work_dir / f"chunk_{chunk['id']}.zip"
     if any(out_dir.rglob("*.csv")):
@@ -1116,6 +1143,8 @@ def main(argv=None) -> int:
     # work_root/user_{owner_id}/{job_id}/ so users never share folders.
     active: dict[str, threading.Thread] = {}
     stops: dict[str, threading.Event] = {}
+    # key -> {done_in_chunk, rows} for heartbeat + progress API
+    live_progress: dict[str, dict] = {}
     active_lock = threading.Lock()
     log_tailer = LogTailer(log_path)
     last_log_push = 0.0
@@ -1146,6 +1175,32 @@ def main(argv=None) -> int:
         rows = 0
         uploaded = False
         zip_path: Path | None = None
+        last_progress_post = 0.0
+        progress_lock = threading.Lock()
+
+        def _on_progress(done_in_chunk: int, chunk_rows: int) -> None:
+            nonlocal last_progress_post
+            with active_lock:
+                live_progress[key] = {
+                    "done_in_chunk": int(done_in_chunk),
+                    "rows": int(chunk_rows),
+                }
+            now = time.time()
+            # Throttle panel POSTs; heartbeat also carries the latest snapshot.
+            with progress_lock:
+                if now - last_progress_post < 2.0:
+                    return
+                last_progress_post = now
+            try:
+                client.progress(
+                    job["job_id"],
+                    chunk["id"],
+                    done_in_chunk=done_in_chunk,
+                    rows=chunk_rows,
+                )
+            except Exception as e:
+                print(f"[worker] progress report failed: {e}", flush=True)
+
         # Scrape may raise SystemExit (e.g. zero usable proxies) — catch BaseException
         # so we still reach upload/ack and the panel can release the lease.
         try:
@@ -1155,6 +1210,7 @@ def main(argv=None) -> int:
                 instance_dir,
                 skip_setup=rt["skip_setup"],
                 stop=stop,
+                on_progress=_on_progress,
             )
             if stop.is_set():
                 print(
@@ -1233,19 +1289,27 @@ def main(argv=None) -> int:
             with active_lock:
                 active.pop(key, None)
                 stops.pop(key, None)
+                live_progress.pop(key, None)
 
     def _active_chunk_payload() -> list[dict]:
         with active_lock:
             keys = list(active.keys())
+            prog = {k: dict(v) for k, v in live_progress.items()}
         out: list[dict] = []
         for key in keys:
             job_id, sep, chunk_s = key.partition(":")
             if not sep:
                 continue
             try:
-                out.append({"job_id": job_id, "chunk_id": int(chunk_s)})
+                item: dict = {"job_id": job_id, "chunk_id": int(chunk_s)}
             except (TypeError, ValueError):
                 continue
+            snap = prog.get(key) or {}
+            if "done_in_chunk" in snap:
+                item["done_in_chunk"] = snap["done_in_chunk"]
+            if "rows" in snap:
+                item["rows"] = snap["rows"]
+            out.append(item)
         return out
 
     def _apply_cancels(cancel_jobs: list) -> None:
@@ -1382,6 +1446,7 @@ def main(argv=None) -> int:
                     if not t.is_alive():
                         active.pop(k, None)
                         stops.pop(k, None)
+                        live_progress.pop(k, None)
                 slots_free = max_slots - len(active)
 
             if slots_free <= 0:

@@ -527,6 +527,7 @@ async def _clear_worker_leases_for_job(
             chunk.rows = rows
             job.rows_saved += rows
         chunk.leased_at = None
+        jobs_svc.clear_chunk_live_progress(chunk)
     if sync_progress and chunks:
         await jobs_svc.sync_job_done_searches(db, job)
     return len(chunks)
@@ -562,6 +563,7 @@ async def _reclaim_stale_leases(
             c.state = "pending"
             c.worker_id = None
             c.leased_at = None
+            jobs_svc.clear_chunk_live_progress(c)
             n += 1
     return n
 
@@ -661,6 +663,7 @@ async def worker_heartbeat(
         )
     ).scalars().all()
     reported_active: set[tuple[str, int]] | None = None
+    live_from_hb: dict[tuple[str, int], tuple[int | None, int | None]] = {}
     if "active_chunks" in body:
         reported_active = set()
         raw_active = body.get("active_chunks") or []
@@ -672,7 +675,19 @@ async def worker_heartbeat(
                 if not pid or item.get("chunk_id") is None or item.get("chunk_id") == "":
                     continue
                 try:
-                    reported_active.add((pid, int(item["chunk_id"])))
+                    cid = int(item["chunk_id"])
+                except (TypeError, ValueError):
+                    continue
+                reported_active.add((pid, cid))
+                done_in = item.get("done_in_chunk")
+                rows_live = item.get("rows")
+                if done_in is None and rows_live is None:
+                    continue
+                try:
+                    live_from_hb[(pid, cid)] = (
+                        int(done_in) if done_in is not None else None,
+                        int(rows_live) if rows_live is not None else None,
+                    )
                 except (TypeError, ValueError):
                     continue
 
@@ -692,6 +707,7 @@ async def worker_heartbeat(
                 c.state = "done"
                 c.worker_id = None
                 c.leased_at = None
+                jobs_svc.clear_chunk_live_progress(c)
                 continue
             key = (public_id, c.chunk_id)
             if reported_active is not None and key not in reported_active:
@@ -699,8 +715,14 @@ async def worker_heartbeat(
                 c.state = "pending"
                 c.worker_id = None
                 c.leased_at = None
+                jobs_svc.clear_chunk_live_progress(c)
                 continue
             c.leased_at = now
+            if key in live_from_hb:
+                done_in, rows_live = live_from_hb[key]
+                jobs_svc.apply_chunk_live_progress(
+                    c, done_in_chunk=done_in, rows=rows_live
+                )
 
     # TTL reclaim for this worker even when lease polls are failing (502).
     # With active_chunks, orphans are already cleared above; this covers legacy agents.
@@ -988,7 +1010,13 @@ async def worker_lease(
         result = await db.execute(
             update(JobChunk)
             .where(JobChunk.id == candidate.id, JobChunk.state == "pending")
-            .values(state="leased", worker_id=w.id, leased_at=now)
+            .values(
+                state="leased",
+                worker_id=w.id,
+                leased_at=now,
+                progress_done=0,
+                progress_rows=0,
+            )
         )
         await db.commit()
         if result.rowcount == 1:
@@ -1008,6 +1036,7 @@ async def worker_lease(
             claimed.state = "pending"
             claimed.worker_id = None
             claimed.leased_at = None
+            jobs_svc.clear_chunk_live_progress(claimed)
             await db.commit()
             return await _with_update({"chunk": None})
         job.status = "running"
@@ -1028,6 +1057,7 @@ async def worker_lease(
                 claimed.state = "pending"
                 claimed.worker_id = None
                 claimed.leased_at = None
+                jobs_svc.clear_chunk_live_progress(claimed)
                 await db.commit()
                 return await _with_update({"chunk": None})
 
@@ -1137,6 +1167,61 @@ async def worker_upload(
     return {"ok": True}
 
 
+@router.post("/worker-api/progress")
+async def worker_progress(
+    body: dict,
+    authorization: str | None = Header(default=None),
+    db: AsyncSession = Depends(get_db),
+):
+    """Best-effort mid-chunk progress so the UI can climb before ack.
+
+    Body: ``{ job_id, chunk_id, done_in_chunk?, rows? }``.
+    Does not mutate ``Job.rows_saved`` / authoritative ``done_searches`` —
+    those reconcile on ack. Display uses done chunks + leased live counters.
+    """
+    w = await _auth_worker(db, authorization)
+    _require_active_worker(w)
+    job_id = body.get("job_id")
+    chunk_id = _body_int(body, "chunk_id", required=True)
+    done_in_chunk = body.get("done_in_chunk")
+    rows = body.get("rows")
+    if done_in_chunk is None and rows is None:
+        return {"ok": False, "error": "done_in_chunk or rows required"}
+
+    job = (await db.execute(select(Job).where(Job.public_id == job_id))).scalar_one_or_none()
+    if not job or job.status not in ("running", "queued"):
+        return {"ok": False, "cancelled": True}
+
+    chunk = (
+        await db.execute(
+            select(JobChunk).where(JobChunk.job_id == job.id, JobChunk.chunk_id == chunk_id)
+        )
+    ).scalar_one_or_none()
+    if not chunk or chunk.state != "leased" or chunk.worker_id != w.id:
+        return {"ok": False}
+
+    try:
+        done_n = int(done_in_chunk) if done_in_chunk is not None else None
+        rows_n = int(rows) if rows is not None else None
+    except (TypeError, ValueError):
+        raise HTTPException(400, "done_in_chunk and rows must be integers") from None
+
+    jobs_svc.apply_chunk_live_progress(chunk, done_in_chunk=done_n, rows=rows_n)
+    w.last_seen_at = datetime.now(timezone.utc)
+    # Refresh lease TTL so a chatty progress stream does not look stale.
+    chunk.leased_at = w.last_seen_at
+    await db.commit()
+
+    done, rows_out = await jobs_svc.live_job_progress(db, job)
+    return {
+        "ok": True,
+        "done_searches": done,
+        "rows_saved": rows_out,
+        "chunk_progress_done": chunk.progress_done,
+        "chunk_progress_rows": chunk.progress_rows,
+    }
+
+
 @router.post("/worker-api/ack")
 async def worker_ack(
     body: dict,
@@ -1205,12 +1290,17 @@ async def worker_ack(
         chunk.worker_id = w.id
         chunk.leased_at = None
         job.rows_saved += rows
+        jobs_svc.clear_chunk_live_progress(chunk)
     elif rows and not chunk.rows:
         chunk.rows = rows
         job.rows_saved += rows
+        jobs_svc.clear_chunk_live_progress(chunk)
+    else:
+        jobs_svc.clear_chunk_live_progress(chunk)
 
     # Always recompute from done chunks (idempotent; heals incremental drift and
     # any path that marked chunks done without bumping done_searches).
+    # Live progress is cleared above so display falls back to authoritative totals.
     await jobs_svc.sync_job_done_searches(db, job)
 
     pending = (

@@ -53,11 +53,11 @@ def _worker_online(w: WorkerNode | None) -> bool:
 
 
 async def _job_out(db: AsyncSession, j: Job, *, viewer: User | None = None) -> JobOut:
-    # For active jobs, prefer progress derived from done chunks so a stale
-    # done_searches counter cannot show 0/N while chunks are already done.
+    # Active jobs: done chunks + leased in-flight progress (live while scraping).
     done_searches = j.done_searches
+    rows_saved = j.rows_saved
     if j.status in ("running", "queued") and j.total_searches:
-        done_searches = await jobs_svc.recomputed_done_searches(db, j)
+        done_searches, rows_saved = await jobs_svc.live_job_progress(db, j)
     pct = 100.0 * done_searches / j.total_searches if j.total_searches else 0.0
     owner = await db.get(User, j.owner_id)
     exists, size = _result_meta(j)
@@ -127,7 +127,7 @@ async def _job_out(db: AsyncSession, j: Job, *, viewer: User | None = None) -> J
         threads=threads,
         total_searches=j.total_searches,
         done_searches=done_searches,
-        rows_saved=j.rows_saved,
+        rows_saved=rows_saved,
         result_zip=None if not exists else (j.result_zip or f"results_{j.public_id}.zip"),
         result_exists=exists,
         result_bytes=size,

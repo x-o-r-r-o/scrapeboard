@@ -28,7 +28,7 @@ def utcnow() -> datetime:
 
 
 async def recomputed_done_searches(db: AsyncSession, job: Job) -> int:
-    """Sum searches from chunks in state=done (source of truth for progress)."""
+    """Sum searches from chunks in state=done (source of truth for completed progress)."""
     raw = (
         await db.execute(
             select(func.coalesce(func.sum(JobChunk.end_index - JobChunk.start_index), 0)).where(
@@ -40,11 +40,64 @@ async def recomputed_done_searches(db: AsyncSession, job: Job) -> int:
     return min(int(job.total_searches or 0), max(0, int(raw or 0)))
 
 
+async def leased_live_progress(db: AsyncSession, job: Job) -> tuple[int, int]:
+    """Sum best-effort in-flight progress from leased chunks (searches, rows)."""
+    row = (
+        await db.execute(
+            select(
+                func.coalesce(func.sum(JobChunk.progress_done), 0),
+                func.coalesce(func.sum(JobChunk.progress_rows), 0),
+            ).where(JobChunk.job_id == job.id, JobChunk.state == "leased")
+        )
+    ).one()
+    return max(0, int(row[0] or 0)), max(0, int(row[1] or 0))
+
+
+async def live_job_progress(db: AsyncSession, job: Job) -> tuple[int, int]:
+    """Display progress for running jobs: done chunks + leased in-flight.
+
+    Returns ``(done_searches, rows_saved)``. Completed/stopped jobs should use
+    persisted ``job.done_searches`` / ``job.rows_saved`` instead.
+    """
+    base_done = await recomputed_done_searches(db, job)
+    live_done, live_rows = await leased_live_progress(db, job)
+    total = int(job.total_searches or 0)
+    done = min(total, base_done + live_done) if total else base_done + live_done
+    rows = max(0, int(job.rows_saved or 0) + live_rows)
+    return done, rows
+
+
 async def sync_job_done_searches(db: AsyncSession, job: Job) -> int:
-    """Persist done_searches from done chunk ranges (idempotent)."""
+    """Persist done_searches from done chunk ranges (idempotent; ignores live)."""
     n = await recomputed_done_searches(db, job)
     job.done_searches = n
     return n
+
+
+def clear_chunk_live_progress(chunk: JobChunk) -> None:
+    """Reset in-flight counters (ack, reclaim to pending, cancel)."""
+    chunk.progress_done = 0
+    chunk.progress_rows = 0
+
+
+def apply_chunk_live_progress(
+    chunk: JobChunk,
+    *,
+    done_in_chunk: int | None = None,
+    rows: int | None = None,
+) -> None:
+    """Update leased-chunk live counters (monotonic within the lease)."""
+    if chunk.state != "leased":
+        return
+    size = max(0, int(chunk.end_index) - int(chunk.start_index))
+    if done_in_chunk is not None:
+        n = max(0, int(done_in_chunk))
+        if size:
+            n = min(n, size)
+        # Monotonic: workers may report out-of-order / stale heartbeats.
+        chunk.progress_done = max(int(chunk.progress_done or 0), n)
+    if rows is not None:
+        chunk.progress_rows = max(int(chunk.progress_rows or 0), max(0, int(rows)))
 
 
 def effective_chunk_size(total: int, package_chunk_size: int, parallel_slots: int) -> int:

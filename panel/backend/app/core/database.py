@@ -113,6 +113,15 @@ def _migrate_sqlite(sync_conn) -> None:
             if col not in support_tickets:
                 sync_conn.execute(text(f"ALTER TABLE support_tickets ADD COLUMN {col} {decl}"))
 
+    job_chunks = _sqlite_columns(sync_conn, "job_chunks")
+    if job_chunks:
+        for col, decl in (
+            ("progress_done", "INTEGER DEFAULT 0"),
+            ("progress_rows", "INTEGER DEFAULT 0"),
+        ):
+            if col not in job_chunks:
+                sync_conn.execute(text(f"ALTER TABLE job_chunks ADD COLUMN {col} {decl}"))
+
     billing = _sqlite_columns(sync_conn, "billing_settings")
     if billing:
         for col, decl in (

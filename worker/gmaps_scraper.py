@@ -1725,7 +1725,8 @@ class ProgressTracker:
     """Thread-safe aggregate progress line printed as jobs finish: how many of
     the total jobs are done, percentage, rows so far, elapsed time and ETA."""
 
-    def __init__(self, total: int, rows_fn, every: int = 1, start_done: int = 0):
+    def __init__(self, total: int, rows_fn, every: int = 1, start_done: int = 0,
+                 on_tick=None):
         self.total = max(1, total)
         self.rows_fn = rows_fn
         self.every = max(1, every)
@@ -1733,12 +1734,18 @@ class ProgressTracker:
         self.done = start_done
         self.start = time.time()
         self._lock = threading.Lock()
+        self.on_tick = on_tick
 
     def tick(self, label: str = ""):
         with self._lock:
             self.done += 1
             done = self.done
         this_run = done - self.offset
+        if self.on_tick:
+            try:
+                self.on_tick(this_run, self.rows_fn())
+            except Exception:
+                pass
         if done != self.total and this_run % self.every != 0:
             return
         elapsed = time.time() - self.start
@@ -2976,9 +2983,13 @@ def apply_config_to_args(args, cfg):
 # -- worker-side: run a specific global index range --------------------------
 
 def execute_index_batch(args, keywords, locations, start, end, out_dir, ts,
-                        stop_event, solver=None, log=print) -> tuple[int, int]:
+                        stop_event, solver=None, log=print, on_progress=None) -> tuple[int, int]:
     """Run the jobs at global indices [start, end) (order: keyword outer,
-    location inner) into out_dir as per-location CSVs. Returns (rows, failed)."""
+    location inner) into out_dir as per-location CSVs. Returns (rows, failed).
+
+    ``on_progress(done_in_chunk, rows)`` is called after each search and
+    periodically (~2s) so panel agents can report live progress.
+    """
     total = len(keywords) * len(locations)
     end = min(end, total)
     L = len(locations)
@@ -3000,6 +3011,32 @@ def execute_index_batch(args, keywords, locations, start, end, out_dir, ts,
     runner.failed_log = failed
     runner.stop_event = stop_event
 
+    def _emit(done_in_chunk: int, rows: int):
+        if not on_progress:
+            return
+        try:
+            on_progress(int(done_in_chunk), int(rows))
+        except Exception:
+            pass
+
+    progress = ProgressTracker(
+        len(jobs),
+        rows_fn=lambda: runner.rows_written,
+        on_tick=_emit,
+    )
+    runner.progress = progress
+
+    stop_rep = threading.Event()
+    reporter = None
+    if on_progress:
+        def _report_loop():
+            while not stop_rep.wait(2.0):
+                _emit(progress.done - progress.offset, runner.rows_written)
+        reporter = threading.Thread(
+            target=_report_loop, name="chunk-progress", daemon=True
+        )
+        reporter.start()
+
     pool = ThreadPoolExecutor(max_workers=args.threads)
     try:
         futures = [pool.submit(runner.run_job, j) for j in jobs]
@@ -3007,6 +3044,9 @@ def execute_index_batch(args, keywords, locations, start, end, out_dir, ts,
             if _SHUTDOWN.is_set() or stop_event.is_set():
                 break
     finally:
+        stop_rep.set()
+        if reporter is not None:
+            reporter.join(timeout=1.0)
         try:
             pool.shutdown(wait=False, cancel_futures=True)
         except TypeError:
@@ -3017,6 +3057,7 @@ def execute_index_batch(args, keywords, locations, start, end, out_dir, ts,
             pass
         writer.close()
         failed.close()
+        _emit(progress.done - progress.offset, runner.rows_written)
     return runner.rows_written, failed.count
 
 

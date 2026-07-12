@@ -1084,23 +1084,24 @@ class TelegramBotRuntime:
             s = j.settings or {}
             return str(s.get("engine") or "—")
 
-        async def _progress(j: Job) -> tuple[int, float]:
+        async def _progress(j: Job) -> tuple[int, int, float]:
             done = j.done_searches
+            rows = j.rows_saved
             if j.status in ("running", "queued") and j.total_searches:
-                done = await jobs_svc.recomputed_done_searches(db, j)
+                done, rows = await jobs_svc.live_job_progress(db, j)
             pct = 100.0 * done / j.total_searches if j.total_searches else 0.0
-            return done, pct
+            return done, rows, pct
 
         lines: list[str] = ["📊 Your job status", ""]
         if active:
             lines.append("▶ Currently running")
             for j in active:
-                done, pct = await _progress(j)
+                done, rows, pct = await _progress(j)
                 lines.append(f"• {j.public_id}")
                 lines.append(f"  [{j.status}] {_bar(pct)} {pct:.1f}%")
                 lines.append(
                     f"  searches {done:,}/{j.total_searches:,} · "
-                    f"rows {j.rows_saved:,} · engine {_engine(j)}"
+                    f"rows {rows:,} · engine {_engine(j)}"
                 )
                 if j.started_at:
                     lines.append(f"  started {j.started_at.strftime('%Y-%m-%d %H:%M UTC')}")
@@ -1112,11 +1113,11 @@ class TelegramBotRuntime:
 
         lines.append("📁 Recent jobs")
         for j in recent:
-            done, pct = await _progress(j)
+            done, rows, pct = await _progress(j)
             mark = "▶" if j.status in ("queued", "running") else "•"
             lines.append(
                 f"{mark} {j.public_id} [{j.status}] {pct:.1f}% · "
-                f"{done}/{j.total_searches} · rows {j.rows_saved}"
+                f"{done}/{j.total_searches} · rows {rows}"
             )
         lines.append("")
         lines.append("Tips: /status or /jobs · /stop to cancel · panel Jobs for download")

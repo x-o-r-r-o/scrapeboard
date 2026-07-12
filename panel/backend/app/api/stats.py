@@ -25,6 +25,7 @@ from app.models import (
     WorkerNode,
 )
 from app.services.captcha_settings import captcha_dict_from, captcha_is_configured, get_captcha_settings
+from app.services import jobs as jobs_svc
 from app.services.jobs import job_thread_count
 from app.services.perms import DEFAULT_USER_PERMS, effective_perms
 
@@ -327,26 +328,31 @@ async def live_stats(user: User = Depends(require_ready_user), db: AsyncSession 
         ).all():
             bucket = chunk_by_job.setdefault(int(jid), {"pending": 0, "leased": 0, "done": 0})
             bucket[str(state)] = int(cnt)
-    recent_jobs = [
-        {
-            "id": j.id,
-            "public_id": j.public_id,
-            "owner_id": j.owner_id,
-            "owner_username": owner_names.get(j.owner_id),
-            "status": j.status,
-            "rows_saved": int(j.rows_saved or 0),
-            "total_searches": int(j.total_searches or 0),
-            "done_searches": int(j.done_searches or 0),
-            "error": (j.error[:120] if j.error else None),
-            "created_at": j.created_at.isoformat() if j.created_at else None,
-            "started_at": j.started_at.isoformat() if j.started_at else None,
-            "finished_at": j.finished_at.isoformat() if j.finished_at else None,
-            "chunks_pending": chunk_by_job.get(j.id, {}).get("pending", 0),
-            "chunks_leased": chunk_by_job.get(j.id, {}).get("leased", 0),
-            "chunks_done": chunk_by_job.get(j.id, {}).get("done", 0),
-        }
-        for j in recent
-    ]
+    recent_jobs = []
+    for j in recent:
+        done = int(j.done_searches or 0)
+        rows = int(j.rows_saved or 0)
+        if j.status in ("running", "queued") and j.total_searches:
+            done, rows = await jobs_svc.live_job_progress(db, j)
+        recent_jobs.append(
+            {
+                "id": j.id,
+                "public_id": j.public_id,
+                "owner_id": j.owner_id,
+                "owner_username": owner_names.get(j.owner_id),
+                "status": j.status,
+                "rows_saved": rows,
+                "total_searches": int(j.total_searches or 0),
+                "done_searches": done,
+                "error": (j.error[:120] if j.error else None),
+                "created_at": j.created_at.isoformat() if j.created_at else None,
+                "started_at": j.started_at.isoformat() if j.started_at else None,
+                "finished_at": j.finished_at.isoformat() if j.finished_at else None,
+                "chunks_pending": chunk_by_job.get(j.id, {}).get("pending", 0),
+                "chunks_leased": chunk_by_job.get(j.id, {}).get("leased", 0),
+                "chunks_done": chunk_by_job.get(j.id, {}).get("done", 0),
+            }
+        )
 
     # --- Admin system snapshot (cheap DB counts only; no filesystem) ---
     system: dict | None = None

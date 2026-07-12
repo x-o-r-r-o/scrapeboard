@@ -255,10 +255,10 @@ python3 install.py --role worker --update
 systemctl --user restart scrapeboard-worker
 systemctl --user status scrapeboard-worker --no-pager
 grep -E 'scrapeboard worker v' worker/logs/worker.log | tail -3
-# Expect: v0.8.2+  (0.7.0 = still the old process)
+# Expect: v0.8.3+  (0.7.0 = still the old process)
 ```
 
-Panel Admin → Workers should show **0.8.2+** within ~15s. Until then, a failed ack on `chunk_id=0` (fixed in panel) plus no cancel support can leave **1 instance running** on the dashboard.
+Panel Admin → Workers should show **0.8.3+** within ~15s. Until then, a failed ack on `chunk_id=0` (fixed in panel) plus no cancel support can leave **1 instance running** on the dashboard.
 
 Tailscale is **not** required — workers only need outbound HTTPS to the panel.
 
@@ -435,21 +435,27 @@ Standalone engine CLI (`gmaps_scraper.py`) is separate — see [`SCRAPER.md`](SC
 
 ## What the agent does
 
-1. `POST /api/worker-api/heartbeat` — online + CPU/RAM/disk/load + host identity + `active_chunks` (so the panel can reclaim orphan leases)  
+1. `POST /api/worker-api/heartbeat` — online + CPU/RAM/disk/load + host identity + `active_chunks` (so the panel can reclaim orphan leases; may include `done_in_chunk` / `rows` for live UI progress)  
 2. `POST /api/worker-api/lease` — up to **`max_browsers` concurrent leases** (one instance per user job chunk); each lease includes keywords/locations + merged settings + proxies  
 3. Runs `gmaps_scraper` for that chunk using the job’s **thread** count (browsers inside the instance)  
-4. Zips CSV parts → `POST /api/worker-api/upload`  
-5. `POST /api/worker-api/ack` — panel merges when all chunks complete → user ZIP (+ optional Telegram); agent retries on failure  
+4. While scraping: `POST /api/worker-api/progress` (~every 2s / each search) so Jobs UI shows climbing searches/rows before the chunk finishes  
+5. Zips CSV parts → `POST /api/worker-api/upload`  
+6. `POST /api/worker-api/ack` — panel merges when all chunks complete → user ZIP (+ optional Telegram); agent retries on failure; ack is source of truth (clears live counters)  
 
 **Panel-side thread quota:** the panel only promotes a user’s queued job when the sum of that user’s running job threads stays within their plan allowance. Unassigned users share the worker pool; dedicated-worker packages may optionally pin workers.
 
 Work directories are isolated per user: `work_root/user_{owner_id}/{job_id}/`.
+
+### Live progress (agent **0.8.3+**)
+
+Older agents only bump panel progress on **ack** (whole chunk finished), so Jobs can sit at `0/N` for a long time. **0.8.3+** reports mid-chunk progress; deploy the panel change and update workers (Admin → Workers → Request update, or `install.py --role worker --update`).
 
 ### Troubleshooting: ack 404 / stuck `1/N` instances
 
 - Route is **`POST /api/worker-api/ack`** (registered on the panel under `/api`). A `404` on `chunk=0` was a panel bug: `chunk_id or -1` treated `0` as missing.
 - After upload succeeds but ack fails, older agents leave the DB lease `leased`; heartbeat used to refresh that TTL forever. **0.8.1+** reports `active_chunks` and retries ack.
 - Agents still on **0.7.0** ignore cancel and lack lease cleanup — restart after update (see above).
+- Progress stuck at 0 while scraping: worker is older than **0.8.3**, or panel has not been redeployed with `/worker-api/progress`.
 
 ---
 

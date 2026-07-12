@@ -322,6 +322,10 @@ class JobChunk(Base):
     state: Mapped[str] = mapped_column(String(16), default="pending")  # pending|leased|done
     worker_id: Mapped[int | None] = mapped_column(ForeignKey("worker_nodes.id"), nullable=True)
     rows: Mapped[int] = mapped_column(Integer, default=0)
+    # Best-effort in-flight progress while state=leased (cleared on ack / reclaim).
+    # Not counted into Job.rows_saved — _job_out adds these on top for live UI.
+    progress_done: Mapped[int] = mapped_column(Integer, default=0)
+    progress_rows: Mapped[int] = mapped_column(Integer, default=0)
     leased_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     job: Mapped["Job"] = relationship(back_populates="chunks")

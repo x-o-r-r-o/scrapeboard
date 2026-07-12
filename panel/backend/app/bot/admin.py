@@ -1024,10 +1024,14 @@ async def handle_admin(
         lines = [f"Jobs · page {page}/{(int(total) + PAGE - 1) // PAGE} ({total} total)"]
         for j in jobs:
             owner = await db.get(User, j.owner_id)
-            pct = 100.0 * j.done_searches / j.total_searches if j.total_searches else 0.0
+            done = j.done_searches
+            rows = j.rows_saved
+            if j.status in ("running", "queued") and j.total_searches:
+                done, rows = await jobs_svc.live_job_progress(db, j)
+            pct = 100.0 * done / j.total_searches if j.total_searches else 0.0
             lines.append(
                 f"• {j.public_id} [{j.status}] {pct:.0f}% "
-                f"owner={owner.username if owner else j.owner_id} rows={j.rows_saved}"
+                f"owner={owner.username if owner else j.owner_id} rows={rows}"
             )
         if page * PAGE < int(total):
             lines.append(f"\nNext: /alljobs {page + 1}")
@@ -1044,8 +1048,9 @@ async def handle_admin(
             return
         owner = await db.get(User, j.owner_id)
         done = j.done_searches
+        rows = j.rows_saved
         if j.status in ("running", "queued") and j.total_searches:
-            done = await jobs_svc.recomputed_done_searches(db, j)
+            done, rows = await jobs_svc.live_job_progress(db, j)
         pct = 100.0 * done / j.total_searches if j.total_searches else 0.0
         leased = (
             await db.execute(
@@ -1062,7 +1067,7 @@ async def handle_admin(
             f"Job {j.public_id} (#{j.id})",
             f"status={j.status} {pct:.1f}%",
             f"owner={owner.username if owner else j.owner_id} tg={owner.telegram_id if owner else '-'}",
-            f"searches {done:,}/{j.total_searches:,} · rows {j.rows_saved:,}",
+            f"searches {done:,}/{j.total_searches:,} · rows {rows:,}",
             f"engine={s.get('engine', '—')} threads={jobs_svc.job_thread_count(j)}",
             f"leases: {', '.join(wnames) or 'none'}",
             f"created={j.created_at} started={j.started_at or '-'}",
