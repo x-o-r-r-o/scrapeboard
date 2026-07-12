@@ -1,10 +1,14 @@
 """Default worker scrape flags and merge helpers.
 
-Precedence when a worker leases a job chunk:
-  1. Assigned scrape profile (or global default profile) — engine, delays, etc.
-  2. Per-worker worker_config (Admin → Workers fine-tuning)
+Lease merge order for job chunks:
+  1. Package scrape_defaults (subscription package for the job owner)
+  2. Per-worker worker_config (Admin → Workers machine overrides)
   3. Per-job settings (engine/threads/websites/max_results overrides)
-  4. Global 2captcha / CaptchaAI settings (Admin → 2captcha / CaptchaAI) always win for captcha_* keys
+  4. Global 2captcha / CaptchaAI settings (Admin → Captcha) always win for captcha_* keys
+
+Package.scrape_defaults seed job/package UX and lease base flags.
+WorkerNode.worker_config is the per-machine override layer (seeded from
+DEFAULT_WORKER_CONFIG on create; may be reset to built-in defaults).
 
 WorkerNode.max_browsers caps concurrent job *instances* (leases), not threads
 inside a single user instance.
@@ -70,9 +74,14 @@ DEFAULT_WORKER_CONFIG: dict[str, Any] = {
     "debug": False,
 }
 
+DEFAULT_CHUNK_SIZE = 500
+
 
 def scrape_settings_to_config(scrape: Any | None) -> dict[str, Any]:
-    """Build a worker_config dict from a ScrapeSettings profile row (no captcha)."""
+    """Build a worker_config dict from a legacy ScrapeSettings row (no captcha).
+
+    Kept for one-time DB migration from old scrape profiles into package/worker JSON.
+    """
     out = dict(DEFAULT_WORKER_CONFIG)
     if scrape is None:
         return out
@@ -82,6 +91,47 @@ def scrape_settings_to_config(scrape: Any | None) -> dict[str, Any]:
             if val is not None:
                 out[k] = val
     return out
+
+
+def package_defaults_from_package(pkg: Any | None) -> dict[str, Any]:
+    """Normalize Package.scrape_defaults (or fall back to built-ins + package.threads)."""
+    base = dict(DEFAULT_WORKER_CONFIG)
+    if pkg is None:
+        return base
+    raw = getattr(pkg, "scrape_defaults", None) or {}
+    if isinstance(raw, dict):
+        for k in WORKER_SCRAPE_KEYS:
+            if k in raw and raw[k] is not None:
+                base[k] = raw[k]
+    # Package.threads is the subscription allowance; keep scrape default aligned
+    threads = getattr(pkg, "threads", None)
+    if threads is not None:
+        try:
+            base["threads"] = max(1, int(threads))
+        except (TypeError, ValueError):
+            pass
+    return normalize_worker_config(base)
+
+
+def build_package_scrape_defaults(
+    *,
+    threads: int | None = None,
+    source: dict | None = None,
+    scrape_row: Any | None = None,
+) -> dict[str, Any]:
+    """Build scrape_defaults JSON for a Package (create / migrate)."""
+    if source:
+        cfg = normalize_worker_config(source)
+    elif scrape_row is not None:
+        cfg = scrape_settings_to_config(scrape_row)
+    else:
+        cfg = dict(DEFAULT_WORKER_CONFIG)
+    if threads is not None:
+        try:
+            cfg["threads"] = max(1, int(threads))
+        except (TypeError, ValueError):
+            pass
+    return normalize_worker_config(cfg)
 
 
 def normalize_worker_config(raw: dict | None) -> dict[str, Any]:
@@ -102,15 +152,23 @@ def normalize_worker_config(raw: dict | None) -> dict[str, Any]:
 
 def merge_lease_settings(
     *,
-    scrape: Any | None,
-    worker_config: dict | None,
-    job_settings: dict | None,
+    package_defaults: dict | None = None,
+    scrape: Any | None = None,
+    worker_config: dict | None = None,
+    job_settings: dict | None = None,
     max_browsers: int | None = None,
     captcha: Any | None = None,
 ) -> dict[str, Any]:
-    """Merge profile → worker → job, then inject global captcha."""
+    """Merge package → worker → job, then inject global captcha.
+
+    ``scrape`` is accepted only as a legacy fallback when package_defaults is None
+    (old call sites / migration). Prefer package_defaults.
+    """
     _ = max_browsers  # concurrent instance slots — enforced at lease time
-    settings = scrape_settings_to_config(scrape)
+    if package_defaults is not None:
+        settings = normalize_worker_config(package_defaults)
+    else:
+        settings = scrape_settings_to_config(scrape)
     for k, v in (worker_config or {}).items():
         if k in WORKER_SCRAPE_KEYS and v is not None:
             settings[k] = v

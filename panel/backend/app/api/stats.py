@@ -19,7 +19,6 @@ from app.models import (
     Order,
     Package,
     ProxyPool,
-    ScrapeSettings,
     Subscription,
     User,
     UserWorker,
@@ -361,9 +360,6 @@ async def live_stats(user: User = Depends(require_ready_user), db: AsyncSession 
         bot_workflows = int(
             (await db.execute(select(func.count()).select_from(BotWorkflow))).scalar_one() or 0
         )
-        scrape_profiles = int(
-            (await db.execute(select(func.count()).select_from(ScrapeSettings))).scalar_one() or 0
-        )
         orders_pending = int(
             (
                 await db.execute(
@@ -413,7 +409,6 @@ async def live_stats(user: User = Depends(require_ready_user), db: AsyncSession 
             "proxy_pools_active": sum(1 for p in pools if p.is_active),
             "proxies_total": sum(_proxy_count(p.proxies_text) for p in pools if p.is_active),
             "workers_without_pool": sum(1 for w in workers if w.is_enabled and w.proxy_pool_id is None),
-            "scrape_profiles": scrape_profiles,
             "captcha_configured": captcha_is_configured(captcha),
             "captcha_provider": captcha_d["captcha_provider"]
             if captcha_d["captcha_provider"] != "none" or captcha_d["captcha_key"].strip()

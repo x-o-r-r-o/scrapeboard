@@ -13,8 +13,9 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
-from app.models import Job, JobChunk, Package, ScrapeSettings, User
+from app.models import Job, JobChunk, Package, User
 from app.services.billing import active_subscription
+from app.services.worker_config import DEFAULT_CHUNK_SIZE, package_defaults_from_package
 
 from app.services.perms import DEFAULT_USER_PERMS, effective_perms
 
@@ -153,26 +154,24 @@ async def create_job_from_bytes(
     if len(kw_bytes) + len(loc_bytes) > max_bytes:
         raise ValueError(f"Upload exceeds plan limit ({max_mb} MB)")
 
-    settings_row = None
+    pkg = None
     package_engines = None
     if user.role != "admin" and sub and getattr(sub, "package_id", None):
         pkg = await db.get(Package, sub.package_id)
         if pkg:
             package_engines = pkg.allowed_engines
-            if getattr(pkg, "scrape_settings_id", None):
-                settings_row = await db.get(ScrapeSettings, pkg.scrape_settings_id)
-    if settings_row is None:
-        settings_row = await db.get(ScrapeSettings, 1)
+    defaults = package_defaults_from_package(pkg)
     overrides = overrides or {}
     settings = {
-        "engine": overrides.get("engine") or (settings_row.engine if settings_row else "chrome"),
-        "threads": int(overrides.get("threads") or (settings_row.threads if settings_row else 2)),
+        "engine": overrides.get("engine") or defaults.get("engine") or "chrome",
+        "threads": int(overrides.get("threads") or defaults.get("threads") or 2),
         "scrape_websites": overrides.get("scrape_websites")
-        or (settings_row.scrape_websites if settings_row else "yes"),
+        or defaults.get("scrape_websites")
+        or "yes",
         "max_results": int(
             overrides["max_results"]
             if overrides.get("max_results") is not None
-            else (settings_row.max_results if settings_row else 0)
+            else (defaults.get("max_results") if defaults.get("max_results") is not None else 0)
         ),
     }
 
@@ -215,7 +214,10 @@ async def create_job_from_bytes(
         raise ValueError("Keywords and locations must be non-empty")
 
     total = len(kw_lines) * len(loc_lines)
-    chunk_size = settings_row.chunk_size if settings_row else 500
+    try:
+        chunk_size = max(1, int(getattr(pkg, "chunk_size", None) or DEFAULT_CHUNK_SIZE))
+    except (TypeError, ValueError):
+        chunk_size = DEFAULT_CHUNK_SIZE
     job = Job(
         public_id=public_id,
         owner_id=user.id,

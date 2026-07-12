@@ -14,38 +14,30 @@ from app.core.security import (
     hash_worker_token,
     verify_password,
 )
-from app.models import Job, JobChunk, Package, ProxyPool, ScrapeSettings, User, UserWorker, WorkerNode
+from app.models import Job, JobChunk, Package, ProxyPool, User, UserWorker, WorkerNode
 from app.schemas import (
     ProxyPoolAssign,
     ProxyPoolCreate,
     ProxyPoolOut,
     ProxyPoolUpdate,
-    ScrapeSettingsCreate,
-    ScrapeSettingsOut,
-    ScrapeSettingsUpdate,
     WorkerCreate,
     WorkerCreateResponse,
     WorkerOut,
     WorkerUpdate,
 )
 from app.services import jobs as jobs_svc
-from app.services.billing import user_has_dedicated_worker
+from app.services.billing import package_for_user, user_has_dedicated_worker
 from app.services.notify import notify_user_telegram
 from app.services.safe_zip import UnsafeArchiveError, safe_extract_csv_zip
-from app.services.scrape_profiles import (
-    clone_profile,
-    ensure_default_profile,
-    ensure_workers_have_default_profile,
-    get_default_profile,
-    resolve_scrape_for_worker,
-)
+from app.services.scrape_profiles import ensure_workers_have_default_profile
 from app.services.captcha_settings import get_captcha_settings
 from app.services.worker_config import (
+    DEFAULT_WORKER_CONFIG,
     apply_worker_config_update,
     merge_lease_settings,
     normalize_worker_config,
+    package_defaults_from_package,
     public_worker_config,
-    scrape_settings_to_config,
 )
 
 router = APIRouter(tags=["infra"])
@@ -53,45 +45,6 @@ router = APIRouter(tags=["infra"])
 
 def _proxy_count(text: str) -> int:
     return sum(1 for line in (text or "").splitlines() if line.strip() and not line.strip().startswith("#"))
-
-
-def _scrape_out(
-    s: ScrapeSettings,
-    *,
-    worker_count: int = 0,
-    package_count: int = 0,
-) -> ScrapeSettingsOut:
-    return ScrapeSettingsOut(
-        id=s.id,
-        name=getattr(s, "name", None) or "Default",
-        slug=getattr(s, "slug", None) or "default",
-        description=getattr(s, "description", None) or "",
-        is_default=bool(getattr(s, "is_default", False)),
-        is_active=bool(getattr(s, "is_active", True)),
-        engine=s.engine,
-        threads=s.threads,
-        block_resources=s.block_resources,
-        scrape_websites=s.scrape_websites,
-        max_results=s.max_results,
-        chunk_size=s.chunk_size,
-        min_delay=s.min_delay,
-        max_delay=s.max_delay,
-        cooldown_every=s.cooldown_every,
-        cooldown_min=s.cooldown_min,
-        cooldown_max=s.cooldown_max,
-        nav_timeout=s.nav_timeout,
-        proxy_attempts=s.proxy_attempts,
-        headless=bool(getattr(s, "headless", True)),
-        no_stealth=bool(getattr(s, "no_stealth", False)),
-        browser_path=str(getattr(s, "browser_path", "") or ""),
-        geoip=bool(getattr(s, "geoip", False)),
-        preflight_timeout=float(getattr(s, "preflight_timeout", 12.0) or 12.0),
-        no_preflight=bool(getattr(s, "no_preflight", False)),
-        fresh=bool(getattr(s, "fresh", False)),
-        debug=bool(getattr(s, "debug", False)),
-        worker_count=worker_count,
-        package_count=package_count,
-    )
 
 
 async def _pool_out(db: AsyncSession, p: ProxyPool) -> ProxyPoolOut:
@@ -111,19 +64,17 @@ async def _pool_out(db: AsyncSession, p: ProxyPool) -> ProxyPoolOut:
 
 def _worker_out(
     w: WorkerNode,
-    scrape: ScrapeSettings | None = None,
     *,
     active_leases: int = 0,
     pool_name: str | None = None,
-    profile_name: str | None = None,
 ) -> WorkerOut:
     online = False
     if w.last_seen_at:
         ts = w.last_seen_at if w.last_seen_at.tzinfo else w.last_seen_at.replace(tzinfo=timezone.utc)
         online = datetime.now(timezone.utc) - ts < timedelta(seconds=90)
     raw = w.worker_config or {}
-    if not raw and scrape is not None:
-        raw = scrape_settings_to_config(scrape)
+    if not raw:
+        raw = dict(DEFAULT_WORKER_CONFIG)
     return WorkerOut(
         id=w.id,
         name=w.name,
@@ -133,8 +84,6 @@ def _worker_out(
         max_browsers=w.max_browsers,
         proxy_pool_id=w.proxy_pool_id,
         proxy_pool_name=pool_name,
-        scrape_settings_id=getattr(w, "scrape_settings_id", None),
-        scrape_settings_name=profile_name,
         last_seen_at=w.last_seen_at,
         cpu_percent=float(w.cpu_percent or 0),
         mem_percent=float(w.mem_percent or 0),
@@ -280,19 +229,34 @@ async def delete_pool(pool_id: int, _: User = Depends(require_admin), __: User =
 # --- workers ---
 
 async def _enrich_worker(db: AsyncSession, w: WorkerNode, leases: dict[int, int] | None = None) -> WorkerOut:
-    scrape = await resolve_scrape_for_worker(db, w)
     pool_name = None
     if w.proxy_pool_id:
         pool = await db.get(ProxyPool, w.proxy_pool_id)
         pool_name = pool.name if pool else None
-    profile_name = scrape.name if scrape else None
     return _worker_out(
         w,
-        scrape,
         active_leases=(leases or {}).get(w.id, 0),
         pool_name=pool_name,
-        profile_name=profile_name,
     )
+
+
+async def _seed_worker_config(
+    db: AsyncSession,
+    *,
+    seed_from_package_id: int | None,
+    patch: dict | None = None,
+) -> dict:
+    """Build worker_config: package scrape_defaults (optional) → built-in → patch."""
+    if seed_from_package_id:
+        pkg = await db.get(Package, seed_from_package_id)
+        if not pkg:
+            raise HTTPException(404, "Package not found for seed_from_package_id")
+        cfg = package_defaults_from_package(pkg)
+    else:
+        cfg = dict(DEFAULT_WORKER_CONFIG)
+    if patch:
+        cfg = apply_worker_config_update(cfg, patch)
+    return normalize_worker_config(cfg)
 
 
 @router.get("/workers", response_model=list[WorkerOut])
@@ -313,21 +277,16 @@ async def list_workers(_: User = Depends(require_admin), __: User = Depends(requ
 @router.post("/workers", response_model=WorkerCreateResponse)
 async def create_worker(body: WorkerCreate, _: User = Depends(require_admin), __: User = Depends(require_ready_user), db: AsyncSession = Depends(get_db)):
     raw = generate_worker_token()
-    default = await get_default_profile(db)
-    profile = default
-    if body.scrape_settings_id:
-        profile = await db.get(ScrapeSettings, body.scrape_settings_id) or default
-    if body.use_global_scrape_defaults or body.worker_config is None:
-        cfg = scrape_settings_to_config(profile)
-    else:
-        cfg = normalize_worker_config({})
-    if body.worker_config is not None:
-        cfg = apply_worker_config_update(cfg, body.worker_config.model_dump(exclude_unset=True))
+    patch = body.worker_config.model_dump(exclude_unset=True) if body.worker_config is not None else None
+    cfg = await _seed_worker_config(
+        db,
+        seed_from_package_id=body.seed_from_package_id,
+        patch=patch,
+    )
     w = WorkerNode(
         name=body.name,
         max_browsers=body.max_browsers,
         proxy_pool_id=body.proxy_pool_id,
-        scrape_settings_id=profile.id,
         worker_config=cfg,
     )
     _set_worker_token(w, raw)
@@ -347,13 +306,17 @@ async def update_worker(worker_id: int, body: WorkerUpdate, _: User = Depends(re
     if not w:
         raise HTTPException(404, "Not found")
     data = body.model_dump(exclude_unset=True)
-    reset = data.pop("reset_config_from_global", False)
+    reset = data.pop("reset_config_to_defaults", False)
+    seed_pkg = data.pop("seed_from_package_id", None)
     cfg_patch = data.pop("worker_config", None)
     for k, v in data.items():
         setattr(w, k, v)
-    if reset:
-        scrape = await resolve_scrape_for_worker(db, w)
-        w.worker_config = scrape_settings_to_config(scrape)
+    if reset or seed_pkg is not None:
+        w.worker_config = await _seed_worker_config(
+            db,
+            seed_from_package_id=seed_pkg,
+            patch=None,
+        )
     elif cfg_patch is not None:
         w.worker_config = apply_worker_config_update(w.worker_config or {}, cfg_patch)
     await db.commit()
@@ -375,164 +338,6 @@ async def rotate_token(worker_id: int, _: User = Depends(require_admin), __: Use
         token=raw,
         install_hint=_install_hint(raw),
     )
-
-
-# --- scrape profiles ---
-
-async def _profile_counts(db: AsyncSession, profile_id: int) -> tuple[int, int]:
-    wc = int(
-        (
-            await db.execute(
-                select(func.count()).select_from(WorkerNode).where(WorkerNode.scrape_settings_id == profile_id)
-            )
-        ).scalar_one()
-        or 0
-    )
-    pc = int(
-        (
-            await db.execute(
-                select(func.count()).select_from(Package).where(Package.scrape_settings_id == profile_id)
-            )
-        ).scalar_one()
-        or 0
-    )
-    return wc, pc
-
-
-@router.get("/scrape-profiles", response_model=list[ScrapeSettingsOut])
-async def list_scrape_profiles(_: User = Depends(require_admin), __: User = Depends(require_ready_user), db: AsyncSession = Depends(get_db)):
-    await ensure_default_profile(db)
-    rows = (await db.execute(select(ScrapeSettings).order_by(ScrapeSettings.id))).scalars().all()
-    out = []
-    for s in rows:
-        wc, pc = await _profile_counts(db, s.id)
-        out.append(_scrape_out(s, worker_count=wc, package_count=pc))
-    return out
-
-
-@router.post("/scrape-profiles", response_model=ScrapeSettingsOut)
-async def create_scrape_profile(
-    body: ScrapeSettingsCreate,
-    _: User = Depends(require_admin),
-    __: User = Depends(require_ready_user),
-    db: AsyncSession = Depends(get_db),
-):
-    source = None
-    if body.clone_from_id:
-        source = await db.get(ScrapeSettings, body.clone_from_id)
-    profile = await clone_profile(
-        db,
-        name=body.name,
-        slug=body.slug,
-        description=body.description,
-        source=source,
-        is_default=body.is_default,
-    )
-    if body.is_default:
-        others = (
-            await db.execute(select(ScrapeSettings).where(ScrapeSettings.id != profile.id))
-        ).scalars().all()
-        for o in others:
-            o.is_default = False
-        profile.is_default = True
-        await db.commit()
-        await db.refresh(profile)
-    if not body.is_active:
-        profile.is_active = False
-        await db.commit()
-        await db.refresh(profile)
-    wc, pc = await _profile_counts(db, profile.id)
-    return _scrape_out(profile, worker_count=wc, package_count=pc)
-
-
-@router.get("/scrape-profiles/{profile_id}", response_model=ScrapeSettingsOut)
-async def get_scrape_profile(
-    profile_id: int,
-    _: User = Depends(require_admin),
-    __: User = Depends(require_ready_user),
-    db: AsyncSession = Depends(get_db),
-):
-    s = await db.get(ScrapeSettings, profile_id)
-    if not s:
-        raise HTTPException(404, "Not found")
-    wc, pc = await _profile_counts(db, s.id)
-    return _scrape_out(s, worker_count=wc, package_count=pc)
-
-
-@router.patch("/scrape-profiles/{profile_id}", response_model=ScrapeSettingsOut)
-async def update_scrape_profile(
-    profile_id: int,
-    body: ScrapeSettingsUpdate,
-    _: User = Depends(require_admin),
-    __: User = Depends(require_ready_user),
-    db: AsyncSession = Depends(get_db),
-):
-    s = await db.get(ScrapeSettings, profile_id)
-    if not s:
-        raise HTTPException(404, "Not found")
-    data = body.model_dump(exclude_unset=True)
-    apply_workers = data.pop("apply_to_workers", False)
-    if data.get("is_default"):
-        others = (
-            await db.execute(select(ScrapeSettings).where(ScrapeSettings.id != s.id))
-        ).scalars().all()
-        for o in others:
-            o.is_default = False
-    for k, v in data.items():
-        setattr(s, k, v)
-    await db.commit()
-    await db.refresh(s)
-    if apply_workers:
-        workers = (
-            await db.execute(select(WorkerNode).where(WorkerNode.scrape_settings_id == s.id))
-        ).scalars().all()
-        cfg = scrape_settings_to_config(s)
-        for w in workers:
-            w.worker_config = cfg
-        await db.commit()
-    wc, pc = await _profile_counts(db, s.id)
-    return _scrape_out(s, worker_count=wc, package_count=pc)
-
-
-@router.delete("/scrape-profiles/{profile_id}")
-async def delete_scrape_profile(
-    profile_id: int,
-    _: User = Depends(require_admin),
-    __: User = Depends(require_ready_user),
-    db: AsyncSession = Depends(get_db),
-):
-    s = await db.get(ScrapeSettings, profile_id)
-    if not s:
-        raise HTTPException(404, "Not found")
-    if s.is_default or s.id == 1:
-        raise HTTPException(400, "Cannot delete the default scrape profile")
-    default = await get_default_profile(db)
-    workers = (
-        await db.execute(select(WorkerNode).where(WorkerNode.scrape_settings_id == profile_id))
-    ).scalars().all()
-    for w in workers:
-        w.scrape_settings_id = default.id
-    packages = (
-        await db.execute(select(Package).where(Package.scrape_settings_id == profile_id))
-    ).scalars().all()
-    for p in packages:
-        p.scrape_settings_id = default.id
-    await db.delete(s)
-    await db.commit()
-    return {"detail": "Deleted"}
-
-
-@router.get("/settings/scrape", response_model=ScrapeSettingsOut)
-async def get_scrape(_: User = Depends(require_admin), __: User = Depends(require_ready_user), db: AsyncSession = Depends(get_db)):
-    s = await get_default_profile(db)
-    wc, pc = await _profile_counts(db, s.id)
-    return _scrape_out(s, worker_count=wc, package_count=pc)
-
-
-@router.put("/settings/scrape", response_model=ScrapeSettingsOut)
-async def update_scrape(body: ScrapeSettingsUpdate, _: User = Depends(require_admin), __: User = Depends(require_ready_user), db: AsyncSession = Depends(get_db)):
-    s = await get_default_profile(db)
-    return await update_scrape_profile(s.id, body, _, __, db)
 
 
 # --- worker agent protocol ---
@@ -639,10 +444,10 @@ async def worker_heartbeat(
         w.host_os = str(body.get("os") or body.get("host_os"))[:64]
     w.version = str(body.get("version") or w.version)
     await db.commit()
-    scrape = await resolve_scrape_for_worker(db, w)
     captcha = await get_captcha_settings(db)
+    # Heartbeat sync uses worker machine config only (no job/package context yet)
     effective = merge_lease_settings(
-        scrape=scrape,
+        package_defaults=None,
         worker_config=w.worker_config or {},
         job_settings={},
         max_browsers=w.max_browsers,
@@ -655,7 +460,6 @@ async def worker_heartbeat(
         "name": w.name,
         "max_browsers": w.max_browsers,
         "proxy_pool_id": w.proxy_pool_id,
-        "scrape_settings_id": w.scrape_settings_id,
         # Redacted: captcha keys only delivered inside job leases
         "worker_config": _redact_worker_config(effective),
     }
@@ -863,15 +667,20 @@ async def worker_lease(
                 await db.commit()
                 return {"chunk": None}
 
-    scrape = await resolve_scrape_for_worker(db, w)
+    scrape = None  # legacy unused; package_defaults replace scrape profiles
     proxies_text = ""
     if w.proxy_pool_id:
         pool = await db.get(ProxyPool, w.proxy_pool_id)
         if pool and pool.is_active:
             proxies_text = pool.proxies_text
 
+    owner = await db.get(User, job.owner_id)
+    pkg = await package_for_user(db, owner) if owner else None
+    package_defaults = package_defaults_from_package(pkg)
+
     captcha = await get_captcha_settings(db)
     settings = merge_lease_settings(
+        package_defaults=package_defaults,
         scrape=scrape,
         worker_config=w.worker_config or {},
         job_settings=dict(job.settings or {}),

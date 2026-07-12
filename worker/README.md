@@ -12,9 +12,21 @@ Production panel URL: **`https://scrape.cvmso.com`**
 
 1. Panel → **Admin → Workers → Create** → **copy token once**.  
 2. First run: from repo root `./install.sh` / `install.bat` → **Worker** (saves `.scrapeboard-role=worker`), or `setup_and_run.bat` / `.sh` / `.command` (wizard → `worker_config.json`).  
-3. **Install background service** (recommended): `install_service.bat` / `bash install_service.sh`.  
+3. **Install background service** (recommended): `install_service.bat` / `bash install_service.sh` — automatic with `--yes` when config exists.  
 4. Leave it running; it heartbeats and leases jobs from the panel.  
 5. Later updates: `python3 install.py --role worker --update` or `bash worker/update.sh` (does not pull `panel/`).
+
+**Noninteractive worker:**
+
+```bash
+export SCRAPEBOARD_PANEL_URL=https://scrape.example
+export SCRAPEBOARD_TOKEN='…'
+# Linux/macOS:
+bash setup_and_run.sh --yes
+# or from repo root:
+python3 install.py --role worker --yes
+# Windows: setup_and_run.bat /Y   or   install.bat --role worker --yes
+```
 
 Full stack (panel + ops): **[root README → Run by default](../README.md#run-by-default)**.
 
@@ -25,9 +37,10 @@ Full stack (panel + ops): **[root README → Run by default](../README.md#run-by
 | | |
 |--|--|
 | OS | Windows 10+, macOS 12+, or modern Linux |
-| Python | **3.10+** (`python3` / Windows: `py -3`) |
+| Python | **3.10+** — auto via apt / Homebrew `python@3.12` / winget when possible |
+| Linux packages | `python3`, `pip`, `python3.X-venv`; `build-essential` only if needed; Playwright deps best-effort when root/passwordless sudo |
 | Network | Outbound HTTPS to the panel (no inbound ports) |
-| Panel | Admin → Workers → create worker → **copy token once** |
+| Panel | Admin → Workers → create worker → **copy token once** (or `SCRAPEBOARD_TOKEN`) |
 
 ---
 
@@ -57,11 +70,13 @@ python agent.py                # first run → wizard
 
 ### Wizard prompts
 
-1. **Panel URL** — default `https://scrape.cvmso.com`  
-2. **Worker token** — from Admin → Workers (shown once)  
-3. **Worker name** — hostname by default  
+1. **Panel URL** — default `https://scrape.cvmso.com` (or `SCRAPEBOARD_PANEL_URL`)  
+2. **Worker token** — from Admin → Workers (shown once) (or `SCRAPEBOARD_TOKEN`)  
+3. **Worker name** — hostname by default (`SCRAPEBOARD_WORKER_NAME`)  
 4. **Default engine** — e.g. `chrome`, `brave`, `camoufox` (selftest + first bootstrap)  
-5. **Optional Tailscale** — default **off** (or on if Tailscale is already detected); see below  
+5. **Optional Tailscale** — default **off**; with `--yes` only if `--tailscale` / `SCRAPEBOARD_TAILSCALE=1`  
+
+With `SCRAPEBOARD_ASSUME_YES=1` / `--yes`, the wizard is noninteractive and **requires** `SCRAPEBOARD_TOKEN` (unless `worker_config.json` already exists).
 
 Config file: **`worker_config.json`** (gitignored — contains the token).
 
@@ -237,31 +252,145 @@ Clean reinstall: delete `.venv` + `worker_config.json`, re-run `setup_and_run.*`
 
 ---
 
-## CLI reference
+## Worker settings & flags
+
+Operator reference for everything that configures the worker. Sources of truth: `python agent.py --help`, `python install.py --help`, and the wizard that writes `worker_config.json`. Do not invent flags — if a control is panel-only, it is marked below.
+
+Quick start:
 
 ```text
 python agent.py                         # wizard if no config; else run
-python agent.py --setup                 # re-run wizard
+python agent.py --setup                 # re-run wizard, then continue
 python agent.py --panel-url URL --token TOKEN [--name NAME]
-python agent.py --config PATH           # alternate config file
-python agent.py --work-dir PATH         # scratch dir for chunks
-python agent.py --service               # background service paths + file logging
-python agent.py --log-file PATH         # redirect logs (file logging)
-python agent.py --selftest [--engine E]
-python agent.py --force-setup | --skip-setup
+python agent.py --service               # log → logs/worker.log, work → work/
 ```
 
-Panel install hint (shown when creating/rotating a worker):
+### CLI — `python agent.py`
+
+| Flag | Default | Meaning / when to use |
+|------|---------|------------------------|
+| `-h`, `--help` | — | Print help and exit |
+| `--panel-url URL` | `""` (config / wizard) | Panel base URL, e.g. `https://scrape.cvmso.com` |
+| `--token TOKEN` | `""` (config / wizard) | Worker token from Admin → Workers (shown once) |
+| `--name NAME` | `""` → config / hostname | Display name sent on hello/heartbeat |
+| `--work-dir PATH` | `""` → config; else temp (or `work/` with `--service`) | Scratch root for chunk work (`user_{id}/{job_id}/`) |
+| `--config PATH` | `worker_config.json` in `worker/` | Alternate config file path |
+| `--setup` | off | Re-run first-run wizard (writes config), then continue the agent |
+| `--selftest` | off | Verify browser/stealth locally, then exit (no panel required) |
+| `--engine ENGINE` | `""` → config / `chrome` | Engine for `--selftest` / first browser bootstrap (`chrome`, `brave`, `edge`, `camoufox`, …) |
+| `--skip-setup` | off | Never auto-install browsers/Python deps |
+| `--force-setup` | off | Re-run browser/deps install on this start |
+| `--service` | off | Service mode: append log to `logs/worker.log`, use stable `work/` (what `install_service.*` runs) |
+| `--log-file PATH` | with `--service`: `logs/worker.log` | Redirect stdout/stderr to this file (does not alone force `work/`) |
+
+CLI credentials (`--panel-url` + `--token`) override the config file. `--name`, `--work-dir`, and `--engine` override matching config keys when set.
+
+### Config file — `worker_config.json`
+
+Created by the wizard / `--setup`. Gitignored (contains the token). Heartbeats also **sync** panel scrape flags into `scrape` and refresh `max_browsers` / `worker_name` / `default_engine`.
+
+| Key | Type | Default (wizard) | Effect |
+|-----|------|------------------|--------|
+| `panel_url` | string | `https://scrape.cvmso.com` | Panel base URL |
+| `token` | string | *(required)* | Worker auth token |
+| `worker_name` | string | hostname | Name reported to the panel (panel can overwrite on heartbeat) |
+| `default_engine` | string | `chrome` | Local selftest / first bootstrap engine; updated from panel `scrape.engine` |
+| `work_dir` | string | `""` (auto temp; `work/` in `--service`) | Scratch directory root |
+| `skip_setup` | bool | `false` | Same as `--skip-setup` when true |
+| `max_browsers` | int | `2` | Max concurrent **job leases** (instances). Overwritten from panel heartbeat |
+| `tailscale_enabled` | bool | `false` | If true, agent checks/reminds Tailscale on start (alias: `tailscale`) |
+| `scrape` | object | `{}` | Panel-pushed scrape flags (engine, threads, delays, …). Filled on heartbeat; used as a local mirror — **leases carry the effective settings** |
+
+There is no local `engines` list key — only `default_engine` (and panel `scrape.engine`). Proxy lists are **not** stored here for panel jobs; the lease includes proxies from the assigned pool.
+
+### Environment variables
+
+Used by the wizard, `setup_and_run.*`, and root `install.py` / `install.sh`. Truthy values: `1`, `true`, `yes`, `y`, `on`.
+
+| Variable | Used by | Effect |
+|----------|---------|--------|
+| `SCRAPEBOARD_ASSUME_YES` | agent wizard, setup/install | Noninteractive defaults (same as `--yes` / `-y`) |
+| `SCRAPEBOARD_PANEL_URL` | wizard | Default / noninteractive panel URL |
+| `SCRAPEBOARD_TOKEN` | wizard | **Required** with `--yes` unless config already exists |
+| `SCRAPEBOARD_WORKER_NAME` | wizard | Default worker name |
+| `SCRAPEBOARD_ENGINE` | wizard (`--yes`) | Default engine (else `chrome`) |
+| `SCRAPEBOARD_WORK_DIR` | wizard (`--yes`) | Optional `work_dir` in config |
+| `SCRAPEBOARD_TAILSCALE` | wizard, setup/install | Enable Tailscale in config / pass `--tailscale` |
+| `SCRAPEBOARD_ROLE` | `install.py`, `update.*` | Override `.scrapeboard-role` (`panel` \| `worker`) |
+
+### Install / setup / update flags
+
+**Root installer** — `python3 install.py` / `./install.sh` / `install.bat` (see `install.py --help`):
+
+| Flag | Meaning |
+|------|---------|
+| `--role panel\|worker` | Skip role menu; persist to `.scrapeboard-role` |
+| `-y`, `--yes` | Noninteractive after role is set (sets `SCRAPEBOARD_ASSUME_YES`) |
+| `--tailscale` | Worker: enable Tailscale in setup (install best-effort; login still manual) |
+| `--update` | Sparse git pull for this machine’s role + refresh deps hints |
+| `--force-role` | Allow switching `.scrapeboard-role` without confirm |
+| `--dry-run` | Print OS, role, paths; exit |
+
+**Worker first-run** — `setup_and_run.sh` / `.command` / `.bat`:
+
+| Flag | Meaning |
+|------|---------|
+| `--yes` / `-y` (Windows also `/Y`) | Noninteractive: deps + wizard via env + auto service when config exists |
+| `--tailscale` | Enable Tailscale in config |
+
+**Background service** — `install_service.sh` / `.bat` / `.ps1`:
+
+| Flag | Meaning |
+|------|---------|
+| *(none)* | Install + start service running `agent.py --service` |
+| `--uninstall` / `-u` (PS: `-Uninstall`) | Remove the service unit/task |
+
+**Worker update** — `bash worker/update.sh` / `worker\update.bat`:
+
+| Flag | Meaning |
+|------|---------|
+| *(default)* | `install.py --role worker --update` (refuses if role is `panel`) |
+| `--force-role` | Passed through when reconfiguring role |
+
+### Service mode
+
+`install_service.*` runs: `python agent.py --service`.
+
+| | Foreground | `--service` |
+|--|------------|-------------|
+| Log | terminal stdout | `logs/worker.log` (override with `--log-file`) |
+| Work dir | temp dir unless `--work-dir` / config | `worker/work/` unless `--work-dir` / config |
+| Restart | manual | LaunchAgent / systemd user / Task Scheduler KeepAlive |
+
+Paths are under the `worker/` folder. See [Install as background service](#install-as-background-service) for OS-specific status commands.
+
+### Panel → worker (admin UI)
+
+These are **panel-only** (Admin → Workers / Proxy pools / Scrape / Captcha). The agent does not expose CLI flags for them; heartbeat/lease applies them.
+
+| Panel control | Maps to worker-side |
+|---------------|---------------------|
+| Create / rotate **token** | Paste into wizard / `token` / `SCRAPEBOARD_TOKEN` |
+| **Name** | Heartbeat may refresh `worker_name` |
+| **max_browsers** | Concurrent leases; synced into config + runtime |
+| **Enabled** / **Drain** | Heartbeat `enabled` / `drain` — stop leasing (drain waits for active jobs) |
+| **Proxy pool** assignment | Proxies embedded in each lease (not a local file) |
+| Per-worker **scrape flags** | Synced into `scrape` + merged after package defaults on each lease |
+| Global **Captcha** (Admin → Captcha) | Injected into leases; not configured in `worker_config.json` |
+
+Panel install hint (create/rotate worker):
 
 ```text
 python agent.py --setup
 # or:
 python agent.py --panel-url https://scrape.cvmso.com --token <TOKEN>
 
-# After config exists, install as a background service (starts at login):
+# After config exists:
 #   macOS/Linux:  bash install_service.sh
 #   Windows:      install_service.bat
 ```
+
+Standalone engine CLI (`gmaps_scraper.py`) is separate — see [`SCRAPER.md`](SCRAPER.md).
 
 ---
 
@@ -319,6 +448,7 @@ Full engine docs: [`SCRAPER.md`](SCRAPER.md).
 | Issue | Fix |
 |-------|-----|
 | `python` / `python3` not found | Install Python 3.10+; on Windows tick “Add to PATH” |
+| `ensurepip is not available` / venv failed (Linux) | `sudo apt-get install -y python3.X-venv` (X = your minor version), then re-run `bash setup_and_run.sh` |
 | Token rejected | Rotate token in panel → `python agent.py --setup` |
 | Worker stays offline | Check URL (`https://scrape.cvmso.com`), outbound HTTPS, firewall |
 | Brave auto-install fails | Install from brave.com or use engine `chrome` |

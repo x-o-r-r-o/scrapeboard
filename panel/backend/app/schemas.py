@@ -130,7 +130,8 @@ class PackageOut(BaseModel):
     headings: list = Field(default_factory=list)
     features: list = Field(default_factory=list)
     dedicated_worker: bool = False
-    scrape_settings_id: int | None = None
+    scrape_defaults: dict = Field(default_factory=dict)
+    chunk_size: int = 500
     is_active: bool
 
     model_config = {"from_attributes": True}
@@ -149,8 +150,8 @@ class PackageCreate(BaseModel):
     headings: list = Field(default_factory=list)
     features: list = Field(default_factory=list)
     dedicated_worker: bool = False
-    scrape_settings_id: int | None = None
-    create_scrape_profile: bool = True
+    scrape_defaults: dict | None = None
+    chunk_size: int = 500
     is_active: bool = True
 
 
@@ -166,7 +167,8 @@ class PackageUpdate(BaseModel):
     headings: list | None = None
     features: list | None = None
     dedicated_worker: bool | None = None
-    scrape_settings_id: int | None = None
+    scrape_defaults: dict | None = None
+    chunk_size: int | None = None
     is_active: bool | None = None
 
 
@@ -355,8 +357,6 @@ class WorkerOut(BaseModel):
     max_browsers: int
     proxy_pool_id: int | None
     proxy_pool_name: str | None = None
-    scrape_settings_id: int | None = None
-    scrape_settings_name: str | None = None
     last_seen_at: datetime | None
     cpu_percent: float
     mem_percent: float
@@ -382,10 +382,10 @@ class WorkerCreate(BaseModel):
     name: str
     max_browsers: int = 2
     proxy_pool_id: int | None = None
-    scrape_settings_id: int | None = None
-    # If omitted, seeded from assigned scrape profile
+    # If omitted, seeded from built-in DEFAULT_WORKER_CONFIG
     worker_config: WorkerConfigUpdate | None = None
-    use_global_scrape_defaults: bool = True
+    # Optional: seed worker_config from this package's scrape_defaults
+    seed_from_package_id: int | None = None
 
 
 class WorkerCreateResponse(BaseModel):
@@ -400,10 +400,10 @@ class WorkerUpdate(BaseModel):
     is_draining: bool | None = None
     max_browsers: int | None = None
     proxy_pool_id: int | None = None
-    scrape_settings_id: int | None = None
     worker_config: WorkerConfigUpdate | None = None
-    # When true, replace worker_config from assigned scrape profile
-    reset_config_from_global: bool = False
+    # When true, replace worker_config with built-in defaults (or seed_from_package_id)
+    reset_config_to_defaults: bool = False
+    seed_from_package_id: int | None = None
 
 
 class ScrapeSettingsOut(BaseModel):

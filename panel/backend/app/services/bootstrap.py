@@ -14,7 +14,11 @@ from app.models import (
 )
 from app.bot.demos import DEMO_COMMANDS, DEMO_WORKFLOWS
 from app.services.captcha_settings import ensure_captcha_settings
-from app.services.scrape_profiles import clone_profile, ensure_default_profile, ensure_workers_have_default_profile
+from app.services.scrape_profiles import (
+    ensure_default_profile,
+    ensure_workers_have_default_profile,
+)
+from app.services.worker_config import build_package_scrape_defaults
 
 
 async def bootstrap(db: AsyncSession) -> None:
@@ -25,7 +29,7 @@ async def bootstrap(db: AsyncSession) -> None:
     if not await db.get(BillingSettings, 1):
         db.add(BillingSettings(id=1))
     await db.flush()
-    default_profile = await ensure_default_profile(db)
+    await ensure_default_profile(db)
     await ensure_captcha_settings(db)
     if not await db.get(BotSettings, 1):
         db.add(BotSettings(id=1))
@@ -53,13 +57,6 @@ async def bootstrap(db: AsyncSession) -> None:
             ("pro", "Pro", 2, 25, 5, 10),
             ("max", "Max", 3, 60, 12, 50),
         ):
-            profile = await clone_profile(
-                db,
-                name=f"{name} scrape",
-                slug=f"{slug}-scrape",
-                description=f"Default scrape profile for {name} package",
-                source=default_profile,
-            )
             db.add(
                 Package(
                     slug=slug,
@@ -69,7 +66,8 @@ async def bootstrap(db: AsyncSession) -> None:
                     duration_days=30,
                     threads=threads,
                     max_upload_mb=upload,
-                    scrape_settings_id=profile.id,
+                    scrape_defaults=build_package_scrape_defaults(threads=threads),
+                    chunk_size=500,
                 )
             )
 

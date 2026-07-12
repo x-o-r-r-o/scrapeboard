@@ -108,6 +108,14 @@ def _prompt_yes_no(prompt_fn, question: str, default: bool = False) -> bool:
     return raw in ("y", "yes", "1", "true")
 
 
+def _env_truthy(name: str) -> bool:
+    return (os.environ.get(name) or "").strip().lower() in ("1", "true", "yes", "y", "on")
+
+
+def _assume_yes() -> bool:
+    return _env_truthy("SCRAPEBOARD_ASSUME_YES")
+
+
 def run_setup_wizard(prompt=input) -> dict:
     print("=" * 62, flush=True)
     print(" Scrapeboard Worker — first-run setup", flush=True)
@@ -116,30 +124,59 @@ def run_setup_wizard(prompt=input) -> dict:
     print("This machine will ONLY scrape. Config/users/billing live on the panel.", flush=True)
     print(flush=True)
 
+    assume = _assume_yes()
     default_url = "https://scrape.cvmso.com"
-    panel_url = (prompt(f"Panel URL [{default_url}]: ") or default_url).strip().rstrip("/")
-    token = (prompt("Worker token (from Scrapeboard → Admin → Workers): ") or "").strip()
-    if not token:
-        raise SystemExit("[fatal] worker token is required. Create a worker in the panel first.")
+    env_url = (os.environ.get("SCRAPEBOARD_PANEL_URL") or "").strip().rstrip("/")
+    env_token = (os.environ.get("SCRAPEBOARD_TOKEN") or "").strip()
+    env_name = (os.environ.get("SCRAPEBOARD_WORKER_NAME") or "").strip()
+    # Tailscale: only when already requested via env/flag — never force interactive login.
+    want_ts = _env_truthy("SCRAPEBOARD_TAILSCALE")
 
-    default_name = platform.node() or "worker"
-    name = (prompt(f"Worker name [{default_name}]: ") or default_name).strip()
-    engine = (prompt("Default browser engine for local selftest [chrome]: ") or "chrome").strip().lower()
+    if assume:
+        print("[setup] Noninteractive mode (SCRAPEBOARD_ASSUME_YES=1).", flush=True)
+        panel_url = env_url or default_url
+        token = env_token
+        if not token:
+            raise SystemExit(
+                "[fatal] Noninteractive setup needs a worker token.\n"
+                "  Export SCRAPEBOARD_PANEL_URL and SCRAPEBOARD_TOKEN, or create\n"
+                "  worker_config.json first, then re-run with --yes.\n"
+                "  Panel → Admin → Workers → Create → copy token once."
+            )
+        name = env_name or platform.node() or "worker"
+        engine = (os.environ.get("SCRAPEBOARD_ENGINE") or "chrome").strip().lower()
+        work = (os.environ.get("SCRAPEBOARD_WORK_DIR") or "").strip()
+        print(f"  panel_url={panel_url}", flush=True)
+        print(f"  worker_name={name}", flush=True)
+        print(f"  engine={engine}  tailscale={want_ts}", flush=True)
+    else:
+        url_default = env_url or default_url
+        panel_url = (prompt(f"Panel URL [{url_default}]: ") or url_default).strip().rstrip("/")
+        token_prompt = "Worker token (from Scrapeboard → Admin → Workers)"
+        if env_token:
+            token_prompt += " [env set — Enter to use]"
+        token = (prompt(f"{token_prompt}: ") or env_token).strip()
+        if not token:
+            raise SystemExit("[fatal] worker token is required. Create a worker in the panel first.")
+
+        default_name = env_name or platform.node() or "worker"
+        name = (prompt(f"Worker name [{default_name}]: ") or default_name).strip()
+        engine = (prompt("Default browser engine for local selftest [chrome]: ") or "chrome").strip().lower()
+        work = (prompt("Work directory [auto temp]: ") or "").strip()
+
+        # Optional Tailscale (default off). Detect existing install for operator awareness.
+        ts_present = bool(tailscale_cli_path())
+        print(flush=True)
+        print("Optional Tailscale (mesh VPN — useful for private reachability; not required).", flush=True)
+        if ts_present:
+            print(f"  Detected Tailscale CLI: {tailscale_cli_path()}", flush=True)
+            ts_q = "Enable Tailscale for this worker? (already installed)"
+        else:
+            ts_q = "Install/enable Tailscale on this machine?"
+        want_ts = want_ts or _prompt_yes_no(prompt, ts_q, default=False)
+
     if engine not in ("chrome", "google-chrome", "edge", "brave", "camoufox"):
         engine = "chrome"
-
-    work = (prompt("Work directory [auto temp]: ") or "").strip()
-
-    # Optional Tailscale (default off). Detect existing install for operator awareness.
-    ts_present = bool(tailscale_cli_path())
-    print(flush=True)
-    print("Optional Tailscale (mesh VPN — useful for private reachability; not required).", flush=True)
-    if ts_present:
-        print(f"  Detected Tailscale CLI: {tailscale_cli_path()}", flush=True)
-        ts_q = "Enable Tailscale for this worker? (already installed)"
-    else:
-        ts_q = "Install/enable Tailscale on this machine?"
-    tailscale_enabled = _prompt_yes_no(prompt, ts_q, default=False)
 
     cfg = {
         "panel_url": panel_url,
@@ -149,13 +186,14 @@ def run_setup_wizard(prompt=input) -> dict:
         "work_dir": work,
         "skip_setup": False,
         "max_browsers": 2,
-        "tailscale_enabled": bool(tailscale_enabled),
+        "tailscale_enabled": bool(want_ts),
         "scrape": {},  # filled from panel worker settings on heartbeat
     }
     save_config(cfg)
 
     if cfg["tailscale_enabled"]:
-        ensure_tailscale(interactive=True)
+        # Install package best-effort; never block on `tailscale up` login.
+        ensure_tailscale(interactive=not assume)
 
     print(flush=True)
     print("Next: dependencies + browser will auto-install on first job / --selftest.", flush=True)
@@ -165,6 +203,8 @@ def run_setup_wizard(prompt=input) -> dict:
     else:
         print("Background service:   bash install_service.sh", flush=True)
     print("Toggle Tailscale later: set \"tailscale_enabled\": true|false in worker_config.json", flush=True)
+    if cfg["tailscale_enabled"]:
+        print("If Tailscale is installed but logged out, run:  tailscale up", flush=True)
     print("=" * 62, flush=True)
     return cfg
 
@@ -654,17 +694,29 @@ def parse_cli(argv=None):
     p.add_argument("--name", default="", help="Worker display name")
     p.add_argument("--work-dir", default="", help="Scratch directory for chunk work")
     p.add_argument("--config", default="", help=f"Config path (default: {CONFIG_NAME})")
-    p.add_argument("--setup", action="store_true", help="Run first-run wizard and exit/continue")
+    p.add_argument(
+        "--setup",
+        action="store_true",
+        help="Re-run first-run wizard (writes worker_config.json), then continue",
+    )
     p.add_argument("--selftest", action="store_true", help="Verify browser/stealth locally, then exit")
-    p.add_argument("--engine", default="", help="Engine for --selftest / first bootstrap")
+    p.add_argument(
+        "--engine",
+        default="",
+        help="Browser engine for --selftest / first bootstrap (default: chrome or config)",
+    )
     p.add_argument("--skip-setup", action="store_true", help="Do not auto-install browsers/deps")
     p.add_argument("--force-setup", action="store_true", help="Re-run browser/deps install")
     p.add_argument(
         "--service",
         action="store_true",
-        help="Background/service mode: log to logs/worker.log, stable work dir under worker/",
+        help="Service mode: log to logs/worker.log, stable work/ dir (for install_service.*)",
     )
-    p.add_argument("--log-file", default="", help="Override log path (implies --service logging)")
+    p.add_argument(
+        "--log-file",
+        default="",
+        help="Append stdout/stderr to this file (default with --service: logs/worker.log)",
+    )
     return p.parse_args(argv)
 
 

@@ -59,6 +59,16 @@ async def user_has_dedicated_worker(db: AsyncSession, user: User) -> bool:
     return bool(pkg and getattr(pkg, "dedicated_worker", False))
 
 
+async def package_for_user(db: AsyncSession, user: User | None) -> Package | None:
+    """Active subscription package for a user (None for admin / no sub)."""
+    if user is None or user.role == "admin":
+        return None
+    sub = await active_subscription(db, user)
+    if not sub or not sub.package_id:
+        return None
+    return await db.get(Package, sub.package_id)
+
+
 async def can_purchase(db: AsyncSession, user: User, pkg: Package) -> tuple[bool, str]:
     if user.role == "admin":
         return False, "Admins do not need a subscription"

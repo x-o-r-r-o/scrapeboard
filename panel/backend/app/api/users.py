@@ -7,8 +7,10 @@ from app.core.database import get_db
 from app.core.security import hash_password
 from app.models import AuditLog, User, UserWorker, WorkerNode
 from app.schemas import MessageOut, UserCreate, UserOut, UserPermsSchema, UserUpdate
-from app.services.billing import user_has_dedicated_worker
+from app.services.billing import package_for_user, user_has_dedicated_worker
 from app.services.perms import DEFAULT_USER_PERMS, ENGINE_OPTIONS, PERM_SCHEMA, normalize_perms
+from app.services.worker_config import DEFAULT_WORKER_CONFIG, package_defaults_from_package
+
 
 router = APIRouter(prefix="/users", tags=["users"])
 
@@ -38,6 +40,20 @@ async def _set_worker_ids(db: AsyncSession, user_id: int, worker_ids: list[int] 
         await db.delete(row)
     for wid in wanted:
         db.add(UserWorker(user_id=user_id, worker_id=wid))
+
+    # Seed newly pinned workers from the user's package when config is still empty/default
+    if wanted:
+        user = await db.get(User, user_id)
+        pkg = await package_for_user(db, user) if user else None
+        if pkg:
+            defaults = package_defaults_from_package(pkg)
+            workers = (
+                await db.execute(select(WorkerNode).where(WorkerNode.id.in_(wanted)))
+            ).scalars().all()
+            for w in workers:
+                cfg = w.worker_config or {}
+                if not cfg or cfg == DEFAULT_WORKER_CONFIG:
+                    w.worker_config = defaults
 
 
 async def _user_out(db: AsyncSession, user: User, worker_ids: list[int] | None = None) -> UserOut:

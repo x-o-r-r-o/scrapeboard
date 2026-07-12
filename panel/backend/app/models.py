@@ -116,7 +116,11 @@ class Package(Base):
     features: Mapped[list] = mapped_column(JSON, default=list)  # bullet feature list
     # When true, admins may optionally pin this subscriber to specific workers
     dedicated_worker: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Legacy FK — migrated into scrape_defaults; kept nullable for old DBs
     scrape_settings_id: Mapped[int | None] = mapped_column(ForeignKey("scrape_settings.id"), nullable=True)
+    # Package default scrape flags (engine, delays, …). Lease base layer before worker overrides.
+    scrape_defaults: Mapped[dict] = mapped_column(JSON, default=dict)
+    chunk_size: Mapped[int] = mapped_column(Integer, default=500)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
@@ -204,6 +208,7 @@ class WorkerNode(Base):
     is_draining: Mapped[bool] = mapped_column(Boolean, default=False)
     max_browsers: Mapped[int] = mapped_column(Integer, default=2)
     proxy_pool_id: Mapped[int | None] = mapped_column(ForeignKey("proxy_pools.id"), nullable=True)
+    # Legacy FK to scrape_settings — no longer used for leases; worker_config is authoritative
     scrape_settings_id: Mapped[int | None] = mapped_column(ForeignKey("scrape_settings.id"), nullable=True)
     last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     cpu_percent: Mapped[float] = mapped_column(Float, default=0)

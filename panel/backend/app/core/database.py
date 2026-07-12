@@ -61,6 +61,8 @@ def _migrate_sqlite(sync_conn) -> None:
         ("features", "JSON DEFAULT '[]'"),
         ("allowed_engines", "JSON DEFAULT '[\"all\"]'"),
         ("dedicated_worker", "BOOLEAN DEFAULT 0"),
+        ("scrape_defaults", "JSON DEFAULT '{}'"),
+        ("chunk_size", "INTEGER DEFAULT 500"),
     ):
         if col not in packages:
             sync_conn.execute(text(f"ALTER TABLE packages ADD COLUMN {col} {decl}"))

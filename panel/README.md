@@ -89,7 +89,7 @@ panel/
 - Proxy pools → assigned to workers  
 - Worker enrollment tokens, heartbeat (CPU/RAM/disk/load), drain/disable  
 - **Per-worker scrape flags** (`worker_config`): engine, threads, delays, headless, stealth, …  
-- Scrape profiles linked to packages/workers (browser/pace flags; captcha is global)  
+- **Package scrape defaults** (`scrape_defaults`): lease base layer before worker overrides; captcha is global  
 - **Global captcha** (primary + backup) under Admin → Captcha, applied on every job lease  
 - **`max_browsers`** = max concurrent **user-job instances** (leases) on that worker — not a per-job thread cap  
 
@@ -125,7 +125,6 @@ panel/
 | `/app/admin/billing` | admin | Wallet, methods, pending, grant |
 | `/app/admin/proxies` | admin | Proxy pools |
 | `/app/admin/workers` | admin | Workers + per-worker scrape flags |
-| `/app/admin/scrape` | admin | Scrape profiles (engine, delays, …) |
 | `/app/admin/captcha` | admin | Global scrape captcha solvers |
 | `/app/admin/security` | admin | Login reCAPTCHA + lockout |
 | `/app/admin/bot` | admin | Bot Builder |
@@ -243,7 +242,7 @@ systemctl restart scrapeboard
 3. **Packages** + **Billing** — wallet / manual methods  
 4. **Proxy pools** — paste proxies  
 5. **Workers** — create → copy token → **Settings** (engine, threads, headless, pool, …)  
-6. **Scrape profiles** — package/worker scrape flags; **Captcha** — global solvers once  
+6. **Packages** — set default scrape flags per plan; **Captcha** — global solvers once  
 7. **Bot Builder** (optional) — token → enable → **Install / refresh demos**  
 8. **Users** — create accounts (optional Telegram ID)  
 
@@ -292,8 +291,6 @@ GET  /api/health
 /api/subscriptions/*
 /api/proxy-pools
 /api/workers
-/api/scrape-profiles
-/api/settings/scrape
 /api/settings/captcha
 /api/settings/security
 /api/bot/*

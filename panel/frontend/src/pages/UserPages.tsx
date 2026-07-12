@@ -719,7 +719,6 @@ type LiveSystem = {
   proxy_pools_active: number;
   proxies_total: number;
   workers_without_pool: number;
-  scrape_profiles: number;
   captcha_configured: boolean;
   captcha_provider: string;
   captcha_backup_provider: string;
@@ -1012,8 +1011,6 @@ export function DashboardPage() {
                   {" · "}
                   {sys.proxy_pools_active} pools / {sys.proxies_total} proxies
                   {sys.workers_without_pool ? ` · ${sys.workers_without_pool} workers no pool` : ""}
-                  {" · "}
-                  {sys.scrape_profiles} profiles
                   {sys.orders_pending ? (
                     <>
                       {" · "}

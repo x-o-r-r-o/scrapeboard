@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import DEFAULT_USER_PERMS, require_admin, require_ready_user
 from app.core.database import get_db
 from app.core.security import hash_password
-from app.models import AuditLog, BillingSettings, Order, Package, PaymentTxid, ScrapeSettings, Subscription, User
+from app.models import AuditLog, BillingSettings, Order, Package, PaymentTxid, Subscription, User
 from app.services.perms import DEFAULT_USER_PERMS, normalize_perms
 from app.api.users import _set_worker_ids, _worker_ids_for
 from app.schemas import (
@@ -117,10 +117,21 @@ async def _resolve_grant_user(db: AsyncSession, body: GrantRequest) -> User:
 
 @router.get("/packages", response_model=list[PackageOut])
 async def list_packages(user: User = Depends(require_ready_user), db: AsyncSession = Depends(get_db)):
+    from app.services.scrape_profiles import migrate_packages_from_profiles
+    from app.services.worker_config import package_defaults_from_package
+
+    await migrate_packages_from_profiles(db)
     q = select(Package).order_by(Package.tier)
     if user.role != "admin":
         q = q.where(Package.is_active == True)  # noqa: E712
-    return (await db.execute(q)).scalars().all()
+    rows = (await db.execute(q)).scalars().all()
+    # Ensure API always returns filled scrape_defaults
+    out = []
+    for pkg in rows:
+        if not pkg.scrape_defaults:
+            pkg.scrape_defaults = package_defaults_from_package(pkg)
+        out.append(pkg)
+    return out
 
 
 @router.post("/packages", response_model=PackageOut)
@@ -130,32 +141,21 @@ async def create_package(
     __: User = Depends(require_ready_user),
     db: AsyncSession = Depends(get_db),
 ):
+    from app.services.worker_config import build_package_scrape_defaults, normalize_worker_config
+
     if (await db.execute(select(Package).where(Package.slug == body.slug))).scalar_one_or_none():
         raise HTTPException(400, "Slug exists")
     data = body.model_dump()
-    create_profile = data.pop("create_scrape_profile", True)
-    scrape_settings_id = data.pop("scrape_settings_id", None)
+    scrape_defaults = data.pop("scrape_defaults", None)
     pkg = Package(**data)
-    if scrape_settings_id:
-        profile = await db.get(ScrapeSettings, scrape_settings_id)
-        if not profile:
-            raise HTTPException(404, "Scrape profile not found")
-        pkg.scrape_settings_id = profile.id
-    elif create_profile:
-        from app.services.scrape_profiles import clone_profile, ensure_workers_have_default_profile
-
-        profile = await clone_profile(
-            db,
-            name=f"{pkg.name} scrape",
-            slug=f"{pkg.slug}-scrape",
-            description=f"Auto-created scrape profile for package {pkg.name}",
+    if scrape_defaults:
+        pkg.scrape_defaults = normalize_worker_config(
+            {**scrape_defaults, "threads": pkg.threads}
         )
-        # Align profile threads with package
-        profile.threads = pkg.threads
-        await db.commit()
-        await db.refresh(profile)
-        pkg.scrape_settings_id = profile.id
-        await ensure_workers_have_default_profile(db)
+    else:
+        pkg.scrape_defaults = build_package_scrape_defaults(threads=pkg.threads)
+    if not pkg.chunk_size:
+        pkg.chunk_size = 500
     db.add(pkg)
     await db.commit()
     await db.refresh(pkg)
@@ -170,16 +170,24 @@ async def update_package(
     __: User = Depends(require_ready_user),
     db: AsyncSession = Depends(get_db),
 ):
+    from app.services.worker_config import normalize_worker_config
+
     pkg = await db.get(Package, package_id)
     if not pkg:
         raise HTTPException(404, "Not found")
-    for k, v in body.model_dump(exclude_unset=True).items():
+    data = body.model_dump(exclude_unset=True)
+    scrape_defaults = data.pop("scrape_defaults", None)
+    for k, v in data.items():
         setattr(pkg, k, v)
-    # keep linked scrape profile thread count aligned when package threads change
-    if body.threads is not None and pkg.scrape_settings_id:
-        profile = await db.get(ScrapeSettings, pkg.scrape_settings_id)
-        if profile:
-            profile.threads = pkg.threads
+    if scrape_defaults is not None:
+        pkg.scrape_defaults = normalize_worker_config(
+            {**scrape_defaults, "threads": pkg.threads}
+        )
+    elif body.threads is not None:
+        # Keep embedded scrape defaults' threads aligned with package allowance
+        cfg = dict(pkg.scrape_defaults or {})
+        cfg["threads"] = pkg.threads
+        pkg.scrape_defaults = normalize_worker_config(cfg)
     await db.commit()
     await db.refresh(pkg)
     return pkg

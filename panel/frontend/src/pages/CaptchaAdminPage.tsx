@@ -111,7 +111,7 @@ export function CaptchaAdminPage() {
           <h1>2captcha / CaptchaAI</h1>
           <p className="subtitle">
             Global scrape solvers (primary + backup). Set once here — injected into every job lease; not
-            configured per scrape profile.
+            configured per worker or package.
           </p>
         </div>
       </div>

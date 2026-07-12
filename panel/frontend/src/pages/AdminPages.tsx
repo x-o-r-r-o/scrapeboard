@@ -3,6 +3,110 @@ import type { FormEvent } from "react";
 import { api } from "../api";
 import { EngineMultiSelect, PermsEditor, StringListField, usePermSchema } from "../components/PermsEditor";
 
+type ScrapeConfig = Record<string, string | number | boolean>;
+
+const SCRAPE_FLAG_FIELDS: Array<{ key: string; label: string; type: "text" | "number" | "bool" | "select"; options?: string[] }> = [
+  { key: "engine", label: "Engine", type: "select", options: ["chrome", "google-chrome", "edge", "brave", "camoufox"] },
+  { key: "threads", label: "Threads", type: "number" },
+  { key: "block_resources", label: "Block resources", type: "select", options: ["none", "images", "media", "all"] },
+  { key: "scrape_websites", label: "Scrape websites", type: "select", options: ["yes", "no"] },
+  { key: "max_results", label: "Max results (0=all)", type: "number" },
+  { key: "min_delay", label: "Min delay", type: "number" },
+  { key: "max_delay", label: "Max delay", type: "number" },
+  { key: "cooldown_every", label: "Cooldown every N", type: "number" },
+  { key: "cooldown_min", label: "Cooldown min", type: "number" },
+  { key: "cooldown_max", label: "Cooldown max", type: "number" },
+  { key: "nav_timeout", label: "Nav timeout (s)", type: "number" },
+  { key: "proxy_attempts", label: "Proxy attempts", type: "number" },
+  { key: "browser_path", label: "Browser path (optional)", type: "text" },
+  { key: "preflight_timeout", label: "Preflight timeout", type: "number" },
+  { key: "headless", label: "Headless", type: "bool" },
+  { key: "no_stealth", label: "Disable stealth", type: "bool" },
+  { key: "geoip", label: "GeoIP (Camoufox)", type: "bool" },
+  { key: "no_preflight", label: "Skip preflight", type: "bool" },
+  { key: "fresh", label: "Fresh profile", type: "bool" },
+  { key: "debug", label: "Debug", type: "bool" },
+];
+
+const DEFAULT_SCRAPE_CONFIG: ScrapeConfig = {
+  engine: "chrome",
+  threads: 2,
+  block_resources: "media",
+  scrape_websites: "yes",
+  max_results: 0,
+  min_delay: 2,
+  max_delay: 5,
+  cooldown_every: 25,
+  cooldown_min: 25,
+  cooldown_max: 60,
+  nav_timeout: 45,
+  proxy_attempts: 3,
+  browser_path: "",
+  preflight_timeout: 12,
+  headless: true,
+  no_stealth: false,
+  geoip: false,
+  no_preflight: false,
+  fresh: false,
+  debug: false,
+};
+
+function coerceConfigValue(type: string, raw: string): string | number | boolean {
+  if (type === "bool") return raw === "true" || raw === "1";
+  if (type === "number") {
+    const n = Number(raw);
+    return Number.isFinite(n) ? n : 0;
+  }
+  return raw;
+}
+
+function ScrapeFlagsEditor({
+  value,
+  onChange,
+}: {
+  value: ScrapeConfig;
+  onChange: (next: ScrapeConfig) => void;
+}) {
+  return (
+    <div style={{ display: "grid", gap: "0.65rem", gridTemplateColumns: "repeat(auto-fit,minmax(200px,1fr))", gridColumn: "1 / -1" }}>
+      {SCRAPE_FLAG_FIELDS.map((f) => (
+        <label key={f.key} className="field">
+          {f.label}
+          {f.type === "bool" ? (
+            <select
+              className="input"
+              value={value[f.key] === true || value[f.key] === "true" || value[f.key] === 1 ? "true" : "false"}
+              onChange={(e) => onChange({ ...value, [f.key]: e.target.value === "true" })}
+            >
+              <option value="true">yes</option>
+              <option value="false">no</option>
+            </select>
+          ) : f.type === "select" ? (
+            <select
+              className="input"
+              value={String(value[f.key] ?? "")}
+              onChange={(e) => onChange({ ...value, [f.key]: e.target.value })}
+            >
+              {(f.options || []).map((o) => (
+                <option key={o} value={o}>
+                  {o}
+                </option>
+              ))}
+            </select>
+          ) : (
+            <input
+              className="input"
+              type={f.type === "number" ? "number" : "text"}
+              value={String(value[f.key] ?? "")}
+              onChange={(e) => onChange({ ...value, [f.key]: coerceConfigValue(f.type, e.target.value) })}
+            />
+          )}
+        </label>
+      ))}
+    </div>
+  );
+}
+
 type AdminUser = {
   id: number;
   username: string;
@@ -308,7 +412,8 @@ type PackageRow = {
   headings: string[];
   features: string[];
   dedicated_worker: boolean;
-  scrape_settings_id: number | null;
+  scrape_defaults: ScrapeConfig;
+  chunk_size: number;
   is_active: boolean;
 };
 
@@ -325,27 +430,21 @@ const EMPTY_PKG_FORM = {
   headings: [] as string[],
   features: [] as string[],
   dedicated_worker: false,
-  create_scrape_profile: true,
-  scrape_settings_id: "" as number | "",
+  scrape_defaults: { ...DEFAULT_SCRAPE_CONFIG } as ScrapeConfig,
+  chunk_size: 500,
 };
 
 export function PackagesAdminPage() {
   const { schema } = usePermSchema();
   const engines = schema?.engines || ["chrome", "google-chrome", "edge", "brave", "camoufox"];
   const [packages, setPackages] = useState<PackageRow[]>([]);
-  const [profiles, setProfiles] = useState<Array<{ id: number; name: string }>>([]);
   const [form, setForm] = useState(EMPTY_PKG_FORM);
   const [edit, setEdit] = useState<PackageRow | null>(null);
   const [msg, setMsg] = useState("");
   const [error, setError] = useState("");
 
   async function refresh() {
-    const [pkgs, profs] = await Promise.all([
-      api<PackageRow[]>("/api/packages"),
-      api<Array<{ id: number; name: string }>>("/api/scrape-profiles").catch(() => []),
-    ]);
-    setPackages(pkgs);
-    setProfiles(profs);
+    setPackages(await api<PackageRow[]>("/api/packages"));
   }
   useEffect(() => {
     refresh().catch((e) => setError(e.message));
@@ -373,11 +472,11 @@ export function PackagesAdminPage() {
         headings: form.headings.map((s) => s.trim()).filter(Boolean),
         features: form.features.map((s) => s.trim()).filter(Boolean),
         dedicated_worker: form.dedicated_worker,
-        create_scrape_profile: form.create_scrape_profile && form.scrape_settings_id === "",
+        scrape_defaults: { ...form.scrape_defaults, threads: form.threads },
+        chunk_size: form.chunk_size,
       };
-      if (form.scrape_settings_id !== "") body.scrape_settings_id = Number(form.scrape_settings_id);
       await api("/api/packages", { method: "POST", body: JSON.stringify(body) });
-      setForm(EMPTY_PKG_FORM);
+      setForm({ ...EMPTY_PKG_FORM, scrape_defaults: { ...DEFAULT_SCRAPE_CONFIG } });
       setMsg("Package created.");
       await refresh();
     } catch (err) {
@@ -403,7 +502,8 @@ export function PackagesAdminPage() {
           headings: (edit.headings || []).map((s) => s.trim()).filter(Boolean),
           features: (edit.features || []).map((s) => s.trim()).filter(Boolean),
           dedicated_worker: Boolean(edit.dedicated_worker),
-          scrape_settings_id: edit.scrape_settings_id,
+          scrape_defaults: { ...(edit.scrape_defaults || DEFAULT_SCRAPE_CONFIG), threads: edit.threads },
+          chunk_size: edit.chunk_size || 500,
           is_active: edit.is_active,
         }),
       });
@@ -413,11 +513,6 @@ export function PackagesAdminPage() {
     } catch (err) {
       setError(err instanceof Error ? err.message : "Update failed");
     }
-  }
-
-  function profileName(id: number | null) {
-    if (!id) return "—";
-    return profiles.find((p) => p.id === id)?.name || `#${id}`;
   }
 
   function enginesLabel(ae: string[] | undefined) {
@@ -430,7 +525,10 @@ export function PackagesAdminPage() {
       <div className="page-header">
         <div>
           <h1>Packages</h1>
-          <p className="subtitle">Full subscription packages: limits, engines, scrape profile, headings, and feature list.</p>
+          <p className="subtitle">
+            Subscription packages: limits, engines, default scrape flags (applied on leases before per-worker
+            overrides), headings, and features.
+          </p>
         </div>
       </div>
       <form className="card" onSubmit={create} style={{ display: "grid", gap: "0.6rem", gridTemplateColumns: "repeat(auto-fit,minmax(140px,1fr))" }}>
@@ -455,11 +553,23 @@ export function PackagesAdminPage() {
         </label>
         <label className="field">
           Threads
-          <input className="input" type="number" value={form.threads} onChange={(e) => setForm({ ...form, threads: Number(e.target.value) })} />
+          <input
+            className="input"
+            type="number"
+            value={form.threads}
+            onChange={(e) => {
+              const threads = Number(e.target.value);
+              setForm({ ...form, threads, scrape_defaults: { ...form.scrape_defaults, threads } });
+            }}
+          />
         </label>
         <label className="field">
           Max upload (MB)
           <input className="input" type="number" value={form.max_upload_mb} onChange={(e) => setForm({ ...form, max_upload_mb: Number(e.target.value) })} />
+        </label>
+        <label className="field">
+          Chunk size
+          <input className="input" type="number" min={1} value={form.chunk_size} onChange={(e) => setForm({ ...form, chunk_size: Number(e.target.value) || 500 })} />
         </label>
         <label className="field" style={{ gridColumn: "1 / -1" }}>
           Description
@@ -476,27 +586,13 @@ export function PackagesAdminPage() {
           <input type="checkbox" checked={form.dedicated_worker} onChange={(e) => setForm({ ...form, dedicated_worker: e.target.checked })} />
           Dedicated worker package (subscribers can optionally pin workers; leave empty = all workers)
         </label>
-        <label className="field" style={{ gridColumn: "1 / -1" }}>
-          Scrape profile
-          <select
-            className="input"
-            value={form.scrape_settings_id}
-            onChange={(e) =>
-              setForm({
-                ...form,
-                scrape_settings_id: e.target.value === "" ? "" : Number(e.target.value),
-                create_scrape_profile: e.target.value === "",
-              })
-            }
-          >
-            <option value="">Auto-create new profile from default</option>
-            {profiles.map((p) => (
-              <option key={p.id} value={p.id}>
-                {p.name}
-              </option>
-            ))}
-          </select>
-        </label>
+        <h4 style={{ margin: "0.4rem 0 0", gridColumn: "1 / -1", fontSize: "0.9rem", color: "var(--muted)" }}>
+          Default scrape settings (package → worker → job)
+        </h4>
+        <ScrapeFlagsEditor
+          value={form.scrape_defaults}
+          onChange={(scrape_defaults) => setForm({ ...form, scrape_defaults, threads: Number(scrape_defaults.threads) || form.threads })}
+        />
         <button className="btn" type="submit">
           Create package
         </button>
@@ -515,7 +611,6 @@ export function PackagesAdminPage() {
               <th>Engines</th>
               <th>Dedicated</th>
               <th>Features</th>
-              <th>Scrape profile</th>
               <th>Active</th>
               <th />
             </tr>
@@ -534,7 +629,6 @@ export function PackagesAdminPage() {
                 <td>{enginesLabel(p.allowed_engines)}</td>
                 <td>{p.dedicated_worker ? <span className="badge ok">yes</span> : "—"}</td>
                 <td>{(p.features || []).length || (p.headings || []).length || "—"}</td>
-                <td>{profileName(p.scrape_settings_id)}</td>
                 <td>
                   <span className={`badge ${p.is_active ? "ok" : "danger"}`}>{p.is_active ? "yes" : "no"}</span>
                 </td>
@@ -550,6 +644,8 @@ export function PackagesAdminPage() {
                         features: p.features || [],
                         allowed_engines: p.allowed_engines?.length ? p.allowed_engines : ["all"],
                         dedicated_worker: Boolean(p.dedicated_worker),
+                        scrape_defaults: { ...DEFAULT_SCRAPE_CONFIG, ...(p.scrape_defaults || {}), threads: p.threads },
+                        chunk_size: p.chunk_size || 500,
                       })
                     }
                   >
@@ -593,11 +689,23 @@ export function PackagesAdminPage() {
           </label>
           <label className="field">
             Threads
-            <input className="input" type="number" value={edit.threads} onChange={(e) => setEdit({ ...edit, threads: Number(e.target.value) })} />
+            <input
+              className="input"
+              type="number"
+              value={edit.threads}
+              onChange={(e) => {
+                const threads = Number(e.target.value);
+                setEdit({ ...edit, threads, scrape_defaults: { ...edit.scrape_defaults, threads } });
+              }}
+            />
           </label>
           <label className="field">
             Max upload (MB)
             <input className="input" type="number" value={edit.max_upload_mb} onChange={(e) => setEdit({ ...edit, max_upload_mb: Number(e.target.value) })} />
+          </label>
+          <label className="field">
+            Chunk size
+            <input className="input" type="number" min={1} value={edit.chunk_size || 500} onChange={(e) => setEdit({ ...edit, chunk_size: Number(e.target.value) || 500 })} />
           </label>
           <label className="field" style={{ gridColumn: "1 / -1" }}>
             Description
@@ -614,21 +722,13 @@ export function PackagesAdminPage() {
             <input type="checkbox" checked={Boolean(edit.dedicated_worker)} onChange={(e) => setEdit({ ...edit, dedicated_worker: e.target.checked })} />
             Dedicated worker package (subscribers can optionally pin workers; leave empty = all workers)
           </label>
-          <label className="field" style={{ gridColumn: "1 / -1" }}>
-            Scrape profile
-            <select
-              className="input"
-              value={edit.scrape_settings_id ?? ""}
-              onChange={(e) => setEdit({ ...edit, scrape_settings_id: e.target.value === "" ? null : Number(e.target.value) })}
-            >
-              <option value="">None</option>
-              {profiles.map((p) => (
-                <option key={p.id} value={p.id}>
-                  {p.name}
-                </option>
-              ))}
-            </select>
-          </label>
+          <h4 style={{ margin: "0.4rem 0 0", gridColumn: "1 / -1", fontSize: "0.9rem", color: "var(--muted)" }}>
+            Default scrape settings
+          </h4>
+          <ScrapeFlagsEditor
+            value={edit.scrape_defaults || DEFAULT_SCRAPE_CONFIG}
+            onChange={(scrape_defaults) => setEdit({ ...edit, scrape_defaults, threads: Number(scrape_defaults.threads) || edit.threads })}
+          />
           <label>
             <input type="checkbox" checked={edit.is_active} onChange={(e) => setEdit({ ...edit, is_active: e.target.checked })} /> Active
           </label>
@@ -702,8 +802,6 @@ export function ProxiesAdminPage() {
   );
 }
 
-type WorkerConfig = Record<string, string | number | boolean>;
-
 type WorkerRow = {
   id: number;
   name: string;
@@ -728,51 +826,17 @@ type WorkerRow = {
   active_leases: number;
   proxy_pool_id: number | null;
   proxy_pool_name: string | null;
-  scrape_settings_id: number | null;
-  scrape_settings_name: string | null;
-  worker_config: WorkerConfig;
+  worker_config: ScrapeConfig;
 };
-
-const WORKER_FLAG_FIELDS: Array<{ key: string; label: string; type: "text" | "number" | "bool" | "select"; options?: string[] }> = [
-  { key: "engine", label: "Engine", type: "select", options: ["chrome", "google-chrome", "edge", "brave", "camoufox"] },
-  { key: "threads", label: "Threads", type: "number" },
-  { key: "block_resources", label: "Block resources", type: "select", options: ["none", "images", "media", "all"] },
-  { key: "scrape_websites", label: "Scrape websites", type: "select", options: ["yes", "no"] },
-  { key: "max_results", label: "Max results (0=all)", type: "number" },
-  { key: "min_delay", label: "Min delay", type: "number" },
-  { key: "max_delay", label: "Max delay", type: "number" },
-  { key: "cooldown_every", label: "Cooldown every N", type: "number" },
-  { key: "cooldown_min", label: "Cooldown min", type: "number" },
-  { key: "cooldown_max", label: "Cooldown max", type: "number" },
-  { key: "nav_timeout", label: "Nav timeout (s)", type: "number" },
-  { key: "proxy_attempts", label: "Proxy attempts", type: "number" },
-  { key: "browser_path", label: "Browser path (optional)", type: "text" },
-  { key: "preflight_timeout", label: "Preflight timeout", type: "number" },
-  { key: "headless", label: "Headless", type: "bool" },
-  { key: "no_stealth", label: "Disable stealth", type: "bool" },
-  { key: "geoip", label: "GeoIP (Camoufox)", type: "bool" },
-  { key: "no_preflight", label: "Skip preflight", type: "bool" },
-  { key: "fresh", label: "Fresh profile", type: "bool" },
-  { key: "debug", label: "Debug", type: "bool" },
-];
-
-function coerceConfigValue(type: string, raw: string): string | number | boolean {
-  if (type === "bool") return raw === "true" || raw === "1";
-  if (type === "number") {
-    const n = Number(raw);
-    return Number.isFinite(n) ? n : 0;
-  }
-  return raw;
-}
 
 export function WorkersAdminPage() {
   const [workers, setWorkers] = useState<WorkerRow[]>([]);
   const [pools, setPools] = useState<Array<{ id: number; name: string }>>([]);
-  const [profiles, setProfiles] = useState<Array<{ id: number; name: string }>>([]);
+  const [packages, setPackages] = useState<Array<{ id: number; name: string }>>([]);
   const [name, setName] = useState("");
   const [createBrowsers, setCreateBrowsers] = useState(2);
   const [createPool, setCreatePool] = useState<number | "">("");
-  const [createProfile, setCreateProfile] = useState<number | "">("");
+  const [createPackage, setCreatePackage] = useState<number | "">("");
   const [createdToken, setCreatedToken] = useState("");
   const [hint, setHint] = useState("");
   const [selectedId, setSelectedId] = useState<number | null>(null);
@@ -782,21 +846,20 @@ export function WorkersAdminPage() {
     is_draining: boolean;
     max_browsers: number;
     proxy_pool_id: number | null;
-    scrape_settings_id: number | null;
-    worker_config: WorkerConfig;
+    worker_config: ScrapeConfig;
   } | null>(null);
   const [msg, setMsg] = useState("");
   const [error, setError] = useState("");
 
   async function refresh() {
-    const [w, p, pr] = await Promise.all([
+    const [w, p, pkgs] = await Promise.all([
       api<WorkerRow[]>("/api/workers"),
       api<Array<{ id: number; name: string }>>("/api/proxy-pools"),
-      api<Array<{ id: number; name: string }>>("/api/scrape-profiles").catch(() => []),
+      api<Array<{ id: number; name: string }>>("/api/packages").catch(() => []),
     ]);
     setWorkers(w);
     setPools(p);
-    setProfiles(pr);
+    setPackages(pkgs);
   }
 
   useEffect(() => {
@@ -825,7 +888,6 @@ export function WorkersAdminPage() {
       is_draining: w.is_draining,
       max_browsers: w.max_browsers,
       proxy_pool_id: w.proxy_pool_id,
-      scrape_settings_id: w.scrape_settings_id,
       worker_config: cfg,
     });
   }
@@ -833,15 +895,15 @@ export function WorkersAdminPage() {
   async function create(e: FormEvent) {
     e.preventDefault();
     setError("");
+    const body: Record<string, unknown> = {
+      name,
+      max_browsers: createBrowsers,
+      proxy_pool_id: createPool === "" ? null : createPool,
+    };
+    if (createPackage !== "") body.seed_from_package_id = createPackage;
     const res = await api<{ token: string; install_hint: string; worker: WorkerRow }>("/api/workers", {
       method: "POST",
-      body: JSON.stringify({
-        name,
-        max_browsers: createBrowsers,
-        proxy_pool_id: createPool === "" ? null : createPool,
-        scrape_settings_id: createProfile === "" ? null : createProfile,
-        use_global_scrape_defaults: true,
-      }),
+      body: JSON.stringify(body),
     });
     setCreatedToken(res.token);
     setHint(res.install_hint);
@@ -862,7 +924,6 @@ export function WorkersAdminPage() {
         is_draining: edit.is_draining,
         max_browsers: edit.max_browsers,
         proxy_pool_id: edit.proxy_pool_id,
-        scrape_settings_id: edit.scrape_settings_id,
         worker_config: { ...edit.worker_config },
       };
       await api(`/api/workers/${selectedId}`, { method: "PATCH", body: JSON.stringify(body) });
@@ -873,16 +934,16 @@ export function WorkersAdminPage() {
     }
   }
 
-  async function resetFromGlobal() {
+  async function resetToDefaults() {
     if (!selectedId) return;
     setError("");
     try {
       const w = await api<WorkerRow>(`/api/workers/${selectedId}`, {
         method: "PATCH",
-        body: JSON.stringify({ reset_config_from_global: true }),
+        body: JSON.stringify({ reset_config_to_defaults: true }),
       });
       openEdit(w);
-      setMsg("Worker config reset from assigned scrape profile.");
+      setMsg("Worker config reset to built-in defaults.");
       await refresh();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Reset failed");
@@ -907,8 +968,8 @@ export function WorkersAdminPage() {
         <div>
           <h1>Workers</h1>
           <p className="subtitle">
-            Assign a proxy pool and scrape profile per worker. Fine-tune overrides merge on top of the profile for each
-            lease. 2captcha / CaptchaAI solvers are global under Admin → 2captcha / CaptchaAI.
+            Per-worker scrape flags override package defaults on each lease. Optionally seed a new worker from a
+            package. 2captcha / CaptchaAI solvers are global under Admin → 2captcha / CaptchaAI.
           </p>
         </div>
       </div>
@@ -933,10 +994,10 @@ export function WorkersAdminPage() {
           </select>
         </label>
         <label className="field">
-          Scrape profile
-          <select className="input" value={createProfile} onChange={(e) => setCreateProfile(e.target.value === "" ? "" : Number(e.target.value))}>
-            <option value="">Default profile</option>
-            {profiles.map((p) => (
+          Seed from package (optional)
+          <select className="input" value={createPackage} onChange={(e) => setCreatePackage(e.target.value === "" ? "" : Number(e.target.value))}>
+            <option value="">Built-in defaults</option>
+            {packages.map((p) => (
               <option key={p.id} value={p.id}>
                 {p.name}
               </option>
@@ -971,7 +1032,7 @@ export function WorkersAdminPage() {
               <th>RAM</th>
               <th>Disk</th>
               <th>Host</th>
-              <th>Pool / Profile</th>
+              <th>Pool / Scrape</th>
               <th />
             </tr>
           </thead>
@@ -1032,7 +1093,7 @@ export function WorkersAdminPage() {
                   <td>
                       <code>{w.proxy_pool_name || "—"}</code>
                       <div className="muted" style={{ fontSize: "0.75rem" }}>
-                        {w.scrape_settings_name || "default profile"}
+                        {String(w.worker_config?.engine || "chrome")} · {String(w.worker_config?.threads ?? "—")} thr
                       </div>
                   </td>
                   <td>
@@ -1085,21 +1146,6 @@ export function WorkersAdminPage() {
               </select>
             </label>
             <label>
-              Scrape profile
-              <select
-                className="input"
-                value={edit.scrape_settings_id ?? ""}
-                onChange={(e) => setEdit({ ...edit, scrape_settings_id: e.target.value === "" ? null : Number(e.target.value) })}
-              >
-                <option value="">Default</option>
-                {profiles.map((p) => (
-                  <option key={p.id} value={p.id}>
-                    {p.name}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label>
               Enabled
               <select className="input" value={edit.is_enabled ? "1" : "0"} onChange={(e) => setEdit({ ...edit, is_enabled: e.target.value === "1" })}>
                 <option value="1">yes</option>
@@ -1115,73 +1161,19 @@ export function WorkersAdminPage() {
             </label>
           </div>
 
-          <h3 style={{ margin: "0.4rem 0 0", fontSize: "0.9rem", color: "var(--muted)" }}>Scrape flags (written into worker config)</h3>
-          <div style={{ display: "grid", gap: "0.65rem", gridTemplateColumns: "repeat(auto-fit,minmax(200px,1fr))" }}>
-            {WORKER_FLAG_FIELDS.map((f) => (
-              <label key={f.key}>
-                {f.label}
-                {f.type === "bool" ? (
-                  <select
-                    className="input"
-                    value={
-                      edit.worker_config[f.key] === true ||
-                      edit.worker_config[f.key] === "true" ||
-                      edit.worker_config[f.key] === 1
-                        ? "true"
-                        : "false"
-                    }
-                    onChange={(e) =>
-                      setEdit({
-                        ...edit,
-                        worker_config: { ...edit.worker_config, [f.key]: e.target.value === "true" },
-                      })
-                    }
-                  >
-                    <option value="true">yes</option>
-                    <option value="false">no</option>
-                  </select>
-                ) : f.type === "select" ? (
-                  <select
-                    className="input"
-                    value={String(edit.worker_config[f.key] ?? "")}
-                    onChange={(e) =>
-                      setEdit({
-                        ...edit,
-                        worker_config: { ...edit.worker_config, [f.key]: e.target.value },
-                      })
-                    }
-                  >
-                    {(f.options || []).map((o) => (
-                      <option key={o} value={o}>
-                        {o}
-                      </option>
-                    ))}
-                  </select>
-                ) : (
-                  <input
-                    className="input"
-                    type={f.type === "number" ? "number" : "text"}
-                    value={String(edit.worker_config[f.key] ?? "")}
-                    onChange={(e) =>
-                      setEdit({
-                        ...edit,
-                        worker_config: {
-                          ...edit.worker_config,
-                          [f.key]: coerceConfigValue(f.type, e.target.value),
-                        },
-                      })
-                    }
-                  />
-                )}
-              </label>
-            ))}
-          </div>
+          <h3 style={{ margin: "0.4rem 0 0", fontSize: "0.9rem", color: "var(--muted)" }}>
+            Scrape flags (machine overrides — merge after package defaults)
+          </h3>
+          <ScrapeFlagsEditor
+            value={edit.worker_config}
+            onChange={(worker_config) => setEdit({ ...edit, worker_config })}
+          />
           <div style={{ display: "flex", gap: "0.6rem", flexWrap: "wrap" }}>
             <button className="btn" type="submit">
               Save worker settings
             </button>
-            <button className="btn secondary" type="button" onClick={resetFromGlobal}>
-              Reset from global scrape settings
+            <button className="btn secondary" type="button" onClick={resetToDefaults}>
+              Reset to built-in defaults
             </button>
             <button className="btn secondary" type="button" onClick={rotateToken}>
               Rotate token
@@ -1189,74 +1181,6 @@ export function WorkersAdminPage() {
           </div>
         </form>
       ) : null}
-      <style>{`.stack{display:grid;gap:1rem}h1{margin:0}label{display:grid;gap:.3rem;font-size:.8rem;color:var(--muted)}`}</style>
-    </div>
-  );
-}
-
-export function ScrapeAdminPage() {
-  const [form, setForm] = useState<Record<string, string | number | boolean>>({});
-  const [saved, setSaved] = useState(false);
-
-  const boolKeys = new Set(["headless", "no_stealth", "geoip", "no_preflight", "fresh", "debug"]);
-  const skipKeys = new Set([
-    "captcha_provider",
-    "captcha_key",
-    "captcha_host",
-    "captcha_retries",
-    "captcha_backup_provider",
-    "captcha_backup_key",
-    "captcha_backup_host",
-    "captcha_key_configured",
-    "captcha_backup_key_configured",
-  ]);
-
-  useEffect(() => {
-    api<Record<string, unknown>>("/api/settings/scrape").then((s) => {
-      const next: Record<string, string | number | boolean> = {};
-      Object.entries(s).forEach(([k, v]) => {
-        if (skipKeys.has(k)) return;
-        next[k] = v as string | number | boolean;
-      });
-      setForm(next);
-    });
-  }, []);
-
-  async function save(e: FormEvent) {
-    e.preventDefault();
-    await api("/api/settings/scrape", { method: "PUT", body: JSON.stringify({ ...form }) });
-    setSaved(true);
-  }
-
-  return (
-    <div className="stack">
-      <h1>Scrape settings</h1>
-      <p className="muted">
-        Legacy default-profile editor. Prefer Scrape profiles. 2captcha / CaptchaAI are under Admin →
-        2captcha / CaptchaAI.
-      </p>
-      <form className="card" onSubmit={save} style={{ display: "grid", gap: "0.65rem", gridTemplateColumns: "repeat(auto-fit,minmax(200px,1fr))" }}>
-        {Object.keys(form).map((k) =>
-          boolKeys.has(k) ? (
-            <label key={k}>
-              {k}
-              <select className="input" value={form[k] ? "true" : "false"} onChange={(e) => setForm({ ...form, [k]: e.target.value === "true" })}>
-                <option value="true">yes</option>
-                <option value="false">no</option>
-              </select>
-            </label>
-          ) : (
-            <label key={k}>
-              {k}
-              <input className="input" value={String(form[k] ?? "")} onChange={(e) => setForm({ ...form, [k]: e.target.value })} />
-            </label>
-          ),
-        )}
-        <button className="btn" type="submit">
-          Save
-        </button>
-      </form>
-      {saved ? <p className="muted">Saved.</p> : null}
       <style>{`.stack{display:grid;gap:1rem}h1{margin:0}label{display:grid;gap:.3rem;font-size:.8rem;color:var(--muted)}`}</style>
     </div>
   );

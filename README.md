@@ -185,22 +185,53 @@ scrapeboard/
 | **Windows** | Double-click `install.bat` (or run it from cmd) |
 | **Any (Python)** | `python3 install.py` |
 
-The installer detects the OS, asks **control panel** or **worker**, then launches the right path:
+The installer detects the OS, asks **control panel** or **worker**, then launches the right path. With **`--yes` / `-y`** (or `SCRAPEBOARD_ASSUME_YES=1`) it uses noninteractive defaults after the role is known.
 
 | Choice | Linux | macOS | Windows |
 |--------|-------|-------|---------|
 | **Control panel → production** | `deploy/hestiacp/install.sh` (HestiaCP; root) | Not available — use Linux/Hestia | Not available — use Linux/Hestia |
-| **Control panel → local** | `panel/run.sh --reload` + frontend steps | Same | Backend venv + uvicorn + frontend steps |
-| **Worker** | `worker/setup_and_run.sh` → optional `install_service.sh` | Same (or `.command`) | `worker/setup_and_run.bat` → optional `install_service.bat` |
+| **Control panel → local** | venv + deps + frontend npm/bun; `panel/run.sh` | Same | Backend venv + uvicorn + frontend npm |
+| **Worker** | auto python/venv/deps → wizard → optional service | brew python if needed → same | winget Python if needed → same |
 
-Production panel = HestiaCP + systemd (Linux only). Workers = **background service** (`install_service.*`) after the first-run wizard.
+Production panel = HestiaCP + systemd (Linux only). Workers = **background service** (`install_service.*`) after the first-run wizard (auto-installed when `--yes` and config exists).
+
+### Fully automatic (noninteractive)
+
+Role must be set via `--role` or an existing `.scrapeboard-role`. Worker credentials still need env vars (or an existing `worker_config.json`):
+
+```bash
+# Worker (Linux / macOS)
+export SCRAPEBOARD_PANEL_URL=https://scrape.example
+export SCRAPEBOARD_TOKEN='…'   # Admin → Workers → Create (shown once)
+./install.sh --role worker --yes
+# Optional mesh VPN package only (login still manual):  --tailscale
+
+# Worker (Windows)
+set SCRAPEBOARD_PANEL_URL=https://scrape.example
+set SCRAPEBOARD_TOKEN=...
+install.bat --role worker --yes
+
+# Local panel (any OS) — creates venv, deps, .env secrets; does not start API under --yes
+python3 install.py --role panel --yes
+
+# Hestia production (Linux root, after deploy/config.env exists)
+python3 install.py --role panel --yes
+```
+
+| Still manual | Why |
+|--------------|-----|
+| Worker token / panel URL | Secrets from the panel UI (or set `SCRAPEBOARD_PANEL_URL` + `SCRAPEBOARD_TOKEN`) |
+| `tailscale up` | Browser/admin login — never forced |
+| Hestia domain + DNS | Domain must exist in Hestia; DNS must point at the VPS |
+| Homebrew on macOS | Printed install URL — not silently curled unless you install brew yourself |
+| Admin password / 2FA | Change after first panel login |
 
 ### Prerequisites
 
 | Need | Notes |
 |------|--------|
-| Python **3.10+** | Panel API + worker (`python3` / Windows `py -3`) |
-| Node.js **18+** or Bun | Panel frontend (local) or Bun on VPS via installer |
+| Python **3.10+** | Auto-installed when possible (apt / brew `python@3.12` / winget `Python.Python.3.12`) |
+| Node.js **18+** or Bun | Panel frontend; with `--yes` + privileges, best-effort apt/brew/winget |
 | Outbound HTTPS | Workers → panel; no inbound ports on workers |
 | Browsers | Auto-installed on first worker engine use (Playwright / Brave / …) |
 
@@ -451,11 +482,12 @@ Assign a pool to each worker.
 ### 5. Workers (Admin → Workers)
 
 1. Create worker → set max browsers + optional proxy pool → **copy token once**  
-2. Click **Settings** to edit per-worker scrape flags (engine, threads, delays, headless, …)  
-3. New workers copy **scrape profile** flags into their `worker_config`; you can override per machine  
-4. Flags are sent in every lease and synced into the agent’s local `worker_config.json` (`scrape` key) on heartbeat  
-5. Captcha solvers come from **Admin → Captcha** (global), not per worker/profile  
-6. Optional: drain / disable / rotate token  
+2. Optionally seed scrape flags from a **package** (or use built-in defaults)  
+3. Click **Settings** to edit per-worker scrape flags (engine, threads, delays, headless, …)  
+4. Lease merge order: **package scrape defaults → worker overrides → job settings**; captcha is global  
+5. Flags are sent in every lease and synced into the agent’s local `worker_config.json` (`scrape` key) on heartbeat  
+6. Captcha solvers come from **Admin → Captcha** (global), not per worker/package  
+7. Optional: drain / disable / rotate token  
 
 Install hint (panel shows this when creating a worker):
 
@@ -468,9 +500,10 @@ python agent.py --panel-url https://scrape.cvmso.com --token TOKEN
 #   Windows:     install_service.bat
 ```
 
-### 6. Scrape profiles & 2captcha / CaptchaAI (Admin)
+### 6. Packages & 2captcha / CaptchaAI (Admin)
 
-- **Scrape profiles** — engine, threads, delays, chunk size, headless, etc. Assign to workers and packages.  
+- **Packages** — subscription limits **and** default scrape flags (engine, delays, chunk size, …). Applied as the lease base layer for subscribers on that package.  
+- **Workers** — per-machine overrides on top of package defaults.  
 - **2captcha / CaptchaAI** — global primary + backup solvers. Applied to all job leases.  
 
 ### 7. Bot Builder (Admin → Bot builder)
@@ -634,6 +667,13 @@ GET  /api/billing/public
 
 ## Jobs, proxies & scrape settings
 
+Lease settings merge order for each chunk:
+
+1. **Package** `scrape_defaults` (job owner’s subscription package)  
+2. **Worker** `worker_config` (Admin → Workers machine overrides)  
+3. **Job** settings (engine / threads / websites / max_results from create/edit)  
+4. **Global captcha** (Admin → 2captcha / CaptchaAI) — always wins for `captcha_*` keys  
+
 ### Create a job (panel)
 
 `POST /api/jobs` multipart:
@@ -695,8 +735,6 @@ GET  /api/health
 /api/billing/*
 /api/proxy-pools
 /api/workers
-/api/scrape-profiles
-/api/settings/scrape
 /api/settings/captcha
 /api/settings/security
 /api/bot/settings

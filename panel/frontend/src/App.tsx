@@ -12,7 +12,6 @@ import {
   WorkersAdminPage,
 } from "./pages/AdminPages";
 import { ProxiesAdminPage } from "./pages/ProxyPoolsPage";
-import { ScrapeAdminPage } from "./pages/ScrapeProfilesPage";
 import { CaptchaAdminPage } from "./pages/CaptchaAdminPage";
 
 export default function App() {
@@ -31,7 +30,6 @@ export default function App() {
           <Route path="admin/billing" element={<BillingAdminPage />} />
           <Route path="admin/proxies" element={<ProxiesAdminPage />} />
           <Route path="admin/workers" element={<WorkersAdminPage />} />
-          <Route path="admin/scrape" element={<ScrapeAdminPage />} />
           <Route path="admin/captcha" element={<CaptchaAdminPage />} />
           <Route path="admin/security" element={<SecurityAdminPage />} />
           <Route path="admin/bot" element={<BotBuilderPage />} />
