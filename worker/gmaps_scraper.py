@@ -9,9 +9,10 @@ Reads three plain-text files:
 
 Every keyword is searched against every location. Each (keyword, location)
 pair is a work unit distributed across a thread pool. For every business it
-finds the scraper extracts: name, address, phone, email, website and any
-social-media URLs, then writes that row to the CSV IMMEDIATELY (row-by-row,
-fsync-flushed) so results are never lost if the run is interrupted.
+finds the scraper extracts: name, address, phone, email, website, review
+count, category, latitude/longitude, opening hours, and any social-media
+URLs, then writes that row to the CSV IMMEDIATELY (row-by-row, fsync-flushed)
+so results are never lost if the run is interrupted.
 
 Key features
 ------------
@@ -364,6 +365,7 @@ def install_shutdown_handlers():
 
 CSV_FIELDS = [
     "keyword", "query_location", "name", "address", "phone", "email", "website",
+    "review_count", "category", "latitude", "longitude", "opening_hours",
     "facebook", "instagram", "twitter", "linkedin", "youtube", "tiktok",
     "pinterest", "whatsapp", "telegram", "maps_url",
 ]
@@ -1435,6 +1437,319 @@ def _strip_icon_label(value: str, prefix: str) -> str:
     return v
 
 
+def _digits_only(value: str) -> str:
+    return re.sub(r"[^\d]", "", value or "")
+
+
+def _parse_review_count(text: str) -> str:
+    """Pull an integer review count from aria-label / visible text."""
+    if not text:
+        return ""
+    m = re.search(r"([\d][\d,\.\s]*)\s+reviews?\b", text, re.I)
+    if m:
+        return _digits_only(m.group(1))
+    m = re.search(r"\(([\d][\d,\.\s]*)\)", text)
+    if m:
+        return _digits_only(m.group(1))
+    return ""
+
+
+def _parse_coords_from_url(url: str) -> tuple[str, str]:
+    """Prefer place-pin !3d/!4d; fall back to viewport @lat,lng."""
+    if not url:
+        return "", ""
+    m = re.search(r"!3d(-?\d+(?:\.\d+)?)!4d(-?\d+(?:\.\d+)?)", url)
+    if m:
+        return m.group(1), m.group(2)
+    m = re.search(r"@(-?\d+(?:\.\d+)?),(-?\d+(?:\.\d+)?)", url)
+    if m:
+        return m.group(1), m.group(2)
+    return "", ""
+
+
+# Buttons in the place header that are never the business category.
+_CATEGORY_SKIP = frozenset({
+    "directions", "save", "nearby", "send to phone", "share", "call", "website",
+    "reserve", "order online", "menu", "suggest an edit", "add a photo",
+    "write a review", "reviews", "about", "overview", "photos", "updates",
+})
+
+
+def _extract_review_count(page) -> str:
+    """Review total from the rating row / review-chart control."""
+    for sel in (
+        'div.F7nice span[aria-label*="review" i]',
+        'span[aria-label*="review" i]',
+        'button[aria-label*="review" i]',
+        'button[jsaction*="pane.reviewChart"]',
+        'button[jsaction*="reviewChart"]',
+        'a[href*="/reviews"]',
+    ):
+        try:
+            loc = page.locator(sel).first
+            if loc.count() == 0:
+                continue
+            for raw in (
+                loc.get_attribute("aria-label", timeout=2000) or "",
+                loc.inner_text(timeout=2000) or "",
+            ):
+                n = _parse_review_count(raw)
+                if n:
+                    return n
+        except Exception:
+            continue
+    # Fallback: rating widget text often looks like "4.5(1,234)".
+    try:
+        blob = _text_or_empty(page, "div.F7nice")
+        n = _parse_review_count(blob)
+        if n:
+            return n
+    except Exception:
+        pass
+    return ""
+
+
+def _extract_category(page) -> str:
+    """Primary Google business category from the detail header."""
+    for sel in (
+        'button[jsaction*="pane.rating.category"]',
+        'button[jsaction*="category"]',
+        "button.DkEaL",
+    ):
+        try:
+            loc = page.locator(sel).first
+            if loc.count() == 0:
+                continue
+            text = (loc.inner_text(timeout=2000) or "").strip()
+            if text and text.lower() not in _CATEGORY_SKIP:
+                # Category chips are short; skip long action labels.
+                if len(text) <= 80 and "\n" not in text:
+                    return text
+        except Exception:
+            continue
+    return ""
+
+
+def _normalize_hours_text(text: str) -> str:
+    """Collapse whitespace; join multi-line day rows with ' | '."""
+    if not text:
+        return ""
+    lines = []
+    for raw in text.replace("\r", "\n").split("\n"):
+        line = re.sub(r"\s+", " ", raw).strip()
+        if line:
+            lines.append(line)
+    if not lines:
+        return ""
+    # Prefer day-row join when the panel expanded into a weekly table.
+    day_re = re.compile(
+        r"^(Mon|Tue|Wed|Thu|Fri|Sat|Sun|Monday|Tuesday|Wednesday|"
+        r"Thursday|Friday|Saturday|Sunday)\b",
+        re.I,
+    )
+    day_lines = [ln for ln in lines if day_re.match(ln)]
+    if len(day_lines) >= 2:
+        return " | ".join(day_lines)
+    return " | ".join(lines) if len(lines) > 1 else lines[0]
+
+
+def _extract_opening_hours(page, pacer: Pacer | None = None) -> str:
+    """Weekly hours from the place-panel hours control / table."""
+    # 1) Collapsed summary on the hours button (often "Open ⋅ Closes 6 PM").
+    summary = ""
+    for sel in (
+        'button[data-item-id="oh"]',
+        '[data-item-id="oh"]',
+        'button[aria-label*="Hours" i]',
+        'button[aria-label*="Open" i]',
+        'button[aria-label*="Closed" i]',
+        'div[aria-label*="Hours" i]',
+    ):
+        try:
+            loc = page.locator(sel).first
+            if loc.count() == 0:
+                continue
+            for raw in (
+                loc.get_attribute("aria-label", timeout=2000) or "",
+                loc.inner_text(timeout=2000) or "",
+            ):
+                cleaned = _normalize_hours_text(
+                    _strip_icon_label(_strip_icon_label(raw, "Hours:"), "Hours"))
+                if cleaned and len(cleaned) >= 4:
+                    summary = cleaned
+                    break
+            if summary:
+                break
+        except Exception:
+            continue
+
+    # 2) Expand the hours widget to capture the full Mon–Sun table when present.
+    expanded = ""
+    try:
+        btn = page.locator('button[data-item-id="oh"]').first
+        if btn.count() == 0:
+            btn = page.locator('[data-item-id="oh"]').first
+        if btn.count() > 0:
+            try:
+                btn.click(timeout=2500)
+                wait_ms = pacer.ms(400, 900) if pacer else 600
+                page.wait_for_timeout(wait_ms)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    for sel in (
+        'table[aria-label*="Hours" i] tr',
+        'div[role="tooltip"] table tr',
+        'div.t39EBf table tr',
+        '[data-hide-tooltip-on-mouse-move] table tr',
+    ):
+        try:
+            rows = page.locator(sel)
+            n = min(rows.count(), 14)
+            if n == 0:
+                continue
+            parts = []
+            for i in range(n):
+                try:
+                    t = (rows.nth(i).inner_text(timeout=1500) or "").strip()
+                except Exception:
+                    continue
+                t = _normalize_hours_text(t.replace("\t", " "))
+                if t:
+                    parts.append(t)
+            if len(parts) >= 2:
+                expanded = " | ".join(parts)
+                break
+        except Exception:
+            continue
+
+    if not expanded:
+        # Some layouts render day rows without a <table>.
+        try:
+            blob = page.evaluate(
+                r"""() => {
+                  const days = /^(Mon|Tue|Wed|Thu|Fri|Sat|Sun|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday)\b/i;
+                  const nodes = Array.from(document.querySelectorAll(
+                    'table tr, div[role="tooltip"] div, [data-item-id="oh"] ~ * div, .t39EBf div'));
+                  const lines = [];
+                  for (const el of nodes) {
+                    const t = (el.innerText || '').replace(/\s+/g, ' ').trim();
+                    if (t && days.test(t) && t.length < 80) lines.push(t);
+                  }
+                  return [...new Set(lines)].slice(0, 7).join(' | ');
+                }"""
+            ) or ""
+            blob = str(blob).strip()
+            if blob.count("|") >= 1 or re.search(
+                    r"\b(Mon|Tue|Wed|Thu|Fri|Sat|Sun|Monday)\b", blob, re.I):
+                expanded = blob
+        except Exception:
+            pass
+
+    return expanded or summary
+
+
+def _extract_place_meta_js(page) -> dict:
+    """Best-effort JSON-LD / APP state fill-ins for reviews, category, coords, hours."""
+    try:
+        return page.evaluate(
+            r"""() => {
+              const out = {
+                review_count: '', category: '', latitude: '', longitude: '',
+                opening_hours: ''
+              };
+              const dig = (s) => (s || '').replace(/[^\d]/g, '');
+              const dayName = (d) => String(d || '').split('/').pop();
+
+              const fmtSpec = (specs) => {
+                if (!specs) return '';
+                const arr = Array.isArray(specs) ? specs : [specs];
+                const parts = [];
+                for (const spec of arr) {
+                  if (!spec || typeof spec !== 'object') continue;
+                  let days = spec.dayOfWeek || spec.daysOfWeek || '';
+                  if (Array.isArray(days)) days = days.map(dayName).join(',');
+                  else days = dayName(days);
+                  const opens = spec.opens || '';
+                  const closes = spec.closes || '';
+                  if (days && opens && closes) parts.push(days + ' ' + opens + '-' + closes);
+                  else if (days && (opens || closes)) parts.push((days + ' ' + (opens || closes)).trim());
+                }
+                return parts.join(' | ');
+              };
+
+              const apply = (obj) => {
+                if (!obj || typeof obj !== 'object') return;
+                if (Array.isArray(obj)) { obj.forEach(apply); return; }
+                const ar = obj.aggregateRating || obj.AggregateRating;
+                if (ar && !out.review_count) {
+                  const rc = ar.reviewCount || ar.ratingCount;
+                  if (rc != null) out.review_count = dig(String(rc));
+                }
+                if (!out.category) {
+                  const cat = obj.category || obj.genre || obj['@type'];
+                  if (typeof cat === 'string' && cat && cat !== 'LocalBusiness'
+                      && cat !== 'Organization' && cat !== 'Place') {
+                    out.category = cat.replace(/([a-z])([A-Z])/g, '$1 $2');
+                  } else if (Array.isArray(cat) && cat.length) {
+                    const c = cat.find(x => typeof x === 'string' && x !== 'LocalBusiness') || '';
+                    if (c) out.category = String(c).replace(/([a-z])([A-Z])/g, '$1 $2');
+                  }
+                }
+                const geo = obj.geo || obj.GeoCoordinates;
+                if (geo && !out.latitude) {
+                  if (geo.latitude != null) out.latitude = String(geo.latitude);
+                  if (geo.longitude != null) out.longitude = String(geo.longitude);
+                }
+                if (!out.latitude && obj.latitude != null && obj.longitude != null) {
+                  out.latitude = String(obj.latitude);
+                  out.longitude = String(obj.longitude);
+                }
+                if (!out.opening_hours) {
+                  const oh = obj.openingHours || obj.opening_hours;
+                  if (typeof oh === 'string' && oh.trim()) out.opening_hours = oh.trim();
+                  else if (Array.isArray(oh) && oh.length)
+                    out.opening_hours = oh.map(String).join(' | ');
+                  const spec = obj.openingHoursSpecification;
+                  if (!out.opening_hours && spec) out.opening_hours = fmtSpec(spec);
+                }
+                for (const v of Object.values(obj)) {
+                  if (v && typeof v === 'object') apply(v);
+                }
+              };
+
+              for (const s of document.querySelectorAll('script[type="application/ld+json"]')) {
+                try { apply(JSON.parse(s.textContent)); } catch (e) {}
+              }
+
+              // Rare: embedded init blob may carry place lat/lng / rating counts.
+              try {
+                const scripts = Array.from(document.querySelectorAll('script'))
+                  .map(s => s.textContent || '').filter(t => t.includes('reviewCount')
+                    || t.includes('latitude') || t.includes('APP_INITIALIZATION')
+                    || t.includes('openingHours'));
+                for (const t of scripts.slice(0, 8)) {
+                  if (!out.review_count) {
+                    const m = t.match(/"reviewCount"\s*:\s*"?([\d,]+)"?/i)
+                      || t.match(/"ratingCount"\s*:\s*"?([\d,]+)"?/i);
+                    if (m) out.review_count = dig(m[1]);
+                  }
+                  if (!out.latitude) {
+                    const m = t.match(/!3d(-?\d+(?:\.\d+)?)!4d(-?\d+(?:\.\d+)?)/);
+                    if (m) { out.latitude = m[1]; out.longitude = m[2]; }
+                  }
+                }
+              } catch (e) {}
+
+              return out;
+            }"""
+        ) or {}
+    except Exception:
+        return {}
+
+
 def scrape_place(page, url: str, pacer: Pacer, log) -> dict | None:
     try:
         page.goto(url, timeout=45000, wait_until="commit")
@@ -1466,8 +1781,43 @@ def scrape_place(page, url: str, pacer: Pacer, log) -> dict | None:
     if not website:
         website = _attr_or_empty(page, 'a[aria-label^="Website:"]', "href")
 
-    return {"name": name, "address": address, "phone": phone,
-            "website": website, "maps_url": url}
+    review_count = _extract_review_count(page)
+    category = _extract_category(page)
+    opening_hours = _extract_opening_hours(page, pacer)
+
+    # Final URL after the place panel settles usually has !3d/!4d pin coords.
+    final_url = ""
+    try:
+        final_url = page.url or ""
+    except Exception:
+        final_url = ""
+    latitude, longitude = _parse_coords_from_url(final_url)
+    if not latitude:
+        latitude, longitude = _parse_coords_from_url(url)
+
+    meta = _extract_place_meta_js(page)
+    if not review_count:
+        review_count = (meta.get("review_count") or "").strip()
+    if not category:
+        category = (meta.get("category") or "").strip()
+    if not latitude:
+        latitude = (meta.get("latitude") or "").strip()
+        longitude = (meta.get("longitude") or "").strip()
+    if not opening_hours:
+        opening_hours = (meta.get("opening_hours") or "").strip()
+
+    return {
+        "name": name,
+        "address": address,
+        "phone": phone,
+        "website": website,
+        "review_count": review_count,
+        "category": category,
+        "latitude": latitude,
+        "longitude": longitude,
+        "opening_hours": opening_hours,
+        "maps_url": final_url or url,
+    }
 
 
 # ----------------------------------------------------------------------------

@@ -626,9 +626,19 @@ together. The run's end summary prints the path of every file written.
 
 ### Columns (in every file)
 
-`keyword, query_location, name, address, phone, email, website, facebook,
-instagram, twitter, linkedin, youtube, tiktok, pinterest, whatsapp, telegram,
-maps_url`
+`keyword, query_location, name, address, phone, email, website,
+review_count, category, latitude, longitude, opening_hours, facebook,
+instagram, twitter, linkedin, youtube, tiktok, pinterest, whatsapp,
+telegram, maps_url`
+
+| Column | Source |
+|--------|--------|
+| `review_count` | Place panel rating row (`aria-label` / `(N)` text), else JSON-LD `aggregateRating.reviewCount` |
+| `category` | Category chip under the title (`button[jsaction*="category"]` / `button.DkEaL`), else JSON-LD `@type` |
+| `latitude` / `longitude` | Place URL `!3d…!4d…` (preferred), else `@lat,lng`, else JSON-LD `geo` |
+| `opening_hours` | Hours control (`button[data-item-id="oh"]`) — expanded Mon–Sun table when available, else collapsed summary; else JSON-LD `openingHours` / `openingHoursSpecification` |
+
+Empty when Google does not show the field (new listings, hidden category/hours, etc.).
 
 ## Watching progress
 
@@ -1195,7 +1205,9 @@ without contacting Google.
 - Keep `--threads` ≤ proxy count.
 - Selectors target Google Maps' current DOM (`role="feed"`,
   `data-item-id="address"`, `data-item-id^="phone:tel:"`,
-  `a[data-item-id="authority"]`). Google changes these periodically; if fields
-  come back empty, adjust them in `scrape_place` / `scroll_results`.
+  `a[data-item-id="authority"]`, rating-row review counts, category chip,
+  `data-item-id="oh"` hours). Coordinates come from the settled place URL
+  (`!3d`/`!4d`). Google changes these periodically; if fields come back empty,
+  adjust them in `scrape_place` / `scroll_results`.
 - Respect Google's Terms of Service and applicable law (including how you use
   scraped emails, e.g. GDPR / CAN-SPAM).
