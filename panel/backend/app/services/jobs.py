@@ -57,10 +57,22 @@ async def create_job_from_bytes(
     perms = effective_perms(user)
     if not perms.get("can_run") and user.role != "admin":
         raise PermissionError("No run permission")
+    if not perms.get("can_upload_inputs") and user.role != "admin":
+        raise PermissionError("No upload permission")
 
     sub = await active_subscription(db, user)
     if user.role != "admin" and not sub:
         raise PermissionError("Active subscription required")
+
+    cfg = get_settings()
+    max_mb = 5
+    if user.role == "admin":
+        max_mb = 200
+    elif sub:
+        max_mb = int(getattr(sub, "max_upload_mb", None) or perms.get("max_upload_mb") or 5)
+    max_bytes = max(1, max_mb) * 1024 * 1024
+    if len(kw_bytes) + len(loc_bytes) > max_bytes:
+        raise ValueError(f"Upload exceeds plan limit ({max_mb} MB)")
 
     settings_row = await db.get(ScrapeSettings, 1)
     overrides = overrides or {}

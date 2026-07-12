@@ -26,9 +26,15 @@ async def get_security_settings(db: AsyncSession) -> SecuritySettings:
 
 async def is_locked_out(db: AsyncSession, username: str, ip: str, sec: SecuritySettings) -> bool:
     since = datetime.now(timezone.utc) - timedelta(minutes=sec.lockout_minutes)
+    # Lock by username+IP so one IP cannot lock every account, and credentials
+    # sprayed from many IPs still trip per-IP limits.
     q = await db.execute(
         select(LoginAttempt)
-        .where(LoginAttempt.username == username, LoginAttempt.created_at >= since)
+        .where(
+            LoginAttempt.username == username,
+            LoginAttempt.ip_address == (ip or ""),
+            LoginAttempt.created_at >= since,
+        )
         .order_by(LoginAttempt.created_at.desc())
         .limit(sec.max_login_failures)
     )

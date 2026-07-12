@@ -107,6 +107,7 @@ write_backend_env() {
 
   cat > "${BACKEND_DIR}/.env" <<EOF
 APP_NAME=Scrapeboard
+ENVIRONMENT=production
 SECRET_KEY=${secret}
 DATABASE_URL=sqlite+aiosqlite:///${data_dir}/panel.db
 CORS_ORIGINS=https://${DOMAIN},http://127.0.0.1:${API_PORT}

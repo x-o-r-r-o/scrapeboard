@@ -31,7 +31,7 @@ ROOT = Path(__file__).resolve().parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-VERSION = "0.3.0"
+VERSION = "0.4.0"
 CONFIG_NAME = "worker_config.json"
 HOST_OS = platform.system()  # Windows | Darwin | Linux
 
@@ -125,6 +125,8 @@ def run_setup_wizard(prompt=input) -> dict:
         "default_engine": engine,
         "work_dir": work,
         "skip_setup": False,
+        "max_browsers": 2,
+        "scrape": {},  # filled from panel worker settings on heartbeat
     }
     save_config(cfg)
 
@@ -151,6 +153,16 @@ class PanelClient:
         self.base = base.rstrip("/")
         self.headers = {"Authorization": f"Bearer {token}"}
         self.worker_name = worker_name
+
+    def hello(self):
+        r = self.requests.post(
+            f"{self.base}/api/worker-api/hello",
+            json={"version": VERSION, "name": self.worker_name, "os": HOST_OS},
+            headers=self.headers,
+            timeout=20,
+        )
+        r.raise_for_status()
+        return r.json()
 
     def heartbeat(self):
         cpu, mem = _cpu_mem()
@@ -202,6 +214,54 @@ def _zip_dir(src: Path, dest: Path) -> Path:
 _SETUP_DONE_ENGINES: set[str] = set()
 
 
+def warn_insecure_panel_url(url: str) -> None:
+    u = (url or "").strip().lower()
+    if u.startswith("https://"):
+        return
+    local = "127.0.0.1" in u or "localhost" in u or u.startswith("http://[::1]")
+    if local:
+        print("[worker] panel URL is HTTP localhost (dev only)", flush=True)
+        return
+    print(
+        "[worker] WARNING: panel URL is not HTTPS. Worker tokens and job data "
+        "will travel in cleartext. Use https://scrape.cvmso.com in production.",
+        flush=True,
+    )
+
+
+def sync_local_config_from_panel(hb: dict, config_file: Path | None = None) -> None:
+    """Write panel worker settings into local worker_config.json (scrape + caps)."""
+    scrape = hb.get("worker_config")
+    if not isinstance(scrape, dict):
+        return
+    path = config_file or config_path()
+    cfg: dict = {}
+    if path.exists():
+        try:
+            with open(path, encoding="utf-8") as f:
+                cfg = json.load(f) or {}
+        except Exception:
+            cfg = {}
+    prev = cfg.get("scrape") if isinstance(cfg.get("scrape"), dict) else {}
+    merged = dict(scrape)
+    if not merged.get("captcha_key") and prev.get("captcha_key"):
+        merged["captcha_key"] = prev["captcha_key"]
+    cfg["scrape"] = merged
+    if hb.get("max_browsers") is not None:
+        try:
+            cfg["max_browsers"] = int(hb["max_browsers"])
+        except (TypeError, ValueError):
+            pass
+    if hb.get("name"):
+        cfg["worker_name"] = str(hb["name"])
+    if scrape.get("engine"):
+        cfg["default_engine"] = scrape["engine"]
+    tmp = path.with_suffix(".tmp")
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(cfg, f, indent=2)
+    os.replace(tmp, path)
+
+
 def ensure_engine_ready(settings: dict, force: bool = False, skip: bool = False) -> None:
     """Run the scraper's cross-platform first-run browser/package bootstrap."""
     import gmaps_scraper as gs
@@ -238,6 +298,8 @@ def run_chunk(job: dict, chunk: dict, work_dir: Path, skip_setup: bool = False) 
     args.no_proxy = not bool(proxies_text.strip())
     args.threads = max(1, int(settings.get("threads") or 1))
     args.skip_setup = True  # already ensured above
+    if not settings.get("browser_path"):
+        args.browser_path = None
 
     out_dir = work_dir / "out" / str(chunk["id"])
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -333,6 +395,7 @@ def resolve_runtime(args) -> dict:
         "default_engine": args.engine or cfg.get("default_engine") or "chrome",
         "skip_setup": bool(args.skip_setup or cfg.get("skip_setup")),
         "force_setup": bool(args.force_setup),
+        "config_path": str(cfg_path),
     }
 
 
@@ -370,6 +433,7 @@ def main(argv=None) -> int:
             return 1
 
     client = PanelClient(rt["panel_url"], rt["token"], rt["worker_name"])
+    warn_insecure_panel_url(rt["panel_url"])
     if rt["work_dir"]:
         work_root = Path(rt["work_dir"])
     else:
@@ -382,9 +446,27 @@ def main(argv=None) -> int:
         flush=True,
     )
 
+    try:
+        hello = client.hello()
+        print(
+            f"[worker] connected as id={hello.get('worker_id')} "
+            f"name={hello.get('name')} enabled={hello.get('enabled')}",
+            flush=True,
+        )
+        if not hello.get("enabled", True):
+            print("[worker] panel reports worker disabled — waiting until enabled", flush=True)
+    except Exception as e:
+        print(f"[fatal] cannot connect to panel: {e}", flush=True)
+        print("  Check panel URL, worker token, and that the panel is reachable.", flush=True)
+        return 1
+
     while True:
         try:
             hb = client.heartbeat()
+            try:
+                sync_local_config_from_panel(hb, Path(rt["config_path"]))
+            except Exception as e:
+                print(f"[worker] config sync warning: {e}", flush=True)
             if not hb.get("enabled", True):
                 print("[worker] disabled by panel; sleeping", flush=True)
                 time.sleep(10)
@@ -401,7 +483,9 @@ def main(argv=None) -> int:
             job = lease["job"]
             print(
                 f"[worker] leased job={job['job_id']} chunk={chunk['id']} "
-                f"[{chunk['start']}:{chunk['end']}]",
+                f"[{chunk['start']}:{chunk['end']}] "
+                f"engine={job.get('settings', {}).get('engine')} "
+                f"threads={job.get('settings', {}).get('threads')}",
                 flush=True,
             )
             rows = 0

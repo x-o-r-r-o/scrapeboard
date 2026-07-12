@@ -205,38 +205,213 @@ export function ProxiesAdminPage() {
   );
 }
 
+type WorkerConfig = Record<string, string | number | boolean>;
+
+type WorkerRow = {
+  id: number;
+  name: string;
+  token_prefix: string;
+  online: boolean;
+  is_enabled: boolean;
+  is_draining: boolean;
+  cpu_percent: number;
+  mem_percent: number;
+  max_browsers: number;
+  proxy_pool_id: number | null;
+  worker_config: WorkerConfig;
+};
+
+const WORKER_FLAG_FIELDS: Array<{ key: string; label: string; type: "text" | "number" | "bool" | "select"; options?: string[] }> = [
+  { key: "engine", label: "Engine", type: "select", options: ["chrome", "google-chrome", "edge", "brave", "camoufox"] },
+  { key: "threads", label: "Threads", type: "number" },
+  { key: "block_resources", label: "Block resources", type: "select", options: ["none", "images", "media", "all"] },
+  { key: "scrape_websites", label: "Scrape websites", type: "select", options: ["yes", "no"] },
+  { key: "max_results", label: "Max results (0=all)", type: "number" },
+  { key: "min_delay", label: "Min delay", type: "number" },
+  { key: "max_delay", label: "Max delay", type: "number" },
+  { key: "cooldown_every", label: "Cooldown every N", type: "number" },
+  { key: "cooldown_min", label: "Cooldown min", type: "number" },
+  { key: "cooldown_max", label: "Cooldown max", type: "number" },
+  { key: "captcha_provider", label: "Captcha provider", type: "select", options: ["none", "2captcha", "captchaai"] },
+  { key: "captcha_key", label: "Captcha key (blank=keep)", type: "text" },
+  { key: "captcha_host", label: "Captcha host", type: "text" },
+  { key: "captcha_retries", label: "Captcha retries", type: "number" },
+  { key: "nav_timeout", label: "Nav timeout (s)", type: "number" },
+  { key: "proxy_attempts", label: "Proxy attempts", type: "number" },
+  { key: "browser_path", label: "Browser path (optional)", type: "text" },
+  { key: "preflight_timeout", label: "Preflight timeout", type: "number" },
+  { key: "headless", label: "Headless", type: "bool" },
+  { key: "no_stealth", label: "Disable stealth", type: "bool" },
+  { key: "geoip", label: "GeoIP (Camoufox)", type: "bool" },
+  { key: "no_preflight", label: "Skip preflight", type: "bool" },
+  { key: "fresh", label: "Fresh profile", type: "bool" },
+  { key: "debug", label: "Debug", type: "bool" },
+];
+
+function coerceConfigValue(type: string, raw: string): string | number | boolean {
+  if (type === "bool") return raw === "true" || raw === "1";
+  if (type === "number") {
+    const n = Number(raw);
+    return Number.isFinite(n) ? n : 0;
+  }
+  return raw;
+}
+
 export function WorkersAdminPage() {
-  const [workers, setWorkers] = useState<Array<{ id: number; name: string; token_prefix: string; online: boolean; is_enabled: boolean; is_draining: boolean; cpu_percent: number; mem_percent: number; max_browsers: number }>>([]);
+  const [workers, setWorkers] = useState<WorkerRow[]>([]);
+  const [pools, setPools] = useState<Array<{ id: number; name: string }>>([]);
   const [name, setName] = useState("");
+  const [createBrowsers, setCreateBrowsers] = useState(2);
+  const [createPool, setCreatePool] = useState<number | "">("");
   const [createdToken, setCreatedToken] = useState("");
   const [hint, setHint] = useState("");
+  const [selectedId, setSelectedId] = useState<number | null>(null);
+  const [edit, setEdit] = useState<{
+    name: string;
+    is_enabled: boolean;
+    is_draining: boolean;
+    max_browsers: number;
+    proxy_pool_id: number | null;
+    worker_config: WorkerConfig;
+  } | null>(null);
+  const [msg, setMsg] = useState("");
+  const [error, setError] = useState("");
 
   async function refresh() {
-    setWorkers(await api("/api/workers"));
+    const [w, p] = await Promise.all([
+      api<WorkerRow[]>("/api/workers"),
+      api<Array<{ id: number; name: string }>>("/api/proxy-pools"),
+    ]);
+    setWorkers(w);
+    setPools(p);
+    if (selectedId != null) {
+      const cur = w.find((x) => x.id === selectedId);
+      if (cur && edit) {
+        // keep editing unless selection changed externally
+      }
+    }
   }
+
   useEffect(() => {
-    refresh().catch(() => undefined);
+    refresh().catch((e) => setError(e.message));
     const t = setInterval(() => refresh().catch(() => undefined), 5000);
     return () => clearInterval(t);
   }, []);
 
+  function openEdit(w: WorkerRow) {
+    setSelectedId(w.id);
+    setMsg("");
+    setError("");
+    const cfg = { ...(w.worker_config || {}) };
+    delete cfg.captcha_key_configured;
+    cfg.captcha_key = "";
+    setEdit({
+      name: w.name,
+      is_enabled: w.is_enabled,
+      is_draining: w.is_draining,
+      max_browsers: w.max_browsers,
+      proxy_pool_id: w.proxy_pool_id,
+      worker_config: cfg,
+    });
+  }
+
   async function create(e: FormEvent) {
     e.preventDefault();
-    const res = await api<{ token: string; install_hint: string }>("/api/workers", {
+    setError("");
+    const res = await api<{ token: string; install_hint: string; worker: WorkerRow }>("/api/workers", {
       method: "POST",
-      body: JSON.stringify({ name, max_browsers: 2 }),
+      body: JSON.stringify({
+        name,
+        max_browsers: createBrowsers,
+        proxy_pool_id: createPool === "" ? null : createPool,
+        use_global_scrape_defaults: true,
+      }),
     });
     setCreatedToken(res.token);
     setHint(res.install_hint);
     setName("");
+    await refresh();
+    openEdit(res.worker);
+  }
+
+  async function saveEdit(e: FormEvent) {
+    e.preventDefault();
+    if (!selectedId || !edit) return;
+    setError("");
+    setMsg("");
+    try {
+      const body: Record<string, unknown> = {
+        name: edit.name,
+        is_enabled: edit.is_enabled,
+        is_draining: edit.is_draining,
+        max_browsers: edit.max_browsers,
+        proxy_pool_id: edit.proxy_pool_id,
+        worker_config: { ...edit.worker_config },
+      };
+      const wc = body.worker_config as WorkerConfig;
+      if (!wc.captcha_key) delete wc.captcha_key;
+      await api(`/api/workers/${selectedId}`, { method: "PATCH", body: JSON.stringify(body) });
+      setMsg("Worker settings saved. Online workers pick them up on the next heartbeat/lease.");
+      await refresh();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Save failed");
+    }
+  }
+
+  async function resetFromGlobal() {
+    if (!selectedId) return;
+    setError("");
+    try {
+      const w = await api<WorkerRow>(`/api/workers/${selectedId}`, {
+        method: "PATCH",
+        body: JSON.stringify({ reset_config_from_global: true }),
+      });
+      openEdit(w);
+      setMsg("Worker config reset from global Scrape settings.");
+      await refresh();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Reset failed");
+    }
+  }
+
+  async function rotateToken() {
+    if (!selectedId) return;
+    if (!confirm("Rotate token? The old token stops working immediately.")) return;
+    const res = await api<{ token: string; install_hint: string }>("/api/workers/" + selectedId + "/rotate-token", {
+      method: "POST",
+      body: "{}",
+    });
+    setCreatedToken(res.token);
+    setHint(res.install_hint);
     await refresh();
   }
 
   return (
     <div className="stack">
       <h1>Workers</h1>
-      <form className="card" onSubmit={create} style={{ display: "flex", gap: "0.75rem", flexWrap: "wrap" }}>
-        <input className="input" style={{ maxWidth: 280 }} placeholder="Worker name" value={name} onChange={(e) => setName(e.target.value)} required />
+      <p className="muted">
+        Create workers, assign proxy pools, and set per-worker scrape flags. Those flags are merged into each lease and synced into the agent&apos;s local worker config.
+      </p>
+      <form className="card" onSubmit={create} style={{ display: "flex", gap: "0.75rem", flexWrap: "wrap", alignItems: "end" }}>
+        <label>
+          Name
+          <input className="input" style={{ minWidth: 180 }} placeholder="Worker name" value={name} onChange={(e) => setName(e.target.value)} required />
+        </label>
+        <label>
+          Max browsers
+          <input className="input" type="number" min={1} max={64} style={{ width: 100 }} value={createBrowsers} onChange={(e) => setCreateBrowsers(Number(e.target.value) || 1)} />
+        </label>
+        <label>
+          Proxy pool
+          <select className="input" value={createPool} onChange={(e) => setCreatePool(e.target.value === "" ? "" : Number(e.target.value))}>
+            <option value="">None</option>
+            {pools.map((p) => (
+              <option key={p.id} value={p.id}>
+                {p.name}
+              </option>
+            ))}
+          </select>
+        </label>
         <button className="btn" type="submit">
           Create worker
         </button>
@@ -247,9 +422,13 @@ export function WorkersAdminPage() {
             <strong>Copy this token now</strong> (shown once):
           </p>
           <code>{createdToken}</code>
-          <p className="muted">{hint}</p>
+          <pre className="muted" style={{ whiteSpace: "pre-wrap" }}>
+            {hint}
+          </pre>
         </div>
       ) : null}
+      {error ? <p className="error">{error}</p> : null}
+      {msg ? <p className="muted">{msg}</p> : null}
       <div className="card">
         <table className="table">
           <thead>
@@ -258,12 +437,14 @@ export function WorkersAdminPage() {
               <th>Status</th>
               <th>CPU/Mem</th>
               <th>Browsers</th>
-              <th>Token</th>
+              <th>Pool</th>
+              <th>Engine</th>
+              <th />
             </tr>
           </thead>
           <tbody>
             {workers.map((w) => (
-              <tr key={w.id}>
+              <tr key={w.id} style={{ background: selectedId === w.id ? "color-mix(in srgb, var(--accent) 12%, transparent)" : undefined }}>
                 <td>{w.name}</td>
                 <td>
                   <span className={`badge ${w.online ? "ok" : ""}`}>{w.online ? "online" : "offline"}</span>
@@ -274,29 +455,163 @@ export function WorkersAdminPage() {
                   {w.cpu_percent.toFixed(0)}% / {w.mem_percent.toFixed(0)}%
                 </td>
                 <td>{w.max_browsers}</td>
+                <td>{w.proxy_pool_id ?? "—"}</td>
                 <td>
-                  <code>{w.token_prefix}…</code>
+                  <code>{String(w.worker_config?.engine || "—")}</code>
+                </td>
+                <td>
+                  <button className="btn secondary" type="button" onClick={() => openEdit(w)}>
+                    Settings
+                  </button>
                 </td>
               </tr>
             ))}
           </tbody>
         </table>
       </div>
-      <style>{`.stack{display:grid;gap:1rem}h1{margin:0}`}</style>
+
+      {edit && selectedId != null ? (
+        <form className="card" onSubmit={saveEdit} style={{ display: "grid", gap: "0.85rem" }}>
+          <h2 style={{ margin: 0, fontSize: "1.05rem" }}>Worker settings — #{selectedId}</h2>
+          <div style={{ display: "grid", gap: "0.65rem", gridTemplateColumns: "repeat(auto-fit,minmax(180px,1fr))" }}>
+            <label>
+              Name
+              <input className="input" value={edit.name} onChange={(e) => setEdit({ ...edit, name: e.target.value })} />
+            </label>
+            <label>
+              Max browsers (thread cap)
+              <input
+                className="input"
+                type="number"
+                min={1}
+                max={64}
+                value={edit.max_browsers}
+                onChange={(e) => setEdit({ ...edit, max_browsers: Number(e.target.value) || 1 })}
+              />
+            </label>
+            <label>
+              Proxy pool
+              <select
+                className="input"
+                value={edit.proxy_pool_id ?? ""}
+                onChange={(e) => setEdit({ ...edit, proxy_pool_id: e.target.value === "" ? null : Number(e.target.value) })}
+              >
+                <option value="">None</option>
+                {pools.map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label>
+              Enabled
+              <select className="input" value={edit.is_enabled ? "1" : "0"} onChange={(e) => setEdit({ ...edit, is_enabled: e.target.value === "1" })}>
+                <option value="1">yes</option>
+                <option value="0">no</option>
+              </select>
+            </label>
+            <label>
+              Draining
+              <select className="input" value={edit.is_draining ? "1" : "0"} onChange={(e) => setEdit({ ...edit, is_draining: e.target.value === "1" })}>
+                <option value="0">no</option>
+                <option value="1">yes</option>
+              </select>
+            </label>
+          </div>
+
+          <h3 style={{ margin: "0.4rem 0 0", fontSize: "0.9rem", color: "var(--muted)" }}>Scrape flags (written into worker config)</h3>
+          <div style={{ display: "grid", gap: "0.65rem", gridTemplateColumns: "repeat(auto-fit,minmax(200px,1fr))" }}>
+            {WORKER_FLAG_FIELDS.map((f) => (
+              <label key={f.key}>
+                {f.label}
+                {f.type === "bool" ? (
+                  <select
+                    className="input"
+                    value={
+                      edit.worker_config[f.key] === true ||
+                      edit.worker_config[f.key] === "true" ||
+                      edit.worker_config[f.key] === 1
+                        ? "true"
+                        : "false"
+                    }
+                    onChange={(e) =>
+                      setEdit({
+                        ...edit,
+                        worker_config: { ...edit.worker_config, [f.key]: e.target.value === "true" },
+                      })
+                    }
+                  >
+                    <option value="true">yes</option>
+                    <option value="false">no</option>
+                  </select>
+                ) : f.type === "select" ? (
+                  <select
+                    className="input"
+                    value={String(edit.worker_config[f.key] ?? "")}
+                    onChange={(e) =>
+                      setEdit({
+                        ...edit,
+                        worker_config: { ...edit.worker_config, [f.key]: e.target.value },
+                      })
+                    }
+                  >
+                    {(f.options || []).map((o) => (
+                      <option key={o} value={o}>
+                        {o}
+                      </option>
+                    ))}
+                  </select>
+                ) : (
+                  <input
+                    className="input"
+                    type={f.type === "number" ? "number" : "text"}
+                    value={String(edit.worker_config[f.key] ?? "")}
+                    onChange={(e) =>
+                      setEdit({
+                        ...edit,
+                        worker_config: {
+                          ...edit.worker_config,
+                          [f.key]: coerceConfigValue(f.type, e.target.value),
+                        },
+                      })
+                    }
+                  />
+                )}
+              </label>
+            ))}
+          </div>
+          <div style={{ display: "flex", gap: "0.6rem", flexWrap: "wrap" }}>
+            <button className="btn" type="submit">
+              Save worker settings
+            </button>
+            <button className="btn secondary" type="button" onClick={resetFromGlobal}>
+              Reset from global scrape settings
+            </button>
+            <button className="btn secondary" type="button" onClick={rotateToken}>
+              Rotate token
+            </button>
+          </div>
+        </form>
+      ) : null}
+      <style>{`.stack{display:grid;gap:1rem}h1{margin:0}label{display:grid;gap:.3rem;font-size:.8rem;color:var(--muted)}`}</style>
     </div>
   );
 }
 
 export function ScrapeAdminPage() {
-  const [form, setForm] = useState<Record<string, string | number>>({});
+  const [form, setForm] = useState<Record<string, string | number | boolean>>({});
   const [saved, setSaved] = useState(false);
+  const [captchaKey, setCaptchaKey] = useState("");
+
+  const boolKeys = new Set(["headless", "no_stealth", "geoip", "no_preflight", "fresh", "debug"]);
 
   useEffect(() => {
     api<Record<string, unknown>>("/api/settings/scrape").then((s) => {
-      const next: Record<string, string | number> = {};
+      const next: Record<string, string | number | boolean> = {};
       Object.entries(s).forEach(([k, v]) => {
-        if (typeof v === "boolean") return;
-        next[k] = v as string | number;
+        if (k === "captcha_key_configured") return;
+        next[k] = v as string | number | boolean;
       });
       setForm(next);
     });
@@ -304,26 +619,38 @@ export function ScrapeAdminPage() {
 
   async function save(e: FormEvent) {
     e.preventDefault();
-    const body = { ...form };
-    delete body.captcha_key_configured;
+    const body: Record<string, unknown> = { ...form };
+    if (captchaKey.trim()) body.captcha_key = captchaKey.trim();
     await api("/api/settings/scrape", { method: "PUT", body: JSON.stringify(body) });
     setSaved(true);
+    setCaptchaKey("");
   }
 
   return (
     <div className="stack">
       <h1>Scrape settings</h1>
+      <p className="muted">Global defaults. New workers copy these into their worker config; per-worker Settings can override.</p>
       <form className="card" onSubmit={save} style={{ display: "grid", gap: "0.65rem", gridTemplateColumns: "repeat(auto-fit,minmax(200px,1fr))" }}>
-        {Object.keys(form).map((k) => (
-          <label key={k}>
-            {k}
-            <input
-              className="input"
-              value={form[k] ?? ""}
-              onChange={(e) => setForm({ ...form, [k]: e.target.value })}
-            />
-          </label>
-        ))}
+        {Object.keys(form).map((k) =>
+          boolKeys.has(k) ? (
+            <label key={k}>
+              {k}
+              <select className="input" value={form[k] ? "true" : "false"} onChange={(e) => setForm({ ...form, [k]: e.target.value === "true" })}>
+                <option value="true">yes</option>
+                <option value="false">no</option>
+              </select>
+            </label>
+          ) : (
+            <label key={k}>
+              {k}
+              <input className="input" value={String(form[k] ?? "")} onChange={(e) => setForm({ ...form, [k]: e.target.value })} />
+            </label>
+          ),
+        )}
+        <label>
+          captcha_key (blank = keep)
+          <input className="input" type="password" value={captchaKey} onChange={(e) => setCaptchaKey(e.target.value)} placeholder="••••••" />
+        </label>
         <button className="btn" type="submit">
           Save
         </button>

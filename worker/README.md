@@ -52,6 +52,8 @@ python agent.py                # first run → wizard
 
 Config file: **`worker_config.json`** (gitignored — contains the token).
 
+On each heartbeat the panel pushes effective **worker settings** into this file under `scrape` (engine, threads, delays, headless, captcha, …). Job leases include the same merged settings so scrapes match **Admin → Workers**.
+
 ---
 
 ## Auto browser / package install
@@ -85,6 +87,8 @@ python agent.py --panel-url https://scrape.cvmso.com --token YOUR_TOKEN
 # Local panel during development:
 python agent.py --panel-url http://127.0.0.1:3010 --token YOUR_TOKEN
 ```
+
+On start the agent calls `/api/worker-api/hello` to verify the token, then heartbeats and leases work only for **jobs created by panel users or linked Telegram accounts**. Keep the token secret; rotate it in Admin → Workers if leaked.
 
 Keep it running:
 

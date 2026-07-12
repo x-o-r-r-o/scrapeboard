@@ -156,10 +156,13 @@ scrapeboard/
 | Registration | **Disabled** — admin creates accounts only |
 | 2FA | **Mandatory** TOTP for admin and users |
 | reCAPTCHA | Configure **either** v2 **or** v3 (not both) |
-| Brute force | Lockout after N failures for M minutes |
-| Workers | Per-worker bearer token over HTTPS |
+| Brute force | Lockout after N failures for M minutes (**per username+IP**) |
+| Workers | Per-worker bearer token; SHA-256 indexed lookup; lease ownership enforced |
+| Worker jobs | Only panel users / linked Telegram accounts can enqueue work |
+| Worker uploads | Size-capped; CSV-only safe zip extract (no Zip Slip) |
 | Billing | Public wallet only; TxID replay protection; rate-limited `/paid` |
 | Jobs/files | Ownership checks; users cannot see others’ data |
+| Production | Refuses default `SECRET_KEY` / weak bootstrap password when `ENVIRONMENT=production` or HTTPS `PUBLIC_URL` |
 | Secrets | `.env` / `config.env` / `worker_config.json` never committed |
 
 ---
@@ -354,16 +357,20 @@ Assign a pool to each worker.
 
 ### 5. Workers (Admin → Workers)
 
-1. Create worker → **copy token once**  
-2. Install hint from the panel:
+1. Create worker → set max browsers + optional proxy pool → **copy token once**  
+2. Click **Settings** to edit per-worker scrape flags (engine, threads, delays, headless, captcha, …)  
+3. New workers copy **global Scrape settings** into their `worker_config`; you can override per machine  
+4. Flags are sent in every lease and synced into the agent’s local `worker_config.json` (`scrape` key) on heartbeat  
+5. Threads are capped by **max browsers**  
+6. Optional: drain / disable / rotate token  
+
+Install hint:
 
 ```bash
 python agent.py --setup
 # or:
 python agent.py --panel-url https://scrape.cvmso.com --token TOKEN
 ```
-
-3. Optional: set max browsers, assign proxy pool, drain/disable  
 
 ### 6. Scrape settings (Admin → Scrape settings)
 

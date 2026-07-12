@@ -186,6 +186,35 @@ class ProxyPoolUpdate(BaseModel):
     is_active: bool | None = None
 
 
+class WorkerConfigUpdate(BaseModel):
+    """Per-worker scrape flags. Omitted/null fields are left unchanged on PATCH."""
+
+    engine: str | None = None
+    threads: int | None = None
+    block_resources: str | None = None
+    scrape_websites: str | None = None
+    max_results: int | None = None
+    min_delay: float | None = None
+    max_delay: float | None = None
+    cooldown_every: int | None = None
+    cooldown_min: float | None = None
+    cooldown_max: float | None = None
+    captcha_provider: str | None = None
+    captcha_key: str | None = None
+    captcha_host: str | None = None
+    captcha_retries: int | None = None
+    nav_timeout: int | None = None
+    proxy_attempts: int | None = None
+    headless: bool | None = None
+    no_stealth: bool | None = None
+    browser_path: str | None = None
+    geoip: bool | None = None
+    preflight_timeout: float | None = None
+    no_preflight: bool | None = None
+    fresh: bool | None = None
+    debug: bool | None = None
+
+
 class WorkerOut(BaseModel):
     id: int
     name: str
@@ -199,6 +228,7 @@ class WorkerOut(BaseModel):
     mem_percent: float
     version: str
     online: bool = False
+    worker_config: dict = {}
 
     model_config = {"from_attributes": True}
 
@@ -207,6 +237,9 @@ class WorkerCreate(BaseModel):
     name: str
     max_browsers: int = 2
     proxy_pool_id: int | None = None
+    # If omitted, seeded from global Scrape settings
+    worker_config: WorkerConfigUpdate | None = None
+    use_global_scrape_defaults: bool = True
 
 
 class WorkerCreateResponse(BaseModel):
@@ -221,6 +254,9 @@ class WorkerUpdate(BaseModel):
     is_draining: bool | None = None
     max_browsers: int | None = None
     proxy_pool_id: int | None = None
+    worker_config: WorkerConfigUpdate | None = None
+    # When true, replace worker_config from current global Scrape settings
+    reset_config_from_global: bool = False
 
 
 class ScrapeSettingsOut(BaseModel):
@@ -241,6 +277,14 @@ class ScrapeSettingsOut(BaseModel):
     captcha_retries: int
     nav_timeout: int
     proxy_attempts: int
+    headless: bool = True
+    no_stealth: bool = False
+    browser_path: str = ""
+    geoip: bool = False
+    preflight_timeout: float = 12.0
+    no_preflight: bool = False
+    fresh: bool = False
+    debug: bool = False
 
 
 class ScrapeSettingsUpdate(BaseModel):
@@ -261,6 +305,14 @@ class ScrapeSettingsUpdate(BaseModel):
     captcha_retries: int | None = None
     nav_timeout: int | None = None
     proxy_attempts: int | None = None
+    headless: bool | None = None
+    no_stealth: bool | None = None
+    browser_path: str | None = None
+    geoip: bool | None = None
+    preflight_timeout: float | None = None
+    no_preflight: bool | None = None
+    fresh: bool | None = None
+    debug: bool | None = None
 
 
 class JobOut(BaseModel):

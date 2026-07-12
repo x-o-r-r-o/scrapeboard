@@ -157,6 +157,8 @@ class WorkerNode(Base):
     name: Mapped[str] = mapped_column(String(128), unique=True)
     token_hash: Mapped[str] = mapped_column(String(255))
     token_prefix: Mapped[str] = mapped_column(String(16), default="")
+    # SHA-256 hex of raw token for O(1) auth (not a substitute for rotating leaked tokens)
+    token_lookup: Mapped[str] = mapped_column(String(64), default="", index=True)
     is_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     is_draining: Mapped[bool] = mapped_column(Boolean, default=False)
     max_browsers: Mapped[int] = mapped_column(Integer, default=2)
@@ -165,6 +167,8 @@ class WorkerNode(Base):
     cpu_percent: Mapped[float] = mapped_column(Float, default=0)
     mem_percent: Mapped[float] = mapped_column(Float, default=0)
     version: Mapped[str] = mapped_column(String(64), default="")
+    # Per-worker scrape flags (engine, delays, headless, …). Merged into lease settings.
+    worker_config: Mapped[dict] = mapped_column(JSON, default=dict)
     meta: Mapped[dict] = mapped_column(JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
@@ -192,6 +196,15 @@ class ScrapeSettings(Base):
     captcha_retries: Mapped[int] = mapped_column(Integer, default=2)
     nav_timeout: Mapped[int] = mapped_column(Integer, default=45)
     proxy_attempts: Mapped[int] = mapped_column(Integer, default=3)
+    # Extra scrape/worker flags (defaults for new workers + lease fallback)
+    headless: Mapped[bool] = mapped_column(Boolean, default=True)
+    no_stealth: Mapped[bool] = mapped_column(Boolean, default=False)
+    browser_path: Mapped[str] = mapped_column(String(512), default="")
+    geoip: Mapped[bool] = mapped_column(Boolean, default=False)
+    preflight_timeout: Mapped[float] = mapped_column(Float, default=12.0)
+    no_preflight: Mapped[bool] = mapped_column(Boolean, default=False)
+    fresh: Mapped[bool] = mapped_column(Boolean, default=False)
+    debug: Mapped[bool] = mapped_column(Boolean, default=False)
 
 
 class Job(Base):
