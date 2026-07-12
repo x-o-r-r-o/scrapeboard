@@ -10,8 +10,17 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import require_admin, require_ready_user
 from app.core.config import get_settings
 from app.core.database import get_db
-from app.models import Job, User
-from app.schemas import JobFileEntry, JobFilesOut, JobOut, MessageOut, StorageOwnerOut
+from app.models import Job, JobChunk, User, WorkerNode
+from app.schemas import (
+    JobFileEntry,
+    JobFilesOut,
+    JobOut,
+    JobUpdate,
+    JobWorkerLeaseOut,
+    MessageOut,
+    StorageOwnerOut,
+    ThreadQuotaOut,
+)
 from app.services import jobs as jobs_svc
 from app.services.notify import notify_user_telegram
 from app.services.perms import effective_perms
@@ -35,10 +44,74 @@ def _result_meta(j: Job) -> tuple[bool, int | None]:
     return False, None
 
 
-async def _job_out(db: AsyncSession, j: Job) -> JobOut:
+def _worker_online(w: WorkerNode | None) -> bool:
+    if not w or not w.last_seen_at:
+        return False
+    seen = w.last_seen_at
+    if seen.tzinfo is None:
+        seen = seen.replace(tzinfo=timezone.utc)
+    return (datetime.now(timezone.utc) - seen).total_seconds() < 90
+
+
+async def _job_out(db: AsyncSession, j: Job, *, viewer: User | None = None) -> JobOut:
     pct = 100.0 * j.done_searches / j.total_searches if j.total_searches else 0.0
     owner = await db.get(User, j.owner_id)
     exists, size = _result_meta(j)
+    threads = jobs_svc.job_thread_count(j)
+    waiting = False
+    if j.status == "queued" and owner:
+        free = await jobs_svc.free_thread_slots(db, owner)
+        waiting = threads > free
+
+    chunks_pending = chunks_leased = chunks_done = None
+    workers_out: list[JobWorkerLeaseOut] | None = None
+    if viewer and viewer.role == "admin":
+        pending = int(
+            (
+                await db.execute(
+                    select(func.count()).select_from(JobChunk).where(JobChunk.job_id == j.id, JobChunk.state == "pending")
+                )
+            ).scalar_one()
+            or 0
+        )
+        leased = int(
+            (
+                await db.execute(
+                    select(func.count()).select_from(JobChunk).where(JobChunk.job_id == j.id, JobChunk.state == "leased")
+                )
+            ).scalar_one()
+            or 0
+        )
+        done = int(
+            (
+                await db.execute(
+                    select(func.count()).select_from(JobChunk).where(JobChunk.job_id == j.id, JobChunk.state == "done")
+                )
+            ).scalar_one()
+            or 0
+        )
+        chunks_pending, chunks_leased, chunks_done = pending, leased, done
+
+        # Active workers holding leases for this job
+        lease_rows = (
+            await db.execute(
+                select(JobChunk.worker_id, func.count())
+                .where(JobChunk.job_id == j.id, JobChunk.state == "leased", JobChunk.worker_id.is_not(None))
+                .group_by(JobChunk.worker_id)
+            )
+        ).all()
+        workers_out = []
+        for wid, cnt in lease_rows:
+            w = await db.get(WorkerNode, int(wid))
+            workers_out.append(
+                JobWorkerLeaseOut(
+                    worker_id=int(wid),
+                    worker_name=w.name if w else f"#{wid}",
+                    leased_chunks=int(cnt),
+                    online=_worker_online(w),
+                )
+            )
+
     return JobOut(
         id=j.id,
         public_id=j.public_id,
@@ -47,6 +120,7 @@ async def _job_out(db: AsyncSession, j: Job) -> JobOut:
         owner_telegram_id=owner.telegram_id if owner else None,
         status=j.status,
         settings=j.settings or {},
+        threads=threads,
         total_searches=j.total_searches,
         done_searches=j.done_searches,
         rows_saved=j.rows_saved,
@@ -58,6 +132,11 @@ async def _job_out(db: AsyncSession, j: Job) -> JobOut:
         started_at=j.started_at,
         finished_at=j.finished_at,
         pct=pct,
+        waiting_for_threads=waiting,
+        chunks_pending=chunks_pending,
+        chunks_leased=chunks_leased,
+        chunks_done=chunks_done,
+        workers=workers_out,
     )
 
 
@@ -98,7 +177,13 @@ async def list_jobs(
     if q:
         query = query.where(Job.public_id.contains(q))
     rows = (await db.execute(query)).scalars().all()
-    return [await _job_out(db, j) for j in rows]
+    return [await _job_out(db, j, viewer=user) for j in rows]
+
+
+@router.get("/quota", response_model=ThreadQuotaOut)
+async def job_thread_quota(user: User = Depends(require_ready_user), db: AsyncSession = Depends(get_db)):
+    snap = await jobs_svc.thread_quota_snapshot(db, user)
+    return ThreadQuotaOut(**snap)
 
 
 @router.get("/admin/storage", response_model=list[StorageOwnerOut])
@@ -145,7 +230,7 @@ async def get_job(job_id: int, user: User = Depends(require_ready_user), db: Asy
         raise HTTPException(404, "Not found")
     if user.role != "admin" and j.owner_id != user.id:
         raise HTTPException(403, "Forbidden")
-    return await _job_out(db, j)
+    return await _job_out(db, j, viewer=user)
 
 
 @router.post("", response_model=JobOut)
@@ -180,27 +265,52 @@ async def create_job(
         raise HTTPException(403, str(e)) from e
     except ValueError as e:
         raise HTTPException(400, str(e)) from e
-    return await _job_out(db, job)
+    return await _job_out(db, job, viewer=user)
 
 
-@router.post("/{job_id}/stop", response_model=JobOut)
-async def stop_job(job_id: int, user: User = Depends(require_ready_user), db: AsyncSession = Depends(get_db)):
-    perms = effective_perms(user)
-    if not perms.get("can_stop") and user.role != "admin":
-        raise HTTPException(403, "No stop permission")
+@router.patch("/{job_id}", response_model=JobOut)
+async def update_job(
+    job_id: int,
+    body: JobUpdate,
+    user: User = Depends(require_ready_user),
+    db: AsyncSession = Depends(get_db),
+):
     j = await db.get(Job, job_id)
     if not j:
         raise HTTPException(404, "Not found")
     if user.role != "admin" and j.owner_id != user.id:
         raise HTTPException(403, "Forbidden")
-    if j.status in ("queued", "running"):
-        zip_path = await jobs_svc.finalize_job(db, j, cancelled=True)
-        owner = await db.get(User, j.owner_id)
-        if owner:
-            msg = f"⏹ Job {j.public_id} stopped. Rows so far: {j.rows_saved}."
-            await notify_user_telegram(db, owner, msg, Path(zip_path) if zip_path else None)
-        await db.refresh(j)
-    return await _job_out(db, j)
+    try:
+        j = await jobs_svc.update_queued_job_settings(
+            db, j, threads=body.threads, engine=body.engine
+        )
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+    return await _job_out(db, j, viewer=user)
+
+
+@router.post("/{job_id}/stop", response_model=JobOut)
+async def stop_job(
+    job_id: int,
+    _: User = Depends(require_admin),
+    user: User = Depends(require_ready_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Admin-only panel stop. Users cancel their own jobs via Telegram /stop."""
+    j = await db.get(Job, job_id)
+    if not j:
+        raise HTTPException(404, "Not found")
+    if j.status not in ("queued", "running"):
+        raise HTTPException(400, f"Job is already {j.status}")
+    zip_path = await jobs_svc.finalize_job(db, j, cancelled=True)
+    owner = await db.get(User, j.owner_id)
+    if owner:
+        by_admin = j.owner_id != user.id
+        who = " by admin" if by_admin else ""
+        msg = f"⏹ Job {j.public_id} stopped{who}. Rows so far: {j.rows_saved}."
+        await notify_user_telegram(db, owner, msg, Path(zip_path) if zip_path else None)
+    await db.refresh(j)
+    return await _job_out(db, j, viewer=user)
 
 
 @router.get("/{job_id}/download")

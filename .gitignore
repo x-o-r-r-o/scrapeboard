@@ -14,6 +14,8 @@ panel/data/
 **/*.db
 **/*.db-*
 worker/logs/
+worker/work/
+worker/run_service.cmd
 worker/results/
 worker/test_out/
 worker/test_results.csv

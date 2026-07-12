@@ -187,7 +187,11 @@ def _install_hint(token: str) -> str:
     return (
         "python agent.py --setup\n"
         "# or:\n"
-        f"python agent.py --panel-url https://scrape.cvmso.com --token {token}"
+        f"python agent.py --panel-url https://scrape.cvmso.com --token {token}\n"
+        "\n"
+        "# After config exists, install as a background service (starts at login):\n"
+        "#   macOS/Linux:  bash install_service.sh\n"
+        "#   Windows:      install_service.bat"
     )
 
 
@@ -743,16 +747,16 @@ async def worker_lease(
                     continue
                 if status == "running" and not await _has_pending(cand.id):
                     continue
+                # Shared per-user thread quota: queued jobs wait until free threads cover them
+                if status == "queued" and not await jobs_svc.can_start_job(db, cand):
+                    continue
                 if cand.owner_id in busy_owners:
                     secondary.append(cand)
                 else:
                     primary.append(cand)
         for cand in primary + secondary:
-            if cand.status == "queued":
-                cand.status = "running"
-                cand.started_at = datetime.now(timezone.utc)
-                await db.commit()
-                await db.refresh(cand)
+            # Do not promote queued→running here — only after a chunk is claimed,
+            # so thread quota is not held without work.
             return cand
         return None
 
@@ -794,11 +798,20 @@ async def worker_lease(
     await db.refresh(job)
     if job.status == "stopped":
         return {"chunk": None}
+    # Queued jobs must still fit thread quota at claim time
+    if job.status == "queued" and not await jobs_svc.can_start_job(db, job):
+        return {"chunk": None}
 
     # Atomic claim: only one worker wins the pending → leased transition
     claimed: JobChunk | None = None
     tried: set[int] = set()
     for _ in range(8):
+        if job.status == "queued" and not await jobs_svc.can_start_job(db, job):
+            tried.add(job.id)
+            job = await _next_job(skip_ids=tried)
+            if not job:
+                return {"chunk": None}
+            continue
         candidate = (
             await db.execute(
                 select(JobChunk)
@@ -825,6 +838,37 @@ async def worker_lease(
             break
     if not claimed:
         return {"chunk": None}
+
+    # Promote queued → running only after a successful claim (thread quota consumed now)
+    await db.refresh(job)
+    if job.status == "queued":
+        if not await jobs_svc.can_start_job(db, job):
+            # Lost race on quota — release the chunk and leave job queued
+            claimed.state = "pending"
+            claimed.worker_id = None
+            claimed.leased_at = None
+            await db.commit()
+            return {"chunk": None}
+        job.status = "running"
+        job.started_at = datetime.now(timezone.utc)
+        settings = dict(job.settings or {})
+        settings.pop("queued_for_threads", None)
+        job.settings = settings
+        await db.commit()
+        await db.refresh(job)
+        # Final oversubscribe check
+        owner = await db.get(User, job.owner_id)
+        if owner:
+            used = await jobs_svc.sum_running_threads(db, job.owner_id)
+            allowance = await jobs_svc.user_thread_allowance(db, owner)
+            if used > allowance:
+                job.status = "queued"
+                job.started_at = None
+                claimed.state = "pending"
+                claimed.worker_id = None
+                claimed.leased_at = None
+                await db.commit()
+                return {"chunk": None}
 
     scrape = await resolve_scrape_for_worker(db, w)
     proxies_text = ""

@@ -11,6 +11,9 @@ Usage:
   python agent.py --setup                 # re-run wizard
   python agent.py --panel-url URL --token TOKEN
   python agent.py --selftest              # verify browser stack (no panel)
+  python agent.py --service               # background service (log + stable work dir)
+  bash install_service.sh                 # macOS/Linux: install at login
+  install_service.bat                     # Windows: Scheduled Task at logon
 """
 
 from __future__ import annotations
@@ -31,9 +34,10 @@ ROOT = Path(__file__).resolve().parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-VERSION = "0.6.0"
+VERSION = "0.7.0"
 CONFIG_NAME = "worker_config.json"
 HOST_OS = platform.system()  # Windows | Darwin | Linux
+SERVICE_NAME = "scrapeboard-worker"
 
 
 # ---------------------------------------------------------------------------
@@ -132,7 +136,11 @@ def run_setup_wizard(prompt=input) -> dict:
 
     print(flush=True)
     print("Next: dependencies + browser will auto-install on first job / --selftest.", flush=True)
-    print(f"Start with:  {sys.executable} agent.py", flush=True)
+    print(f"Start (foreground):  {sys.executable} agent.py", flush=True)
+    if HOST_OS == "Windows":
+        print("Background service:   install_service.bat", flush=True)
+    else:
+        print("Background service:   bash install_service.sh", flush=True)
     print("=" * 62, flush=True)
     return cfg
 
@@ -416,7 +424,29 @@ def parse_cli(argv=None):
     p.add_argument("--engine", default="", help="Engine for --selftest / first bootstrap")
     p.add_argument("--skip-setup", action="store_true", help="Do not auto-install browsers/deps")
     p.add_argument("--force-setup", action="store_true", help="Re-run browser/deps install")
+    p.add_argument(
+        "--service",
+        action="store_true",
+        help="Background/service mode: log to logs/worker.log, stable work dir under worker/",
+    )
+    p.add_argument("--log-file", default="", help="Override log path (implies --service logging)")
     return p.parse_args(argv)
+
+
+def setup_service_logging(log_file: Path) -> None:
+    """Redirect stdout/stderr to a rotating-friendly append log for headless runs."""
+    log_file.parent.mkdir(parents=True, exist_ok=True)
+    # Line-buffered text log so operators can `tail -f`
+    stream = open(log_file, "a", encoding="utf-8", buffering=1)  # noqa: SIM115
+    sys.stdout = stream  # type: ignore[assignment]
+    sys.stderr = stream  # type: ignore[assignment]
+    print(f"\n========== scrapeboard worker v{VERSION} start {time.strftime('%Y-%m-%d %H:%M:%S')} ==========", flush=True)
+
+
+def default_service_paths() -> dict[str, Path]:
+    logs = ROOT / "logs"
+    work = ROOT / "work"
+    return {"logs": logs, "work": work, "log_file": logs / "worker.log"}
 
 
 def resolve_runtime(args) -> dict:
@@ -479,8 +509,15 @@ def main(argv=None) -> int:
         print(f"[worker] selftest engine={engine} os={HOST_OS}", flush=True)
         return run_selftest(engine, force_setup=args.force_setup)
 
-    # If --setup alone and config will be written, resolve_runtime runs wizard
+    # Resolve config / wizard before redirecting stdout (wizard needs a TTY)
     rt = resolve_runtime(args)
+
+    paths = default_service_paths()
+    if args.service or args.log_file:
+        log_path = Path(args.log_file) if args.log_file else paths["log_file"]
+        setup_service_logging(log_path)
+    if args.service:
+        print(f"[worker] service mode ({SERVICE_NAME})", flush=True)
 
     import gmaps_scraper as gs
 
@@ -502,6 +539,8 @@ def main(argv=None) -> int:
     warn_insecure_panel_url(rt["panel_url"])
     if rt["work_dir"]:
         work_root = Path(rt["work_dir"])
+    elif args.service:
+        work_root = paths["work"]
     else:
         work_root = Path(tempfile.mkdtemp(prefix="scrapeboard_worker_"))
     work_root.mkdir(parents=True, exist_ok=True)

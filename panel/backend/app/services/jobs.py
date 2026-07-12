@@ -23,6 +23,71 @@ def utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def job_thread_count(job: Job) -> int:
+    """Threads requested/consumed by a job (from settings JSON)."""
+    try:
+        return max(1, int((job.settings or {}).get("threads") or 1))
+    except (TypeError, ValueError):
+        return 1
+
+
+async def user_thread_allowance(db: AsyncSession, user: User) -> int:
+    """Max concurrent browser threads this user may run across all jobs."""
+    perms = effective_perms(user)
+    cap = int(perms.get("max_threads") or DEFAULT_USER_PERMS["max_threads"])
+    if user.role == "admin":
+        return max(1, cap)
+    sub = await active_subscription(db, user)
+    if sub:
+        cap = min(cap, int(sub.threads or cap))
+    return max(1, cap)
+
+
+async def sum_running_threads(
+    db: AsyncSession,
+    owner_id: int,
+    *,
+    exclude_job_id: int | None = None,
+) -> int:
+    """Sum of settings.threads for this owner's currently running jobs."""
+    rows = (
+        await db.execute(select(Job).where(Job.owner_id == owner_id, Job.status == "running"))
+    ).scalars().all()
+    total = 0
+    for j in rows:
+        if exclude_job_id is not None and j.id == exclude_job_id:
+            continue
+        total += job_thread_count(j)
+    return total
+
+
+async def free_thread_slots(db: AsyncSession, user: User) -> int:
+    allowance = await user_thread_allowance(db, user)
+    used = await sum_running_threads(db, user.id)
+    return max(0, allowance - used)
+
+
+async def can_start_job(db: AsyncSession, job: Job) -> bool:
+    """True if promoting this queued job would stay within the owner's thread quota."""
+    owner = await db.get(User, job.owner_id)
+    if not owner:
+        return False
+    need = job_thread_count(job)
+    used = await sum_running_threads(db, job.owner_id, exclude_job_id=job.id if job.status == "running" else None)
+    allowance = await user_thread_allowance(db, owner)
+    return used + need <= allowance
+
+
+async def thread_quota_snapshot(db: AsyncSession, user: User) -> dict:
+    allowance = await user_thread_allowance(db, user)
+    used = await sum_running_threads(db, user.id)
+    return {
+        "thread_allowance": allowance,
+        "threads_in_use": used,
+        "threads_free": max(0, allowance - used),
+    }
+
+
 def owner_id_from_public_id(public_id: str) -> int | None:
     """public_id is `{user_id}_{timestamp}_{hex}`."""
     try:
@@ -111,10 +176,17 @@ async def create_job_from_bytes(
         ),
     }
 
-    thread_cap = int(perms.get("max_threads") or DEFAULT_USER_PERMS["max_threads"])
-    if user.role != "admin" and sub:
-        thread_cap = min(thread_cap, sub.threads)
-    settings["threads"] = min(int(settings["threads"]), thread_cap)
+    thread_cap = await user_thread_allowance(db, user)
+    requested = max(1, int(settings["threads"]))
+    if requested > thread_cap:
+        raise ValueError(
+            f"Threads ({requested}) exceed your allowance ({thread_cap}). "
+            f"Lower threads or wait for running jobs to free capacity."
+        )
+    settings["threads"] = requested
+    # Jobs always start queued; lease promotes only when free threads cover this job.
+    free = await free_thread_slots(db, user)
+    settings["queued_for_threads"] = requested > free
 
     ae = package_engines if package_engines else perms.get("allowed_engines", "all")
     if ae and ae != "all" and settings["engine"] not in ae and user.role != "admin":
@@ -169,6 +241,37 @@ async def create_job_from_bytes(
         )
         cid += 1
 
+    await db.commit()
+    await db.refresh(job)
+    return job
+
+
+async def update_queued_job_settings(
+    db: AsyncSession,
+    job: Job,
+    *,
+    threads: int | None = None,
+    engine: str | None = None,
+) -> Job:
+    """Edit settings on a queued job (e.g. lower threads to fit free quota)."""
+    if job.status != "queued":
+        raise ValueError("Only queued jobs can be edited")
+    owner = await db.get(User, job.owner_id)
+    if not owner:
+        raise ValueError("Owner not found")
+    settings = dict(job.settings or {})
+    if threads is not None:
+        threads = max(1, int(threads))
+        cap = await user_thread_allowance(db, owner)
+        if threads > cap:
+            raise ValueError(f"Threads ({threads}) exceed allowance ({cap})")
+        settings["threads"] = threads
+    if engine is not None:
+        settings["engine"] = str(engine).strip() or settings.get("engine") or "chrome"
+    need = max(1, int(settings.get("threads") or 1))
+    free = await free_thread_slots(db, owner)
+    settings["queued_for_threads"] = need > free
+    job.settings = settings
     await db.commit()
     await db.refresh(job)
     return job

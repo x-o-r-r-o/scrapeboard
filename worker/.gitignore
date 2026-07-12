@@ -2,6 +2,8 @@
 __pycache__/
 *.pyc
 logs/
+work/
+run_service.cmd
 *.csv
 results/
 .DS_Store

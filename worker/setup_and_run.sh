@@ -38,6 +38,37 @@ echo "--- Selftest (chrome) ---"
 python agent.py --selftest --engine chrome
 echo "selftest exit: $?"
 
+if [[ ! -f worker_config.json ]]; then
+  echo
+  echo "--- First-run wizard (creates worker_config.json) ---"
+  python -c "from agent import bootstrap_agent_deps, run_setup_wizard; bootstrap_agent_deps(); run_setup_wizard()"
+fi
+
+if [[ -f worker_config.json ]]; then
+  echo
+  echo "================================================================"
+  echo " Background service (recommended)"
+  echo " Starts at login, keeps running after this terminal closes,"
+  echo " and waits for panel jobs."
+  echo "================================================================"
+  echo "  Install:   bash install_service.sh"
+  echo "  Uninstall: bash install_service.sh --uninstall"
+  echo "  Logs:      logs/worker.log"
+  echo
+  if [[ -t 0 ]]; then
+    read -r -p "Install background service now? [y/N] " ans || ans=""
+    if [[ "${ans:-}" =~ ^[Yy] ]]; then
+      bash install_service.sh
+      echo
+      echo "Service installed. Tail logs with:  tail -f logs/worker.log"
+      exit 0
+    fi
+  else
+    echo "Non-interactive shell — skip prompt. To install later:  bash install_service.sh"
+  fi
+fi
+
 echo
-echo "--- Starting worker (wizard if no worker_config.json) ---"
+echo "--- Starting worker in this terminal (Ctrl+C to stop) ---"
+echo "Tip: later run  bash install_service.sh  for a login background service."
 exec python agent.py

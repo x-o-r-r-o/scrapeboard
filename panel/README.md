@@ -61,16 +61,20 @@ panel/
 ### Infra
 
 - Proxy pools → assigned to workers  
-- Worker enrollment tokens, heartbeat (CPU/RAM), drain/disable  
+- Worker enrollment tokens, heartbeat (CPU/RAM/disk/load), drain/disable  
 - **Per-worker scrape flags** (`worker_config`): engine, threads, delays, headless, stealth, captcha, …  
-- Global scrape defaults (copied into new workers; lease fallback)  
-- Threads capped by worker `max_browsers`  
+- Scrape profiles (primary + backup captcha) linked to packages/workers  
+- **`max_browsers`** = max concurrent **user-job instances** (leases) on that worker — not a per-job thread cap  
 
 ### Jobs
 
 - Upload keywords + locations → queued chunks leased by workers  
-- Progress, stop, download merged ZIP  
+- **Shared per-user thread pool:** sum of threads across running jobs ≤ plan/perm allowance; extras wait in queue  
+- Edit **queued** job threads/engine to fit free capacity (`PATCH /api/jobs/{id}`)  
+- Results stored under `results/user_{id}/{public_id}/`  
+- Progress, stop, download merged ZIP; admin storage / purge  
 - Ownership enforced (users never see others’ jobs)  
+- **Admin:** unique job ID, which worker(s) hold leases, chunk counts; users can **Stop** their own queued/running jobs (admins can stop any); Telegram `/stop` still works for owners with `can_stop`  
 
 ### Telegram Bot Builder
 

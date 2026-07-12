@@ -475,6 +475,13 @@ class ScrapeSettingsUpdate(BaseModel):
     apply_to_workers: bool = False
 
 
+class JobWorkerLeaseOut(BaseModel):
+    worker_id: int
+    worker_name: str
+    leased_chunks: int
+    online: bool = False
+
+
 class JobOut(BaseModel):
     id: int
     public_id: str
@@ -483,6 +490,7 @@ class JobOut(BaseModel):
     owner_telegram_id: str | None = None
     status: str
     settings: dict
+    threads: int = 1
     total_searches: int
     done_searches: int
     rows_saved: int
@@ -494,8 +502,27 @@ class JobOut(BaseModel):
     started_at: datetime | None
     finished_at: datetime | None
     pct: float = 0
+    waiting_for_threads: bool = False
+    # Admin-only operational detail (omitted / empty for non-admins)
+    chunks_pending: int | None = None
+    chunks_leased: int | None = None
+    chunks_done: int | None = None
+    workers: list[JobWorkerLeaseOut] | None = None
 
     model_config = {"from_attributes": True}
+
+
+class JobUpdate(BaseModel):
+    """Edit a queued job (threads / engine) so it can fit free quota."""
+
+    threads: int | None = Field(default=None, ge=1, le=64)
+    engine: str | None = None
+
+
+class ThreadQuotaOut(BaseModel):
+    thread_allowance: int
+    threads_in_use: int
+    threads_free: int
 
 
 class JobFileEntry(BaseModel):

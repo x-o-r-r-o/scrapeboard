@@ -232,10 +232,19 @@ async def delete_workflow(
 
 @router.post("/bot/install-demos", response_model=MessageOut)
 async def install_demos(_: User = Depends(require_admin), __: User = Depends(require_ready_user), db: AsyncSession = Depends(get_db)):
-    existing_cmds = {c.key for c in (await db.execute(select(BotCommand))).scalars().all()}
+    existing_cmds = {c.key: c for c in (await db.execute(select(BotCommand))).scalars().all()}
     for cmd in DEMO_COMMANDS:
         if cmd["key"] not in existing_cmds:
             db.add(BotCommand(**cmd))
+        else:
+            row = existing_cmds[cmd["key"]]
+            row.title = cmd.get("title", row.title)
+            row.description = cmd.get("description", row.description)
+            row.command = cmd.get("command", row.command)
+            row.audience = cmd.get("audience", row.audience)
+            row.sort_order = cmd.get("sort_order", row.sort_order)
+            if cmd.get("response_text") is not None and not row.response_text:
+                row.response_text = cmd["response_text"]
     existing_wf = {w.key for w in (await db.execute(select(BotWorkflow))).scalars().all()}
     for i, wf in enumerate(DEMO_WORKFLOWS):
         payload = {**wf, "sort_order": wf.get("sort_order", (i + 1) * 10)}

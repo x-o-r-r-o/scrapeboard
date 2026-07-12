@@ -10,6 +10,7 @@ type Job = {
   owner_username: string | null;
   owner_telegram_id: string | null;
   status: string;
+  threads: number;
   total_searches: number;
   done_searches: number;
   rows_saved: number;
@@ -18,6 +19,19 @@ type Job = {
   result_bytes: number | null;
   error: string | null;
   created_at: string;
+  started_at?: string | null;
+  waiting_for_threads?: boolean;
+  settings?: { engine?: string; threads?: number };
+  chunks_pending?: number | null;
+  chunks_leased?: number | null;
+  chunks_done?: number | null;
+  workers?: Array<{ worker_id: number; worker_name: string; leased_chunks: number; online: boolean }> | null;
+};
+
+type ThreadQuota = {
+  thread_allowance: number;
+  threads_in_use: number;
+  threads_free: number;
 };
 
 type JobFiles = {
@@ -48,6 +62,7 @@ export function JobsPage() {
   const { user } = useOutletContext<{ user: User }>();
   const isAdmin = user.role === "admin";
   const [jobs, setJobs] = useState<Job[]>([]);
+  const [quota, setQuota] = useState<ThreadQuota | null>(null);
   const [owners, setOwners] = useState<Array<{ id: number; username: string }>>([]);
   const [storage, setStorage] = useState<StorageOwner[]>([]);
   const [error, setError] = useState("");
@@ -59,6 +74,8 @@ export function JobsPage() {
   const [filterQ, setFilterQ] = useState("");
   const [filesFor, setFilesFor] = useState<JobFiles | null>(null);
   const [showStorage, setShowStorage] = useState(false);
+  const [editJob, setEditJob] = useState<{ id: number; threads: number; engine: string } | null>(null);
+  const [detailJob, setDetailJob] = useState<Job | null>(null);
 
   async function refresh() {
     const params = new URLSearchParams();
@@ -67,7 +84,12 @@ export function JobsPage() {
     if (filterQ.trim()) params.set("q", filterQ.trim());
     params.set("limit", "200");
     const qs = params.toString();
-    setJobs(await api<Job[]>(`/api/jobs${qs ? `?${qs}` : ""}`));
+    const [jobRows, q] = await Promise.all([
+      api<Job[]>(`/api/jobs${qs ? `?${qs}` : ""}`),
+      api<ThreadQuota>("/api/jobs/quota").catch(() => null),
+    ]);
+    setJobs(jobRows);
+    setQuota(q);
   }
 
   async function refreshStorage() {
@@ -91,15 +113,41 @@ export function JobsPage() {
   async function onCreate(e: FormEvent<HTMLFormElement>) {
     e.preventDefault();
     setError("");
+    setMsg("");
     const fd = new FormData(e.currentTarget);
     fd.set("engine", engine);
     fd.set("threads", String(threads));
     try {
-      await api("/api/jobs", { method: "POST", body: fd });
+      const created = await api<Job>("/api/jobs", { method: "POST", body: fd });
       e.currentTarget.reset();
+      if (created.waiting_for_threads) {
+        setMsg(
+          `Job queued — waiting for free threads (${created.threads} needed). ` +
+            `It starts when capacity frees, or edit threads on the queued job.`,
+        );
+      } else {
+        setMsg("Job queued.");
+      }
       await refresh();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed");
+    }
+  }
+
+  async function saveEditJob(e: FormEvent) {
+    e.preventDefault();
+    if (!editJob) return;
+    setError("");
+    try {
+      await api(`/api/jobs/${editJob.id}`, {
+        method: "PATCH",
+        body: JSON.stringify({ threads: editJob.threads, engine: editJob.engine }),
+      });
+      setMsg("Queued job updated.");
+      setEditJob(null);
+      await refresh();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Update failed");
     }
   }
 
@@ -162,8 +210,8 @@ export function JobsPage() {
           <h1>Jobs</h1>
           <p className="subtitle">
             {isAdmin
-              ? "View, download, and manage scrape jobs and files for every user."
-              : "You only see jobs you own."}
+              ? "Each job has a unique ID. View worker placement and stop any job from here."
+              : "Each job has a unique ID. Use Telegram /stop to cancel your own queued or running jobs."}
           </p>
         </div>
         {isAdmin ? (
@@ -228,6 +276,12 @@ export function JobsPage() {
 
       <form className="card stack" onSubmit={onCreate}>
         <h3 style={{ margin: 0 }}>New job</h3>
+        {quota ? (
+          <p className="muted" style={{ margin: 0 }}>
+            Thread pool: <strong>{quota.threads_in_use}</strong> in use / <strong>{quota.thread_allowance}</strong> allowed
+            ({quota.threads_free} free). Concurrent jobs share this budget — extras stay queued until capacity frees.
+          </p>
+        ) : null}
         <div className="form-grid two">
           <label className="field">
             Keywords file
@@ -248,11 +302,12 @@ export function JobsPage() {
             </select>
           </label>
           <label className="field">
-            Threads
+            Threads {quota ? <span className="muted">(max {quota.thread_allowance})</span> : null}
             <input
               className="input"
               type="number"
               min={1}
+              max={quota?.thread_allowance || 64}
               value={threads}
               onChange={(e) => setThreads(Number(e.target.value))}
             />
@@ -313,9 +368,11 @@ export function JobsPage() {
         <table className="table">
           <thead>
             <tr>
-              <th>ID</th>
+              <th>Job ID</th>
               {isAdmin ? <th>Owner</th> : null}
               <th>Status</th>
+              <th>Threads</th>
+              {isAdmin ? <th>Workers</th> : null}
               <th>Progress</th>
               <th>Rows</th>
               <th>Result</th>
@@ -326,7 +383,7 @@ export function JobsPage() {
             {jobs.map((j) => (
               <tr key={j.id}>
                 <td>
-                  <code>{j.public_id}</code>
+                  <code title={`#${j.id}`}>{j.public_id}</code>
                 </td>
                 {isAdmin ? (
                   <td>
@@ -338,16 +395,57 @@ export function JobsPage() {
                   <span className={`badge ${j.status === "completed" ? "ok" : j.status === "running" ? "warn" : j.status === "failed" ? "danger" : ""}`}>
                     {j.status}
                   </span>
+                  {j.waiting_for_threads ? (
+                    <div className="muted" style={{ fontSize: "0.75rem" }}>
+                      waiting for free threads
+                    </div>
+                  ) : null}
                   {j.error ? <div className="muted" style={{ fontSize: "0.75rem" }}>{j.error.slice(0, 60)}</div> : null}
                 </td>
+                <td>{j.threads ?? "—"}</td>
+                {isAdmin ? (
+                  <td>
+                    {j.workers && j.workers.length > 0 ? (
+                      j.workers.map((w) => (
+                        <div key={w.worker_id} style={{ fontSize: "0.85rem" }}>
+                          {w.worker_name}{" "}
+                          <span className={`badge ${w.online ? "ok" : ""}`}>{w.online ? "online" : "off"}</span>
+                          <span className="muted"> · {w.leased_chunks} chunk{w.leased_chunks === 1 ? "" : "s"}</span>
+                        </div>
+                      ))
+                    ) : (
+                      <span className="muted">—</span>
+                    )}
+                  </td>
+                ) : null}
                 <td>
                   {j.done_searches}/{j.total_searches} ({j.pct.toFixed(1)}%)
                 </td>
                 <td>{j.rows_saved}</td>
                 <td>{j.result_exists ? fmtBytes(j.result_bytes) : "—"}</td>
                 <td style={{ display: "flex", gap: "0.4rem", flexWrap: "wrap" }}>
-                  {j.status === "running" || j.status === "queued" ? (
-                    <button className="btn secondary sm" type="button" onClick={() => stop(j.id)}>
+                  {isAdmin ? (
+                    <button className="btn secondary sm" type="button" onClick={() => setDetailJob(j)}>
+                      Details
+                    </button>
+                  ) : null}
+                  {j.status === "queued" ? (
+                    <button
+                      className="btn secondary sm"
+                      type="button"
+                      onClick={() =>
+                        setEditJob({
+                          id: j.id,
+                          threads: j.threads || 1,
+                          engine: j.settings?.engine || "chrome",
+                        })
+                      }
+                    >
+                      Edit
+                    </button>
+                  ) : null}
+                  {isAdmin && (j.status === "running" || j.status === "queued") ? (
+                    <button className="btn danger sm" type="button" onClick={() => stop(j.id)}>
                       Stop
                     </button>
                   ) : null}
@@ -375,6 +473,106 @@ export function JobsPage() {
           </tbody>
         </table>
       </div>
+
+      {detailJob && isAdmin ? (
+        <div className="card">
+          <div className="page-header" style={{ marginBottom: "0.5rem" }}>
+            <h3 style={{ margin: 0 }}>Job details — {detailJob.public_id}</h3>
+            <button className="btn secondary sm" type="button" onClick={() => setDetailJob(null)}>
+              Close
+            </button>
+          </div>
+          <div className="form-grid two" style={{ gap: "0.75rem" }}>
+            <div>
+              <div className="muted">Unique job ID</div>
+              <code>{detailJob.public_id}</code>
+            </div>
+            <div>
+              <div className="muted">Internal id</div>
+              #{detailJob.id}
+            </div>
+            <div>
+              <div className="muted">Owner</div>
+              {detailJob.owner_username || `#${detailJob.owner_id}`}
+              {detailJob.owner_telegram_id ? ` · tg:${detailJob.owner_telegram_id}` : ""}
+            </div>
+            <div>
+              <div className="muted">Status</div>
+              {detailJob.status} · {detailJob.threads} threads · engine {detailJob.settings?.engine || "—"}
+            </div>
+            <div>
+              <div className="muted">Progress</div>
+              {detailJob.done_searches}/{detailJob.total_searches} ({detailJob.pct.toFixed(1)}%) · rows {detailJob.rows_saved}
+            </div>
+            <div>
+              <div className="muted">Chunks</div>
+              pending {detailJob.chunks_pending ?? "—"} · leased {detailJob.chunks_leased ?? "—"} · done{" "}
+              {detailJob.chunks_done ?? "—"}
+            </div>
+            <div style={{ gridColumn: "1 / -1" }}>
+              <div className="muted">Workers running this job</div>
+              {detailJob.workers && detailJob.workers.length > 0 ? (
+                <ul style={{ margin: "0.35rem 0 0", paddingLeft: "1.1rem" }}>
+                  {detailJob.workers.map((w) => (
+                    <li key={w.worker_id}>
+                      {w.worker_name} (#{w.worker_id}) — {w.leased_chunks} leased chunk
+                      {w.leased_chunks === 1 ? "" : "s"} · {w.online ? "online" : "offline"}
+                    </li>
+                  ))}
+                </ul>
+              ) : (
+                <p className="muted" style={{ margin: "0.35rem 0 0" }}>
+                  No active worker leases (queued or between chunks).
+                </p>
+              )}
+            </div>
+          </div>
+          {(detailJob.status === "running" || detailJob.status === "queued") ? (
+            <button className="btn danger" type="button" style={{ marginTop: "0.85rem" }} onClick={() => stop(detailJob.id).then(() => setDetailJob(null))}>
+              Stop job
+            </button>
+          ) : null}
+        </div>
+      ) : null}
+
+      {editJob ? (
+        <form className="card" onSubmit={saveEditJob} style={{ display: "grid", gap: "0.65rem", maxWidth: 420 }}>
+          <h3 style={{ margin: 0 }}>Edit queued job</h3>
+          <p className="muted" style={{ margin: 0 }}>
+            Lower threads to fit free capacity ({quota?.threads_free ?? "—"} free of {quota?.thread_allowance ?? "—"}).
+            The job starts automatically when enough threads are available.
+          </p>
+          <label className="field">
+            Threads
+            <input
+              className="input"
+              type="number"
+              min={1}
+              max={quota?.thread_allowance || 64}
+              value={editJob.threads}
+              onChange={(e) => setEditJob({ ...editJob, threads: Number(e.target.value) })}
+            />
+          </label>
+          <label className="field">
+            Engine
+            <select className="input" value={editJob.engine} onChange={(e) => setEditJob({ ...editJob, engine: e.target.value })}>
+              <option value="chrome">chrome</option>
+              <option value="brave">brave</option>
+              <option value="camoufox">camoufox</option>
+              <option value="google-chrome">google-chrome</option>
+              <option value="edge">edge</option>
+            </select>
+          </label>
+          <div style={{ display: "flex", gap: "0.5rem" }}>
+            <button className="btn" type="submit">
+              Save
+            </button>
+            <button className="btn secondary" type="button" onClick={() => setEditJob(null)}>
+              Cancel
+            </button>
+          </div>
+        </form>
+      ) : null}
 
       {filesFor ? (
         <div className="card">

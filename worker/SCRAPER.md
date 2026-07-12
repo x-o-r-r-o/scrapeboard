@@ -53,9 +53,11 @@ website and its likely `/contact` and `/about` pages through the same proxy.
   coordinator, coordinator+worker, or worker — chosen by a first-run wizard.
 - **Sell it as a subscription service:** optional billing with **USDT (TRC-20)
   auto-verified on-chain** and **manual** payment methods. Multiple packages with
-  their own price, duration, **thread limit**, and **upload-size limit**; expiry
+  their own price, duration, **thread allowance**, and **upload-size limit**; expiry
   blocks access until renewal; **upgrade-only** (no downgrade while active). Each
-  package's limits are enforced (e.g. a 5-thread plan can't run 6 threads).
+  package's limits are enforced. **Thread allowance is shared across all of a
+  user's running jobs** (sum of job threads ≤ plan). Extra jobs stay queued until
+  capacity frees, or the user lowers a queued job's threads in the panel.
 - **Proxies work with or without authentication** on every engine (including
   Camoufox) — `host:port` or `host:port:user:pass` are both fine.
 - **Anti-bot / stealth measures** (see below) so Google is far less likely to

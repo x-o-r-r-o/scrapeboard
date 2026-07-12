@@ -2,7 +2,7 @@
 REM Scrapeboard worker — Windows first-run setup + selftest + start
 REM Double-click or run from cmd:  setup_and_run.bat
 
-setlocal
+setlocal EnableExtensions EnableDelayedExpansion
 cd /d "%~dp0"
 
 echo ================================================================
@@ -48,7 +48,36 @@ echo --- Selftest (chrome) ---
 python agent.py --selftest --engine chrome
 echo selftest exit: %ERRORLEVEL%
 
+if not exist "worker_config.json" (
+  echo.
+  echo --- First-run wizard ^(creates worker_config.json^) ---
+  python -c "from agent import bootstrap_agent_deps, run_setup_wizard; bootstrap_agent_deps(); run_setup_wizard()"
+)
+
+if not exist "worker_config.json" goto :fg_start
+
 echo.
-echo --- Starting worker (wizard if no worker_config.json) ---
+echo ================================================================
+echo  Background service ^(recommended^)
+echo  Starts at logon, keeps running after this window closes,
+echo  and waits for panel jobs.
+echo ================================================================
+echo   Install:   install_service.bat
+echo   Uninstall: install_service.bat --uninstall
+echo   Logs:      logs\worker.log
+echo.
+set /p ANS="Install background service now? [y/N] "
+if /I "!ANS!"=="y" goto :install_svc
+if /I "!ANS!"=="yes" goto :install_svc
+goto :fg_start
+
+:install_svc
+call install_service.bat
+exit /b 0
+
+:fg_start
+echo.
+echo --- Starting worker in this window ^(Ctrl+C to stop^) ---
+echo Tip: later run  install_service.bat  for a logon background service.
 python agent.py
 pause

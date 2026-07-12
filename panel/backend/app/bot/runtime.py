@@ -201,7 +201,7 @@ class TelegramBotRuntime:
             await self._run(db, token, chat_id, user, args)
             return
 
-        if cmd in ("/status", "/stats"):
+        if cmd in ("/status", "/stats", "/jobs"):
             await self._status(db, token, chat_id, user)
             return
 
@@ -454,35 +454,106 @@ class TelegramBotRuntime:
             token,
             chat_id,
             f"✅ Job queued: {job.public_id}\n"
-            f"{job.total_searches:,} searches. /status for progress.",
+            f"{job.total_searches:,} searches · {jobs_svc.job_thread_count(job)} threads.\n"
+            f"Threads are shared across your running jobs — this job starts when enough "
+            f"capacity is free (or lower threads with panel Edit). /status for progress.",
         )
 
     async def _status(self, db, token, chat_id, user) -> None:
-        q = select(Job).where(Job.owner_id == user.id).order_by(Job.id.desc()).limit(5)
-        jobs = (await db.execute(q)).scalars().all()
-        if not jobs:
-            await self._send(token, chat_id, "No jobs yet.")
-            return
-        lines = ["Your jobs:"]
-        for j in jobs:
-            pct = 100.0 * j.done_searches / j.total_searches if j.total_searches else 0
-            lines.append(
-                f"• {j.public_id} [{j.status}] {j.done_searches}/{j.total_searches} "
-                f"({pct:.1f}%) rows={j.rows_saved}"
+        """Show the user's running jobs with progress % and recent job stats."""
+        active = (
+            await db.execute(
+                select(Job)
+                .where(Job.owner_id == user.id, Job.status.in_(("queued", "running")))
+                .order_by(Job.id.desc())
             )
+        ).scalars().all()
+        recent = (
+            await db.execute(
+                select(Job)
+                .where(Job.owner_id == user.id)
+                .order_by(Job.id.desc())
+                .limit(8)
+            )
+        ).scalars().all()
+        if not recent:
+            await self._send(
+                token,
+                chat_id,
+                "No jobs yet.\nUpload keywords + locations, then /run.\nUse /status anytime for progress.",
+            )
+            return
+
+        def _pct(j: Job) -> float:
+            return 100.0 * j.done_searches / j.total_searches if j.total_searches else 0.0
+
+        def _bar(pct: float, width: int = 10) -> str:
+            filled = max(0, min(width, int(round(pct / 100.0 * width))))
+            return "█" * filled + "░" * (width - filled)
+
+        def _engine(j: Job) -> str:
+            s = j.settings or {}
+            return str(s.get("engine") or "—")
+
+        lines: list[str] = ["📊 Your job status", ""]
+        if active:
+            lines.append("▶ Currently running")
+            for j in active:
+                pct = _pct(j)
+                lines.append(f"• {j.public_id}")
+                lines.append(f"  [{j.status}] {_bar(pct)} {pct:.1f}%")
+                lines.append(
+                    f"  searches {j.done_searches:,}/{j.total_searches:,} · "
+                    f"rows {j.rows_saved:,} · engine {_engine(j)}"
+                )
+                if j.started_at:
+                    lines.append(f"  started {j.started_at.strftime('%Y-%m-%d %H:%M UTC')}")
+            lines.append("")
+        else:
+            lines.append("▶ Currently running")
+            lines.append("• none — queue a job with /run")
+            lines.append("")
+
+        lines.append("📁 Recent jobs")
+        for j in recent:
+            pct = _pct(j)
+            mark = "▶" if j.status in ("queued", "running") else "•"
+            lines.append(
+                f"{mark} {j.public_id} [{j.status}] {pct:.1f}% · "
+                f"{j.done_searches}/{j.total_searches} · rows {j.rows_saved}"
+            )
+        lines.append("")
+        lines.append("Tips: /status or /jobs · /stop to cancel · panel Jobs for download")
         await self._send(token, chat_id, "\n".join(lines))
 
     async def _stop_job(self, db, token, chat_id, user) -> None:
+        """Stop the user's own active job (ownership via own_active_job). Panel stop is admin-only."""
         perms = jobs_svc.effective_perms(user)
-        if not perms.get("can_stop") and user.role != "admin":
-            await self._send(token, chat_id, "⛔ No stop permission.")
+        if user.role != "admin" and not perms.get("can_stop", True):
+            await self._send(token, chat_id, "⛔ You don't have permission to stop jobs.")
             return
         job = await jobs_svc.own_active_job(db, user)
         if not job:
-            await self._send(token, chat_id, "Nothing running that you can stop.")
+            await self._send(
+                token,
+                chat_id,
+                "Nothing to stop — you have no queued or running jobs.",
+            )
             return
+        # own_active_job is owner-scoped; never stop another user's job from Telegram.
         zip_path = await jobs_svc.finalize_job(db, job, cancelled=True)
-        await self._send(token, chat_id, f"⏹ Stopped {job.public_id}. Rows: {job.rows_saved}.")
+        await db.refresh(job)
+        if job.status != "stopped":
+            await self._send(
+                token,
+                chat_id,
+                f"Could not stop {job.public_id} (status is now {job.status}).",
+            )
+            return
+        msg = f"⏹ Stopped {job.public_id}. Rows saved: {job.rows_saved}."
+        if zip_path:
+            msg += " Partial results ready."
+        await self._send(token, chat_id, msg)
         if zip_path:
             settings = await db.get(BotSettings, 1)
             if settings and settings.deliver_results_telegram:

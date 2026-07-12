@@ -84,18 +84,38 @@ DEMO_COMMANDS = [
     {
         "key": "status",
         "command": "/status",
-        "title": "Status",
-        "description": "Live progress for YOUR jobs only",
+        "title": "Job status",
+        "description": "Running jobs, progress %, and stats for your jobs only",
         "response_text": "",
         "enabled": True,
         "audience": "users",
         "sort_order": 90,
     },
     {
+        "key": "jobs",
+        "command": "/jobs",
+        "title": "My jobs",
+        "description": "Alias for /status — running jobs and progress",
+        "response_text": "",
+        "enabled": True,
+        "audience": "users",
+        "sort_order": 91,
+    },
+    {
+        "key": "stats",
+        "command": "/stats",
+        "title": "Job stats",
+        "description": "Progress percentage and row counts for your jobs",
+        "response_text": "",
+        "enabled": True,
+        "audience": "users",
+        "sort_order": 92,
+    },
+    {
         "key": "stop",
         "command": "/stop",
         "title": "Stop",
-        "description": "Stop your running job",
+        "description": "Stop your own queued or running job",
         "response_text": "",
         "enabled": True,
         "audience": "subscribers",
@@ -200,7 +220,7 @@ DEMO_WORKFLOWS = [
         "description": "Guide new Telegram users: account link → subscription → ready",
         "enabled": True,
         "is_demo": True,
-"sort_order": 10,
+        "sort_order": 10,
         "definition": {
             "trigger": "command:/start",
             "steps": [
@@ -216,7 +236,7 @@ DEMO_WORKFLOWS = [
         "description": "/buy → payment instructions → /paid → on-chain verify → activate",
         "enabled": True,
         "is_demo": True,
-"sort_order": 20,
+        "sort_order": 20,
         "definition": {
             "trigger": "command:/buy",
             "steps": [
@@ -235,7 +255,7 @@ DEMO_WORKFLOWS = [
         "description": "Bank/other details → admin approve in panel or /approve",
         "enabled": True,
         "is_demo": True,
-"sort_order": 30,
+        "sort_order": 30,
         "definition": {
             "trigger": "command:/buy",
             "steps": [
@@ -253,7 +273,7 @@ DEMO_WORKFLOWS = [
         "description": "Upload inputs → /run → progress → ZIP via Telegram + panel",
         "enabled": True,
         "is_demo": True,
-"sort_order": 40,
+        "sort_order": 40,
         "definition": {
             "trigger": "command:/run",
             "steps": [
@@ -267,12 +287,29 @@ DEMO_WORKFLOWS = [
         },
     },
     {
+        "key": "job_progress",
+        "name": "Job progress & stats",
+        "description": "User sees running jobs, progress %, done/total searches, and rows saved via /status /jobs /stats",
+        "enabled": True,
+        "is_demo": True,
+        "sort_order": 45,
+        "definition": {
+            "trigger": "command:/status",
+            "steps": [
+                {"action": "list_own_active_jobs"},
+                {"say": "Show progress % and searches done/total for each running job"},
+                {"action": "list_recent_job_stats"},
+                {"say": "Include rows saved, engine, and status for recent jobs"},
+            ],
+        },
+    },
+    {
         "key": "job_stop",
         "name": "Stop with partial results",
         "description": "/stop → cancel → merge partial → send ZIP",
         "enabled": True,
         "is_demo": True,
-"sort_order": 50,
+        "sort_order": 50,
         "definition": {
             "trigger": "command:/stop",
             "steps": [
@@ -288,7 +325,7 @@ DEMO_WORKFLOWS = [
         "description": "Cron: remind before expiry; block /run when expired",
         "enabled": True,
         "is_demo": True,
-"sort_order": 60,
+        "sort_order": 60,
         "definition": {
             "trigger": "cron:daily",
             "steps": [
@@ -304,7 +341,7 @@ DEMO_WORKFLOWS = [
         "description": "/support → ticket → configured support chat",
         "enabled": True,
         "is_demo": True,
-"sort_order": 70,
+        "sort_order": 70,
         "definition": {
             "trigger": "command:/support",
             "steps": [
@@ -321,7 +358,7 @@ DEMO_WORKFLOWS = [
         "description": "Admin alert when a worker misses heartbeats",
         "enabled": True,
         "is_demo": True,
-"sort_order": 80,
+        "sort_order": 80,
         "definition": {
             "trigger": "event:worker_offline",
             "steps": [
@@ -335,7 +372,7 @@ DEMO_WORKFLOWS = [
         "description": "Invalid/replay TxID → user message + rate limit",
         "enabled": True,
         "is_demo": True,
-"sort_order": 90,
+        "sort_order": 90,
         "definition": {
             "trigger": "event:payment_failed",
             "steps": [

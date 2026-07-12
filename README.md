@@ -367,8 +367,9 @@ See [Telegram Bot Builder](#telegram-bot-builder).
 
 1. Active subscription (or admin)  
 2. **Jobs → New job** → upload `keywords.txt` + `locations.txt`  
-3. Optional engine/threads overrides (capped by plan)  
-4. Watch progress; **Stop** or wait for complete → **Download** ZIP  
+3. Optional engine/threads (each job’s threads must be ≤ plan allowance)  
+4. **Shared thread pool:** concurrent jobs share your allowance. If you request more threads than are free, the job stays **queued** until capacity frees (or edit the queued job’s threads to fit).  
+5. Watch progress; **Stop** or wait for complete → **Download** ZIP  
 
 UI route map and API notes: [`panel/README.md`](panel/README.md).
 
@@ -528,9 +529,17 @@ GET  /api/billing/public
 - `locations` file  
 - optional `engine`, `threads`, `scrape_websites`, `max_results`  
 
+`threads` for a single job cannot exceed the user’s allowance (`min(perms.max_threads, subscription.threads)`).  
+Across **all running jobs**, the sum of threads must stay ≤ that allowance. Extra jobs remain `queued` until free threads cover them.
+
+`GET /api/jobs/quota` → `{ thread_allowance, threads_in_use, threads_free }`  
+`PATCH /api/jobs/{id}` (queued only) → `{ threads?, engine? }` to lower threads so a waiting job can start.
+
 ### Job statuses
 
 `queued` → `running` → `completed` | `stopped` | `failed`
+
+Queued jobs may show **waiting for free threads** when the owner’s pool is full.
 
 ### Download
 
