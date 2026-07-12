@@ -2962,6 +2962,10 @@ def execute_index_batch(args, keywords, locations, start, end, out_dir, ts,
             pool.shutdown(wait=False, cancel_futures=True)
         except TypeError:
             pool.shutdown(wait=False)
+        try:
+            kill_active_browsers()
+        except Exception:
+            pass
         writer.close()
         failed.close()
     return runner.rows_written, failed.count

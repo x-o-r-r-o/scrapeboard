@@ -1110,6 +1110,15 @@ export function ProxiesAdminPage() {
   );
 }
 
+type WorkerUpdateInfo = {
+  status: string;
+  ref: string;
+  message: string;
+  requested_at?: string | null;
+  started_at?: string | null;
+  finished_at?: string | null;
+};
+
 type WorkerRow = {
   id: number;
   name: string;
@@ -1135,6 +1144,7 @@ type WorkerRow = {
   proxy_pool_id: number | null;
   proxy_pool_name: string | null;
   worker_config: ScrapeConfig;
+  update?: WorkerUpdateInfo;
 };
 
 export function WorkersAdminPage() {
@@ -1158,6 +1168,12 @@ export function WorkersAdminPage() {
   } | null>(null);
   const [msg, setMsg] = useState("");
   const [error, setError] = useState("");
+  const [logLines, setLogLines] = useState<string[]>([]);
+  const [logUpdatedAt, setLogUpdatedAt] = useState<string | null>(null);
+  const [logError, setLogError] = useState("");
+  const [logAuto, setLogAuto] = useState(true);
+  const [updateRef, setUpdateRef] = useState("main");
+  const [updateBusy, setUpdateBusy] = useState(false);
 
   async function refresh() {
     const [w, p, pkgs] = await Promise.all([
@@ -1176,10 +1192,38 @@ export function WorkersAdminPage() {
     return () => clearInterval(t);
   }, []);
 
+  useEffect(() => {
+    if (selectedId == null || !logAuto) return;
+    let cancelled = false;
+    async function pullLogs() {
+      try {
+        const data = await api<{ lines: string[]; updated_at?: string | null }>(
+          `/api/workers/${selectedId}/logs`,
+        );
+        if (cancelled) return;
+        setLogLines(Array.isArray(data.lines) ? data.lines.map(String) : []);
+        setLogUpdatedAt(data.updated_at || null);
+        setLogError("");
+      } catch (e) {
+        if (!cancelled) setLogError(e instanceof Error ? e.message : "Failed to load logs");
+      }
+    }
+    pullLogs();
+    const t = setInterval(pullLogs, 3000);
+    return () => {
+      cancelled = true;
+      clearInterval(t);
+    };
+  }, [selectedId, logAuto]);
+
   function openEdit(w: WorkerRow) {
     setSelectedId(w.id);
     setMsg("");
     setError("");
+    setLogLines([]);
+    setLogUpdatedAt(null);
+    setLogError("");
+    setLogAuto(true);
     const cfg = { ...(w.worker_config || {}) };
     delete cfg.captcha_key_configured;
     delete cfg.captcha_backup_key_configured;
@@ -1270,6 +1314,50 @@ export function WorkersAdminPage() {
     await refresh();
   }
 
+  async function requestFleetUpdate(workerIds?: number[]) {
+    const ref = updateRef.trim() || "main";
+    const scope = workerIds?.length ? `${workerIds.length} worker(s)` : "all workers";
+    if (
+      !confirm(
+        `Queue git update (ref=${ref}) for ${scope}?\nOnline agents pull on the next heartbeat, then restart.`,
+      )
+    ) {
+      return;
+    }
+    setError("");
+    setMsg("");
+    setUpdateBusy(true);
+    try {
+      const body: Record<string, unknown> = { ref };
+      if (workerIds?.length) body.worker_ids = workerIds;
+      const res = await api<{ queued: number; ref: string }>("/api/workers/request-update", {
+        method: "POST",
+        body: JSON.stringify(body),
+      });
+      setMsg(
+        `Queued update for ${res.queued} worker(s) at ref=${res.ref}. Status updates as agents heartbeat.`,
+      );
+      await refresh();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Update request failed");
+    } finally {
+      setUpdateBusy(false);
+    }
+  }
+
+  function updateBadge(u?: WorkerUpdateInfo) {
+    const status = (u?.status || "idle").toLowerCase();
+    const cls =
+      status === "success"
+        ? "ok"
+        : status === "failed"
+          ? "danger"
+          : status === "pending" || status === "updating"
+            ? "warn"
+            : "";
+    return { status, cls, message: u?.message || "", ref: u?.ref || "main" };
+  }
+
   return (
     <div className="stack">
       <div className="page-header">
@@ -1280,6 +1368,30 @@ export function WorkersAdminPage() {
             package. 2captcha / CaptchaAI solvers are global under Admin → 2captcha / CaptchaAI.
           </p>
         </div>
+      </div>
+      <div className="card" style={{ display: "flex", flexWrap: "wrap", gap: "0.75rem", alignItems: "end" }}>
+        <label className="field" style={{ minWidth: 160 }}>
+          Git ref
+          <input
+            className="input"
+            value={updateRef}
+            onChange={(e) => setUpdateRef(e.target.value)}
+            placeholder="main or latest"
+            disabled={updateBusy}
+          />
+        </label>
+        <button
+          className="btn"
+          type="button"
+          disabled={updateBusy || workers.length === 0}
+          onClick={() => requestFleetUpdate()}
+        >
+          Update all workers
+        </button>
+        <p className="muted" style={{ margin: 0, flex: "1 1 220px", fontSize: "0.85rem" }}>
+          After you push to GitHub, queue a fleet update here. Online workers run the fixed{" "}
+          <code>install.py --role worker --update</code> path on the next heartbeat (no SSH per VPS).
+        </p>
       </div>
       <form className="card form-grid two" onSubmit={create} style={{ alignItems: "end" }}>
         <label className="field">
@@ -1335,6 +1447,7 @@ export function WorkersAdminPage() {
             <tr>
               <th>Name</th>
               <th>Status</th>
+              <th>Update</th>
               <th>Instances</th>
               <th>CPU</th>
               <th>RAM</th>
@@ -1350,6 +1463,7 @@ export function WorkersAdminPage() {
               const statusCls =
                 status === "online" ? "ok" : status === "draining" ? "warn" : status === "offline" || status === "disabled" ? "danger" : "";
               const leaseLoad = (w.active_leases || 0) / Math.max(1, w.max_browsers);
+              const upd = updateBadge(w.update);
               return (
                 <tr key={w.id} style={{ background: selectedId === w.id ? "color-mix(in srgb, var(--accent) 12%, transparent)" : undefined }}>
                   <td>
@@ -1360,6 +1474,17 @@ export function WorkersAdminPage() {
                   </td>
                   <td>
                     <span className={`badge ${statusCls}`}>{status}</span>
+                  </td>
+                  <td>
+                    <span className={`badge ${upd.cls}`} title={upd.message || undefined}>
+                      {upd.status}
+                    </span>
+                    {upd.status !== "idle" ? (
+                      <div className="muted" style={{ fontSize: "0.75rem" }}>
+                        {upd.ref}
+                        {upd.message ? ` · ${upd.message.slice(0, 80)}` : ""}
+                      </div>
+                    ) : null}
                   </td>
                   <td>
                     {w.active_leases ?? 0}/{w.max_browsers}
@@ -1404,9 +1529,17 @@ export function WorkersAdminPage() {
                         {String(w.worker_config?.engine || "chrome")} · {String(w.worker_config?.threads ?? "—")} thr
                       </div>
                   </td>
-                  <td>
+                  <td style={{ display: "flex", gap: "0.4rem", flexWrap: "wrap" }}>
                     <button className="btn secondary" type="button" onClick={() => openEdit(w)}>
                       Settings
+                    </button>
+                    <button
+                      className="btn secondary"
+                      type="button"
+                      disabled={updateBusy}
+                      onClick={() => requestFleetUpdate([w.id])}
+                    >
+                      Request update
                     </button>
                   </td>
                 </tr>
@@ -1488,6 +1621,28 @@ export function WorkersAdminPage() {
             </button>
           </div>
         </form>
+      ) : null}
+
+      {selectedId != null ? (
+        <div className="card worker-log-panel">
+          <div className="worker-log-meta">
+            <div>
+              <h2 style={{ margin: 0, fontSize: "1.05rem" }}>Live worker logs — #{selectedId}</h2>
+              <p className="muted" style={{ margin: "0.25rem 0 0", fontSize: "0.8rem" }}>
+                Recent lines pushed by the agent (from logs/worker.log or stdout).
+                {logUpdatedAt ? ` · updated ${new Date(logUpdatedAt).toLocaleTimeString()}` : ""}
+              </p>
+            </div>
+            <label className="muted" style={{ display: "inline-flex", gap: "0.4rem", alignItems: "center", fontSize: "0.85rem" }}>
+              <input type="checkbox" checked={logAuto} onChange={(e) => setLogAuto(e.target.checked)} />
+              Auto-refresh
+            </label>
+          </div>
+          {logError ? <p className="error">{logError}</p> : null}
+          <pre className="worker-log-pre">
+            {logLines.length ? logLines.join("\n") : "Waiting for worker log lines…"}
+          </pre>
+        </div>
       ) : null}
       <style>{`.stack{display:grid;gap:1rem}h1{margin:0}label{display:grid;gap:.3rem;font-size:.8rem;color:var(--muted)}`}</style>
     </div>

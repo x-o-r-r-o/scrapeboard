@@ -436,6 +436,15 @@ class WorkerConfigUpdate(BaseModel):
     debug: bool | None = None
 
 
+class WorkerUpdateStatusOut(BaseModel):
+    status: str = "idle"  # idle|pending|updating|success|failed
+    ref: str = "main"
+    message: str = ""
+    requested_at: str | None = None
+    started_at: str | None = None
+    finished_at: str | None = None
+
+
 class WorkerOut(BaseModel):
     id: int
     name: str
@@ -462,6 +471,7 @@ class WorkerOut(BaseModel):
     online: bool = False
     active_leases: int = 0
     worker_config: dict = {}
+    update: WorkerUpdateStatusOut = WorkerUpdateStatusOut()
 
     model_config = {"from_attributes": True}
 
@@ -492,6 +502,26 @@ class WorkerUpdate(BaseModel):
     # When true, replace worker_config with built-in defaults (or seed_from_package_id)
     reset_config_to_defaults: bool = False
     seed_from_package_id: int | None = None
+
+
+class WorkerFleetUpdateRequest(BaseModel):
+    """Admin: queue git update on one or more workers (delivered via heartbeat)."""
+
+    ref: str = "main"  # branch/tag/SHA, or "latest" for current-branch pull
+    worker_ids: list[int] | None = None  # None / empty = all workers
+
+
+class WorkerFleetUpdateResponse(BaseModel):
+    ok: bool = True
+    ref: str
+    queued: int
+    workers: list[WorkerOut]
+
+
+class WorkerUpdateStatusIn(BaseModel):
+    status: str  # updating|success|failed
+    message: str = ""
+    ref: str | None = None
 
 
 class ScrapeSettingsOut(BaseModel):

@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { Link, Navigate, Outlet, useLocation, useNavigate } from "react-router-dom";
 import { api, getToken, setToken, type User } from "../api";
+import { JobCompletionToasts } from "../components/JobCompletionToasts";
 
 type NavLink = { to: string; label: string };
 
@@ -154,6 +155,7 @@ export default function AppShell() {
         <main className="shell-content">
           <Outlet context={{ user }} />
         </main>
+        <JobCompletionToasts user={user} />
       </div>
     </div>
   );

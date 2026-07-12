@@ -34,10 +34,11 @@ ROOT = Path(__file__).resolve().parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-VERSION = "0.7.0"
+VERSION = "0.8.0"
 CONFIG_NAME = "worker_config.json"
 HOST_OS = platform.system()  # Windows | Darwin | Linux
 SERVICE_NAME = "scrapeboard-worker"
+REPO_ROOT = ROOT.parent  # checkout root (worker/ lives one level down)
 
 
 # ---------------------------------------------------------------------------
@@ -549,6 +550,189 @@ class PanelClient:
         r.raise_for_status()
         return r.json()
 
+    def push_logs(self, lines: list[str], *, replace: bool = False):
+        if not lines:
+            return None
+        r = self.requests.post(
+            f"{self.base}/api/worker-api/logs",
+            json={"lines": lines, "replace": replace},
+            headers=self.headers,
+            timeout=20,
+        )
+        r.raise_for_status()
+        return r.json()
+
+    def report_update_status(self, status: str, *, message: str = "", ref: str | None = None):
+        payload: dict = {"status": status, "message": (message or "")[:2000]}
+        if ref is not None:
+            payload["ref"] = ref
+        r = self.requests.post(
+            f"{self.base}/api/worker-api/update-status",
+            json=payload,
+            headers=self.headers,
+            timeout=30,
+        )
+        r.raise_for_status()
+        return r.json()
+
+
+def _run_fixed_worker_update(ref: str) -> tuple[bool, str]:
+    """Run the fixed worker update path only (no arbitrary shell from the panel).
+
+    Preserves role-based sparse-checkout via install.py --role worker --update.
+    """
+    if not (REPO_ROOT / ".git").exists():
+        return False, "not a git checkout — clone the repo (worker role) to enable remote updates"
+    install_py = REPO_ROOT / "install.py"
+    if not install_py.is_file():
+        return False, f"missing {install_py}"
+
+    wanted = (ref or "main").strip() or "main"
+    env = os.environ.copy()
+    env["SCRAPEBOARD_ASSUME_YES"] = "1"
+    env["SCRAPEBOARD_UPDATE_REF"] = wanted
+
+    cmd = [
+        sys.executable,
+        str(install_py),
+        "--role",
+        "worker",
+        "--update",
+        "--yes",
+        "--ref",
+        wanted,
+    ]
+    print(f"[worker] running update: {' '.join(cmd)}", flush=True)
+    try:
+        proc = subprocess.run(
+            cmd,
+            cwd=str(REPO_ROOT),
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=900,
+        )
+    except subprocess.TimeoutExpired:
+        return False, "update timed out after 900s"
+    except Exception as e:
+        return False, f"update failed to start: {e}"
+
+    out = ((proc.stdout or "") + "\n" + (proc.stderr or "")).strip()
+    tail = out[-1500:] if out else ""
+    if proc.returncode != 0:
+        msg = f"update exited {proc.returncode}"
+        if tail:
+            msg = f"{msg}: {tail}"
+        return False, msg
+    msg = "update ok"
+    if tail:
+        msg = f"{msg}; {tail.splitlines()[-1][:200]}"
+    return True, msg
+
+
+def _schedule_service_restart_hint() -> None:
+    """Best-effort note; KeepAlive/systemd/schtasks restart on process exit."""
+    if HOST_OS == "Windows":
+        print("[worker] exiting so Task Scheduler can restart with new code", flush=True)
+    elif HOST_OS == "Darwin":
+        print("[worker] exiting so LaunchAgent KeepAlive can restart with new code", flush=True)
+    else:
+        print("[worker] exiting so systemd user service can restart with new code", flush=True)
+
+
+class LogTailer:
+    """Tail a log file and return only new lines (for panel live logs)."""
+
+    def __init__(self, path: Path | None, max_lines: int = 200):
+        self.path = path
+        self.max_lines = max_lines
+        self._pos = 0
+        self._inode: int | None = None
+        self._primed = False
+
+    def read_new(self) -> list[str]:
+        if not self.path or not self.path.exists():
+            return []
+        try:
+            st = self.path.stat()
+            inode = getattr(st, "st_ino", None)
+            if self._inode is not None and inode is not None and inode != self._inode:
+                self._pos = 0
+            self._inode = inode
+            size = st.st_size
+            if size < self._pos:
+                self._pos = 0
+            with open(self.path, "r", encoding="utf-8", errors="replace") as fh:
+                if not self._primed:
+                    # First call: send last N lines as a baseline, then stream deltas.
+                    fh.seek(0, os.SEEK_END)
+                    end = fh.tell()
+                    start = max(0, end - 120_000)
+                    fh.seek(start)
+                    data = fh.read()
+                    self._pos = fh.tell()
+                    self._primed = True
+                    lines = data.splitlines()[-self.max_lines :]
+                    return lines
+                fh.seek(self._pos)
+                data = fh.read()
+                self._pos = fh.tell()
+            if not data:
+                return []
+            return data.splitlines()[-self.max_lines :]
+        except OSError as e:
+            print(f"[worker] log tail error: {e}", flush=True)
+            return []
+
+
+# ring buffer when not logging to a file (interactive mode)
+_MEM_LOG: list[str] = []
+_MEM_LOG_LOCK = threading.Lock()
+_MEM_LOG_MAX = 300
+
+
+class _TeeTextIO:
+    """Mirror writes to the original stream and an in-memory ring."""
+
+    def __init__(self, inner):
+        self._inner = inner
+
+    def write(self, s):
+        if s:
+            with _MEM_LOG_LOCK:
+                for line in str(s).splitlines():
+                    if line:
+                        _MEM_LOG.append(line)
+                while len(_MEM_LOG) > _MEM_LOG_MAX:
+                    _MEM_LOG.pop(0)
+        return self._inner.write(s)
+
+    def flush(self):
+        return self._inner.flush()
+
+    def fileno(self):
+        return self._inner.fileno()
+
+    def isatty(self):
+        return self._inner.isatty()
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+
+def enable_memory_log_tee() -> None:
+    if not isinstance(sys.stdout, _TeeTextIO):
+        sys.stdout = _TeeTextIO(sys.stdout)  # type: ignore[assignment]
+    if not isinstance(sys.stderr, _TeeTextIO):
+        sys.stderr = _TeeTextIO(sys.stderr)  # type: ignore[assignment]
+
+
+def drain_memory_log() -> list[str]:
+    with _MEM_LOG_LOCK:
+        lines = list(_MEM_LOG)
+        _MEM_LOG.clear()
+        return lines
+
 
 def _zip_dir(src: Path, dest: Path) -> Path:
     with zipfile.ZipFile(dest, "w", zipfile.ZIP_DEFLATED) as zf:
@@ -628,7 +812,13 @@ def ensure_engine_ready(settings: dict, force: bool = False, skip: bool = False)
     _SETUP_DONE_ENGINES.add(engine)
 
 
-def run_chunk(job: dict, chunk: dict, work_dir: Path, skip_setup: bool = False) -> tuple[int, Path | None]:
+def run_chunk(
+    job: dict,
+    chunk: dict,
+    work_dir: Path,
+    skip_setup: bool = False,
+    stop: threading.Event | None = None,
+) -> tuple[int, Path | None]:
     import gmaps_scraper as gs
 
     keywords = job.get("keywords") or []
@@ -652,7 +842,7 @@ def run_chunk(job: dict, chunk: dict, work_dir: Path, skip_setup: bool = False) 
 
     out_dir = work_dir / "out" / str(chunk["id"])
     out_dir.mkdir(parents=True, exist_ok=True)
-    stop = threading.Event()
+    stop_event = stop if stop is not None else threading.Event()
     ts = str(job.get("ts") or "run")
 
     rows, _failed = gs.execute_index_batch(
@@ -663,7 +853,7 @@ def run_chunk(job: dict, chunk: dict, work_dir: Path, skip_setup: bool = False) 
         int(chunk["end"]),
         str(out_dir),
         ts,
-        stop,
+        stop_event,
     )
     zip_path = work_dir / f"chunk_{chunk['id']}.zip"
     if any(out_dir.rglob("*.csv")):
@@ -800,9 +990,12 @@ def main(argv=None) -> int:
     rt = resolve_runtime(args)
 
     paths = default_service_paths()
+    log_path: Path | None = None
     if args.service or args.log_file:
         log_path = Path(args.log_file) if args.log_file else paths["log_file"]
         setup_service_logging(log_path)
+    else:
+        enable_memory_log_tee()
     if args.service:
         print(f"[worker] service mode ({SERVICE_NAME})", flush=True)
 
@@ -865,7 +1058,10 @@ def main(argv=None) -> int:
     # Concurrent user instances: each lease runs in its own thread under
     # work_root/user_{owner_id}/{job_id}/ so users never share folders.
     active: dict[str, threading.Thread] = {}
+    stops: dict[str, threading.Event] = {}
     active_lock = threading.Lock()
+    log_tailer = LogTailer(log_path)
+    last_log_push = 0.0
     try:
         cfg0 = load_config() or {}
         max_slots = max(1, int(cfg0.get("max_browsers") or 2))
@@ -875,7 +1071,7 @@ def main(argv=None) -> int:
     def _instance_key(job: dict, chunk: dict) -> str:
         return f"{job.get('job_id')}:{chunk.get('id')}"
 
-    def _run_instance(job: dict, chunk: dict) -> None:
+    def _run_instance(job: dict, chunk: dict, stop: threading.Event) -> None:
         key = _instance_key(job, chunk)
         owner_id = job.get("owner_id")
         if owner_id is None:
@@ -897,20 +1093,137 @@ def main(argv=None) -> int:
                 chunk,
                 instance_dir,
                 skip_setup=rt["skip_setup"],
+                stop=stop,
             )
-            if zip_path and zip_path.exists():
-                client.upload(job["job_id"], chunk["id"], zip_path)
-                print(f"[worker] uploaded chunk={chunk['id']} user={owner_id}", flush=True)
+            if stop.is_set():
+                print(
+                    f"[worker] cancelled job={job['job_id']} chunk={chunk['id']}",
+                    flush=True,
+                )
+            if zip_path and zip_path.exists() and not stop.is_set():
+                try:
+                    client.upload(job["job_id"], chunk["id"], zip_path)
+                    print(f"[worker] uploaded chunk={chunk['id']} user={owner_id}", flush=True)
+                except Exception as e:
+                    print(f"[worker] upload skipped/failed: {e}", flush=True)
+            elif zip_path and zip_path.exists():
+                # Best-effort upload of partial results after cancel
+                try:
+                    client.upload(job["job_id"], chunk["id"], zip_path)
+                    print(f"[worker] uploaded partial chunk={chunk['id']}", flush=True)
+                except Exception as e:
+                    print(f"[worker] partial upload skipped: {e}", flush=True)
         except Exception as e:
             print(f"[worker] chunk error user={owner_id} chunk={chunk['id']}: {e}", flush=True)
             rows = 0
         try:
-            client.ack(job["job_id"], chunk["id"], rows)
-            print(f"[worker] ack chunk={chunk['id']} rows={rows}", flush=True)
+            ack = client.ack(job["job_id"], chunk["id"], rows)
+            if ack.get("cancelled"):
+                print(f"[worker] ack cancelled chunk={chunk['id']}", flush=True)
+            else:
+                print(f"[worker] ack chunk={chunk['id']} rows={rows}", flush=True)
         except Exception as e:
             print(f"[worker] ack error: {e}", flush=True)
         with active_lock:
             active.pop(key, None)
+            stops.pop(key, None)
+
+    def _apply_cancels(cancel_jobs: list) -> None:
+        if not cancel_jobs:
+            return
+        wanted = {str(x) for x in cancel_jobs}
+        hit = False
+        with active_lock:
+            for key, ev in list(stops.items()):
+                job_id = key.split(":", 1)[0]
+                if job_id in wanted and not ev.is_set():
+                    ev.set()
+                    hit = True
+                    print(f"[worker] cancel signal for job={job_id}", flush=True)
+        if hit:
+            try:
+                gs.kill_active_browsers()
+            except Exception as e:
+                print(f"[worker] browser kill on cancel: {e}", flush=True)
+
+    def _push_logs(force: bool = False) -> None:
+        nonlocal last_log_push
+        now = time.time()
+        if not force and now - last_log_push < 4:
+            return
+        try:
+            if log_path:
+                lines = log_tailer.read_new()
+            else:
+                lines = drain_memory_log()
+            if lines:
+                client.push_logs(lines, replace=False)
+            last_log_push = now
+        except Exception as e:
+            print(f"[worker] log push failed: {e}", flush=True)
+
+    def _maybe_apply_panel_update(hb: dict) -> bool:
+        """If panel queued an update, wait for idle, run fixed update, exit for restart.
+
+        Returns True when the process should exit (service KeepAlive restarts new code).
+        """
+        cmds = hb.get("commands") or []
+        upd = hb.get("update")
+        if "update" not in cmds and not isinstance(upd, dict):
+            return False
+        ref = "main"
+        if isinstance(upd, dict):
+            ref = str(upd.get("ref") or "main").strip() or "main"
+        print(f"[worker] panel requested update (ref={ref})", flush=True)
+        try:
+            client.report_update_status("updating", message="waiting for active jobs", ref=ref)
+        except Exception as e:
+            print(f"[worker] update-status report failed: {e}", flush=True)
+
+        deadline = time.time() + 600
+        while time.time() < deadline:
+            with active_lock:
+                for k, t in list(active.items()):
+                    if not t.is_alive():
+                        active.pop(k, None)
+                        stops.pop(k, None)
+                n = len(active)
+            if n == 0:
+                break
+            print(f"[worker] update: waiting for {n} instance(s) to finish…", flush=True)
+            time.sleep(5)
+        else:
+            msg = "timed out waiting for active jobs (10m); re-queue update when idle"
+            print(f"[worker] {msg}", flush=True)
+            try:
+                client.report_update_status("failed", message=msg, ref=ref)
+            except Exception as e:
+                print(f"[worker] update-status report failed: {e}", flush=True)
+            return False
+
+        try:
+            client.report_update_status("updating", message="running git/pip update", ref=ref)
+        except Exception as e:
+            print(f"[worker] update-status report failed: {e}", flush=True)
+
+        ok, message = _run_fixed_worker_update(ref)
+        try:
+            client.report_update_status(
+                "success" if ok else "failed",
+                message=message,
+                ref=ref,
+            )
+        except Exception as e:
+            print(f"[worker] update-status report failed: {e}", flush=True)
+
+        if not ok:
+            print(f"[worker] update failed: {message}", flush=True)
+            return False
+
+        print(f"[worker] update succeeded: {message}", flush=True)
+        _push_logs(force=True)
+        _schedule_service_restart_hint()
+        return True
 
     while True:
         try:
@@ -919,6 +1232,11 @@ def main(argv=None) -> int:
                 sync_local_config_from_panel(hb, Path(rt["config_path"]))
             except Exception as e:
                 print(f"[worker] config sync warning: {e}", flush=True)
+            _apply_cancels(hb.get("cancel_jobs") or [])
+            _push_logs()
+            if _maybe_apply_panel_update(hb):
+                # Exit 0 so systemd / LaunchAgent / schtasks KeepAlive restarts new code.
+                sys.exit(0)
             if hb.get("max_browsers") is not None:
                 try:
                     max_slots = max(1, int(hb["max_browsers"]))
@@ -943,6 +1261,7 @@ def main(argv=None) -> int:
                 for k, t in list(active.items()):
                     if not t.is_alive():
                         active.pop(k, None)
+                        stops.pop(k, None)
                 slots_free = max_slots - len(active)
 
             if slots_free <= 0:
@@ -963,13 +1282,15 @@ def main(argv=None) -> int:
                 with active_lock:
                     if key in active:
                         break
+                    stop_ev = threading.Event()
                     t = threading.Thread(
                         target=_run_instance,
-                        args=(job, chunk),
+                        args=(job, chunk, stop_ev),
                         name=f"scrape-{key}",
                         daemon=True,
                     )
                     active[key] = t
+                    stops[key] = stop_ev
                     t.start()
                     leased_any = True
                 print(
@@ -989,6 +1310,8 @@ def main(argv=None) -> int:
             except Exception:
                 pass
             with active_lock:
+                for ev in stops.values():
+                    ev.set()
                 threads = list(active.values())
             for t in threads:
                 t.join(timeout=30)

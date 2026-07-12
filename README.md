@@ -819,11 +819,13 @@ Update **keeps** existing `panel/backend/.env` (secrets preserved), rebuilds fro
 python3 install.py --role worker --update
 # or: bash worker/update.sh          # Windows: worker\update.bat
 
-# Then restart the service (config + token stay in worker_config.json):
+# Then restart the service (config + token stays in worker_config.json):
 bash worker/install_service.sh       # Windows: worker\install_service.bat
 ```
 
 Or uninstall → update → reinstall: `bash worker/install_service.sh --uninstall` then update, then `bash worker/install_service.sh`.
+
+**Fleet update from the panel:** after pushing to GitHub, Admin → Workers → **Update all workers** (or per-row **Request update**). Online agents pull via heartbeat and restart — see `worker/README.md` (one-click fleet update).
 
 ---
 

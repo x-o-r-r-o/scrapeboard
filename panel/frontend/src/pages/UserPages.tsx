@@ -1037,6 +1037,10 @@ export function DashboardPage() {
       {isAdmin && live && live.workers.length > 0 ? (
         <div className="card">
           <h3 style={{ marginTop: 0 }}>Workers — live</h3>
+          <p className="muted" style={{ marginTop: 0 }}>
+            Leases = concurrent chunk instances on the worker (capped by max browsers). Job thread count runs inside each
+            lease and does not increase this ratio.
+          </p>
           <div className="table-wrap">
             <table className="table">
               <thead>
@@ -1044,7 +1048,7 @@ export function DashboardPage() {
                   <th>Worker</th>
                   <th>Status</th>
                   <th>Last seen</th>
-                  <th>Load</th>
+                  <th>Leases</th>
                   <th>CPU</th>
                   <th>RAM</th>
                   <th>Disk</th>

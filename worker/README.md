@@ -228,9 +228,32 @@ Foreground runs (no `--service`) still use a temp work directory unless you set 
 
 Worker hosts should have `.scrapeboard-role=worker` (written by `install.py`). Updates use **worker sparse-checkout** (`/*` minus `panel/` and `deploy/`) so panel sources never land on scrape machines.
 
+### One-click fleet update (control panel)
+
+After you push worker changes to GitHub, you do **not** need to SSH each VPS:
+
+1. Deploy/update the **panel** as usual (so it has the new admin API/UI).
+2. Open **Admin → Workers**.
+3. Set **Git ref** (`main` by default, or `latest` for current-branch pull, or a tag/SHA).
+4. Click **Update all workers**, or **Request update** on a single row.
+5. Watch the **Update** column: `pending` → `updating` → `success` / `failed` (message + time via polling).
+
+Online agents pick the command up on the next heartbeat, wait for active scrapes (up to 10 minutes), run the fixed update path (`install.py --role worker --update --ref …`), report status, then exit so LaunchAgent / systemd / Task Scheduler restarts the new code.
+
+**Requirements on each worker host:**
+
+- Git clone of the repo (not a bare rsync copy) with credentials that can `git fetch` from GitHub
+- `.scrapeboard-role=worker` and a background service (`install_service.*`)
+- Agent version that understands heartbeat `commands: ["update"]` (0.8.0+)
+
+Tailscale is **not** required — workers only need outbound HTTPS to the panel.
+
+### Manual update (SSH)
+
 ```bash
 # From repo root (preferred):
 python3 install.py --role worker --update
+# optional: python3 install.py --role worker --update --ref main
 # or: bash worker/update.sh          # Windows: worker\update.bat
 
 source worker/.venv/bin/activate     # Win: worker\.venv\Scripts\activate
@@ -350,6 +373,7 @@ Used by the wizard, `setup_and_run.*`, and root `install.py` / `install.sh`. Tru
 | Flag | Meaning |
 |------|---------|
 | *(default)* | `install.py --role worker --update` (refuses if role is `panel`) |
+| `--ref REF` | Passed through — sync that branch/tag/SHA (`latest` = current-branch pull) |
 | `--force-role` | Passed through when reconfiguring role |
 
 ### Service mode
@@ -377,6 +401,7 @@ These are **panel-only** (Admin → Workers / Proxy pools / Scrape / Captcha). T
 | **Proxy pool** assignment | Proxies embedded in each lease (not a local file) |
 | Per-worker **scrape flags** | Synced into `scrape` + merged after package defaults on each lease |
 | Global **Captcha** (Admin → Captcha) | Injected into leases; not configured in `worker_config.json` |
+| **Update all / Request update** | Heartbeat `commands: ["update"]` + `update.ref` → fixed `install.py --role worker --update`, then process exit for service restart |
 
 Panel install hint (create/rotate worker):
 

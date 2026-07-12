@@ -565,8 +565,13 @@ def prune_forbidden_paths(role: str) -> None:
                 shutil.rmtree(victim)
 
 
-def sync_repo_for_role(role: str) -> int:
-    """git pull with role sparse-checkout; prune forbidden trees."""
+def sync_repo_for_role(role: str, ref: str | None = None) -> int:
+    """git pull/checkout with role sparse-checkout; prune forbidden trees.
+
+    ref:
+      None / "" / "latest" → git pull --ff-only on the current branch
+      otherwise → fetch + checkout that branch/tag/SHA (worker sparse preserved)
+    """
     role_n = normalize_role(role)
     if role_n is None:
         print("ERROR: sync requires role panel|worker")
@@ -581,21 +586,53 @@ def sync_repo_for_role(role: str) -> int:
         return 1
 
     apply_sparse_checkout(role_n)
-    print("==> git pull --ff-only")
-    code = subprocess.call(["git", "-C", str(ROOT), "pull", "--ff-only"])
-    if code != 0:
-        return code
+    wanted = (ref if ref is not None else os.environ.get("SCRAPEBOARD_UPDATE_REF", "") or "").strip()
+    if not wanted or wanted.lower() == "latest":
+        print("==> git pull --ff-only")
+        code = subprocess.call(["git", "-C", str(ROOT), "pull", "--ff-only"])
+        if code != 0:
+            return code
+    else:
+        print("==> git fetch origin --tags --prune")
+        code = subprocess.call(
+            ["git", "-C", str(ROOT), "fetch", "origin", "--tags", "--prune"]
+        )
+        if code != 0:
+            return code
+        remote_ref = f"origin/{wanted}"
+        has_remote = (
+            subprocess.call(
+                ["git", "-C", str(ROOT), "rev-parse", "--verify", remote_ref],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            == 0
+        )
+        if has_remote:
+            print(f"==> git checkout -B {wanted} {remote_ref}")
+            code = subprocess.call(
+                ["git", "-C", str(ROOT), "checkout", "-B", wanted, remote_ref]
+            )
+        else:
+            print(f"==> git checkout --force {wanted}")
+            code = subprocess.call(
+                ["git", "-C", str(ROOT), "checkout", "--force", wanted]
+            )
+        if code != 0:
+            return code
     prune_forbidden_paths(role_n)
     print(f"==> Update sync complete (role={role_n})")
     return 0
 
 
-def run_update_mode(role: str, kind: str) -> int:
+def run_update_mode(role: str, kind: str, ref: str | None = None) -> int:
     """Honor persisted role: sync sparse tree, then role-specific refresh hints."""
     print()
     print(f"Update mode (role={role})")
+    if ref and str(ref).strip() and str(ref).strip().lower() != "latest":
+        print(f"Git ref: {ref}")
     print("-" * 40)
-    code = sync_repo_for_role(role)
+    code = sync_repo_for_role(role, ref=ref)
     if code != 0:
         return code
 
@@ -1023,6 +1060,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Sync this checkout for the machine role (sparse git pull), then refresh deps hints.",
     )
     p.add_argument(
+        "--ref",
+        default="",
+        help="With --update: git branch/tag/SHA to sync (or 'latest' for current-branch pull). "
+        "Also SCRAPEBOARD_UPDATE_REF.",
+    )
+    p.add_argument(
         "--force-role",
         action="store_true",
         help="Allow switching .scrapeboard-role without an interactive confirm.",
@@ -1110,7 +1153,8 @@ def main(argv: list[str] | None = None) -> int:
             print("ERROR: --update needs a role. Pass --role panel|worker or set .scrapeboard-role.")
             return 1
         role = ensure_role(role, force=args.force_role)
-        return run_update_mode(role, kind)
+        ref = (args.ref or os.environ.get("SCRAPEBOARD_UPDATE_REF") or "").strip() or None
+        return run_update_mode(role, kind, ref=ref)
 
     role = args.role
     if not role:

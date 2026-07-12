@@ -348,6 +348,48 @@ def merge_job_csvs(public_id: str, owner_id: int | None = None) -> Path | None:
     return zip_path
 
 
+async def clear_open_chunks(db: AsyncSession, job: Job) -> int:
+    """Mark remaining pending/leased chunks done so active_leases drop immediately.
+
+    Does not bump done_searches/rows — only frees worker capacity after stop/complete.
+    Queues cancel hints on workers that still held leases so agents stop mid-scrape
+    even after the lease rows are cleared.
+    """
+    from app.models import WorkerNode  # local import avoids cycles at module load
+
+    open_chunks = (
+        await db.execute(
+            select(JobChunk).where(JobChunk.job_id == job.id, JobChunk.state != "done")
+        )
+    ).scalars().all()
+    notify_workers: dict[int, None] = {}
+    for c in open_chunks:
+        if c.worker_id and c.state == "leased":
+            notify_workers[c.worker_id] = None
+        c.state = "done"
+        c.worker_id = None
+        c.leased_at = None
+
+    if notify_workers and job.public_id:
+        now_iso = utcnow().isoformat()
+        for wid in notify_workers:
+            w = await db.get(WorkerNode, wid)
+            if not w:
+                continue
+            meta = dict(w.meta or {})
+            cancels = dict(meta.get("cancel_jobs") or {})
+            # public_id → first seen ISO; heartbeat returns keys younger than TTL
+            cancels[job.public_id] = cancels.get(job.public_id) or now_iso
+            # Bound map size
+            if len(cancels) > 40:
+                oldest = sorted(cancels.items(), key=lambda kv: kv[1])[: len(cancels) - 40]
+                for k, _ in oldest:
+                    cancels.pop(k, None)
+            meta["cancel_jobs"] = cancels
+            w.meta = meta
+    return len(open_chunks)
+
+
 async def finalize_job(db: AsyncSession, job: Job, cancelled: bool = False) -> Path | None:
     zip_path = merge_job_csvs(job.public_id, job.owner_id)
     if zip_path:
@@ -357,6 +399,9 @@ async def finalize_job(db: AsyncSession, job: Job, cancelled: bool = False) -> P
     elif not cancelled and job.status == "running":
         job.status = "completed"
     job.finished_at = utcnow()
+    # Always clear leftover leases so dashboard active_leases cannot stick at 1
+    # after stop/complete (in-flight scrapes are cancelled via heartbeat cancel_jobs).
+    await clear_open_chunks(db, job)
     await db.commit()
     await db.refresh(job)
     return zip_path

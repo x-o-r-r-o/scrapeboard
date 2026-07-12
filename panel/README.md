@@ -306,6 +306,14 @@ systemctl restart scrapeboard
 7. **Bot Builder** (optional) — token → enable → **Install / refresh demos**  
 8. **Users** — create accounts (optional Telegram ID)  
 
+### Fleet worker updates (after GitHub push)
+
+1. Push worker changes to GitHub; deploy the panel if the admin API/UI changed.  
+2. **Admin → Workers** → set **Git ref** (`main` / `latest` / tag) → **Update all workers** (or **Request update** per row).  
+3. Watch the **Update** column (`pending` → `updating` → `success` / `failed`). Online agents pull via heartbeat and restart themselves — no per-VPS SSH.  
+
+Workers must already be git clones with fetch credentials and a background service. See [`../worker/README.md`](../worker/README.md#one-click-fleet-update-control-panel).
+
 Worker install hint when creating a worker:
 
 ```text
@@ -351,6 +359,8 @@ GET  /api/health
 /api/subscriptions/*
 /api/proxy-pools
 /api/workers
+/api/workers/request-update
+/api/workers/{id}/request-update
 /api/settings/captcha
 /api/settings/security
 /api/bot/*
@@ -361,7 +371,10 @@ GET  /api/health
 ### Worker protocol
 
 ```text
+POST /api/worker-api/hello
 POST /api/worker-api/heartbeat
+POST /api/worker-api/update-status
+POST /api/worker-api/logs
 POST /api/worker-api/lease
 POST /api/worker-api/upload?job_id=&chunk_id=
 POST /api/worker-api/ack

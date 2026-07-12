@@ -22,8 +22,12 @@ from app.schemas import (
     ProxyPoolUpdate,
     WorkerCreate,
     WorkerCreateResponse,
+    WorkerFleetUpdateRequest,
+    WorkerFleetUpdateResponse,
     WorkerOut,
     WorkerUpdate,
+    WorkerUpdateStatusIn,
+    WorkerUpdateStatusOut,
 )
 from app.services import jobs as jobs_svc
 from app.services.billing import package_for_user, user_has_dedicated_worker
@@ -38,6 +42,12 @@ from app.services.worker_config import (
     normalize_worker_config,
     package_defaults_from_package,
     public_worker_config,
+)
+from app.services.worker_update import (
+    apply_worker_status_report,
+    get_update_state,
+    pending_update_for_heartbeat,
+    request_update,
 )
 
 router = APIRouter(tags=["infra"])
@@ -101,6 +111,7 @@ def _worker_out(
         online=online,
         active_leases=active_leases,
         worker_config=public_worker_config(raw),
+        update=WorkerUpdateStatusOut(**get_update_state(w)),
     )
 
 
@@ -340,6 +351,56 @@ async def rotate_token(worker_id: int, _: User = Depends(require_admin), __: Use
     )
 
 
+@router.post("/workers/request-update", response_model=WorkerFleetUpdateResponse)
+async def request_workers_update(
+    body: WorkerFleetUpdateRequest,
+    _: User = Depends(require_admin),
+    __: User = Depends(require_ready_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Queue a git-based worker update for all (or selected) workers.
+
+    Online agents pick this up on the next heartbeat and run the fixed
+    worker update path (install.py --role worker --update). No arbitrary shell.
+    """
+    q = select(WorkerNode).order_by(WorkerNode.id)
+    if body.worker_ids:
+        q = q.where(WorkerNode.id.in_(body.worker_ids))
+    rows = (await db.execute(q)).scalars().all()
+    if body.worker_ids and not rows:
+        raise HTTPException(404, "No matching workers")
+    ref = body.ref
+    for w in rows:
+        request_update(w, ref=ref)
+    await db.commit()
+    for w in rows:
+        await db.refresh(w)
+    enriched = [await _enrich_worker(db, w) for w in rows]
+    return WorkerFleetUpdateResponse(
+        ok=True,
+        ref=enriched[0].update.ref if enriched else (body.ref or "main"),
+        queued=len(enriched),
+        workers=enriched,
+    )
+
+
+@router.post("/workers/{worker_id}/request-update", response_model=WorkerOut)
+async def request_one_worker_update(
+    worker_id: int,
+    body: WorkerFleetUpdateRequest = WorkerFleetUpdateRequest(),
+    _: User = Depends(require_admin),
+    __: User = Depends(require_ready_user),
+    db: AsyncSession = Depends(get_db),
+):
+    w = await db.get(WorkerNode, worker_id)
+    if not w:
+        raise HTTPException(404, "Not found")
+    request_update(w, ref=body.ref)
+    await db.commit()
+    await db.refresh(w)
+    return await _enrich_worker(db, w)
+
+
 # --- worker agent protocol ---
 
 async def _auth_worker(db: AsyncSession, authorization: str | None) -> WorkerNode:
@@ -420,6 +481,37 @@ async def worker_hello(
     }
 
 
+_WORKER_LOG_MAX_LINES = 400
+_WORKER_LOG_MAX_CHARS = 200_000
+
+
+def _store_worker_log_lines(w: WorkerNode, lines: list[str], *, replace: bool = False) -> None:
+    """Keep a bounded ring of recent log lines on WorkerNode.meta."""
+    meta = dict(w.meta or {})
+    cleaned: list[str] = []
+    for raw in lines:
+        s = str(raw).replace("\x00", "")
+        if len(s) > 4000:
+            s = s[:4000] + "…"
+        cleaned.append(s)
+    if replace:
+        buf = cleaned
+    else:
+        prev = meta.get("log_lines")
+        buf = list(prev) if isinstance(prev, list) else []
+        buf.extend(cleaned)
+    if len(buf) > _WORKER_LOG_MAX_LINES:
+        buf = buf[-_WORKER_LOG_MAX_LINES:]
+    # Soft char budget — drop from the head if needed
+    total = sum(len(x) + 1 for x in buf)
+    while buf and total > _WORKER_LOG_MAX_CHARS:
+        total -= len(buf[0]) + 1
+        buf.pop(0)
+    meta["log_lines"] = buf
+    meta["log_updated_at"] = datetime.now(timezone.utc).isoformat()
+    w.meta = meta
+
+
 @router.post("/worker-api/heartbeat")
 async def worker_heartbeat(
     body: dict,
@@ -427,7 +519,8 @@ async def worker_heartbeat(
     db: AsyncSession = Depends(get_db),
 ):
     w = await _auth_worker(db, authorization)
-    w.last_seen_at = datetime.now(timezone.utc)
+    now = datetime.now(timezone.utc)
+    w.last_seen_at = now
     w.cpu_percent = float(body.get("cpu") or 0)
     w.mem_percent = float(body.get("mem") or 0)
     w.disk_percent = float(body.get("disk") or body.get("disk_percent") or 0)
@@ -443,6 +536,52 @@ async def worker_heartbeat(
     if body.get("os") or body.get("host_os"):
         w.host_os = str(body.get("os") or body.get("host_os"))[:64]
     w.version = str(body.get("version") or w.version)
+
+    # Refresh lease TTL + surface jobs that are no longer active so the agent can stop.
+    cancel_jobs: list[str] = []
+    leased = (
+        await db.execute(
+            select(JobChunk).where(JobChunk.worker_id == w.id, JobChunk.state == "leased")
+        )
+    ).scalars().all()
+    if leased:
+        job_ids = {c.job_id for c in leased}
+        jobs = (
+            await db.execute(select(Job).where(Job.id.in_(job_ids)))
+        ).scalars().all()
+        by_id = {j.id: j for j in jobs}
+        for c in leased:
+            c.leased_at = now
+            j = by_id.get(c.job_id)
+            if j and j.status not in ("running", "queued"):
+                cancel_jobs.append(j.public_id)
+
+    # Also deliver cancel hints queued by finalize_job after leases were cleared.
+    meta = dict(w.meta or {})
+    queued = meta.get("cancel_jobs") or {}
+    if isinstance(queued, dict) and queued:
+        fresh: dict = {}
+        for pid, seen_at in queued.items():
+            try:
+                ts = datetime.fromisoformat(str(seen_at).replace("Z", "+00:00"))
+            except Exception:
+                ts = now
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=timezone.utc)
+            if (now - ts).total_seconds() < 600:
+                cancel_jobs.append(str(pid))
+                fresh[str(pid)] = seen_at
+        meta["cancel_jobs"] = fresh
+        w.meta = meta
+    elif isinstance(queued, list):
+        # Legacy list form
+        cancel_jobs.extend(str(x) for x in queued)
+        meta["cancel_jobs"] = {}
+        w.meta = meta
+
+    commands: list[str] = []
+    update_cmd = pending_update_for_heartbeat(w)
+
     await db.commit()
     captcha = await get_captcha_settings(db)
     # Heartbeat sync uses worker machine config only (no job/package context yet)
@@ -453,7 +592,7 @@ async def worker_heartbeat(
         max_browsers=w.max_browsers,
         captcha=captcha,
     )
-    return {
+    out: dict = {
         "ok": True,
         "drain": w.is_draining,
         "enabled": w.is_enabled,
@@ -462,6 +601,81 @@ async def worker_heartbeat(
         "proxy_pool_id": w.proxy_pool_id,
         # Redacted: captcha keys only delivered inside job leases
         "worker_config": _redact_worker_config(effective),
+        "cancel_jobs": sorted(set(cancel_jobs)),
+        "commands": commands,
+    }
+    if update_cmd:
+        commands.append("update")
+        out["commands"] = commands
+        out["update"] = update_cmd
+    return out
+
+
+@router.post("/worker-api/update-status")
+async def worker_update_status(
+    body: WorkerUpdateStatusIn,
+    authorization: str | None = Header(default=None),
+    db: AsyncSession = Depends(get_db),
+):
+    """Worker reports progress of a panel-requested git update."""
+    w = await _auth_worker(db, authorization)
+    w.last_seen_at = datetime.now(timezone.utc)
+    state = apply_worker_status_report(
+        w,
+        status=body.status,
+        message=body.message or "",
+        ref=body.ref,
+    )
+    await db.commit()
+    return {"ok": True, "update": state}
+
+
+@router.post("/worker-api/logs")
+async def worker_push_logs(
+    body: dict,
+    authorization: str | None = Header(default=None),
+    db: AsyncSession = Depends(get_db),
+):
+    """Worker pushes recent log lines (ring buffer stored on WorkerNode.meta)."""
+    w = await _auth_worker(db, authorization)
+    w.last_seen_at = datetime.now(timezone.utc)
+    raw_lines = body.get("lines")
+    if not isinstance(raw_lines, list):
+        raise HTTPException(400, "lines must be a list of strings")
+    # Cap inbound batch size
+    lines = [str(x) for x in raw_lines[-_WORKER_LOG_MAX_LINES:]]
+    replace = bool(body.get("replace"))
+    _store_worker_log_lines(w, lines, replace=replace)
+    await db.commit()
+    meta = w.meta or {}
+    return {
+        "ok": True,
+        "stored": len(meta.get("log_lines") or []),
+        "updated_at": meta.get("log_updated_at"),
+    }
+
+
+@router.get("/workers/{worker_id}/logs")
+async def get_worker_logs(
+    worker_id: int,
+    _: User = Depends(require_admin),
+    __: User = Depends(require_ready_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Admin-only live tail of recent worker log lines."""
+    w = await db.get(WorkerNode, worker_id)
+    if not w:
+        raise HTTPException(404, "Not found")
+    meta = w.meta or {}
+    lines = meta.get("log_lines") if isinstance(meta.get("log_lines"), list) else []
+    return {
+        "worker_id": w.id,
+        "name": w.name,
+        "lines": lines,
+        "updated_at": meta.get("log_updated_at"),
+        "online": bool(w.last_seen_at and (datetime.now(timezone.utc) - (
+            w.last_seen_at if w.last_seen_at.tzinfo else w.last_seen_at.replace(tzinfo=timezone.utc)
+        )).total_seconds() < 90),
     }
 
 
@@ -733,9 +947,11 @@ async def worker_upload(
     job = (await db.execute(select(Job).where(Job.public_id == job_id))).scalar_one_or_none()
     if not job:
         raise HTTPException(404, "Job not found")
-    if job.status not in ("running", "queued"):
+    # Allow upload while this worker still holds the lease even if the job was
+    # just stopped/completed (partial results); reject only when lease is gone.
+    chunk = await _require_chunk_lease(db, w, job, chunk_id)
+    if job.status not in ("running", "queued") and chunk.state != "leased":
         raise HTTPException(409, "Job is not active")
-    await _require_chunk_lease(db, w, job, chunk_id)
 
     dest_dir = jobs_svc.job_parts_dir(job.public_id, job.owner_id) / str(chunk_id)
     dest_dir.mkdir(parents=True, exist_ok=True)
@@ -783,7 +999,24 @@ async def worker_ack(
     job = (await db.execute(select(Job).where(Job.public_id == job_id))).scalar_one_or_none()
     if not job:
         return {"ok": False}
-    if job.status == "stopped":
+
+    # Terminal job: still clear this worker's lease so active_leases cannot stick.
+    if job.status in ("stopped", "completed", "failed"):
+        chunk = (
+            await db.execute(
+                select(JobChunk).where(
+                    JobChunk.job_id == job.id,
+                    JobChunk.chunk_id == chunk_id,
+                    JobChunk.worker_id == w.id,
+                )
+            )
+        ).scalar_one_or_none()
+        if chunk and chunk.state == "leased":
+            chunk.state = "done"
+            if rows and not chunk.rows:
+                chunk.rows = rows
+                job.rows_saved += rows
+            await db.commit()
         return {"ok": True, "cancelled": True}
 
     chunk = await _require_chunk_lease(db, w, job, chunk_id)
