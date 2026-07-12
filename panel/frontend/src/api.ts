@@ -17,6 +17,7 @@ export type User = {
   totp_enabled: boolean;
   telegram_id: string | null;
   perms: Record<string, unknown>;
+  worker_ids?: number[];
 };
 
 function authHeaders(): HeadersInit {

@@ -39,6 +39,25 @@ class User(Base):
 
     subscriptions: Mapped[list["Subscription"]] = relationship(back_populates="user")
     jobs: Mapped[list["Job"]] = relationship(back_populates="owner")
+    worker_assignments: Mapped[list["UserWorker"]] = relationship(back_populates="user", cascade="all, delete-orphan")
+
+
+class UserWorker(Base):
+    """Restrict which workers may lease jobs for a given panel/Telegram user.
+
+    Empty assignment list = any worker may pick the user's jobs (default).
+    """
+
+    __tablename__ = "user_workers"
+    __table_args__ = (UniqueConstraint("user_id", "worker_id", name="uq_user_worker"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    worker_id: Mapped[int] = mapped_column(ForeignKey("worker_nodes.id", ondelete="CASCADE"), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    user: Mapped["User"] = relationship(back_populates="worker_assignments")
+    worker: Mapped["WorkerNode"] = relationship()
 
 
 class LoginAttempt(Base):
@@ -76,6 +95,12 @@ class Package(Base):
     threads: Mapped[int] = mapped_column(Integer, default=2)
     max_upload_mb: Mapped[int] = mapped_column(Integer, default=5)
     allowed_engines: Mapped[list] = mapped_column(JSON, default=lambda: ["all"])
+    description: Mapped[str] = mapped_column(Text, default="")
+    headings: Mapped[list] = mapped_column(JSON, default=list)  # marketing / bot display titles
+    features: Mapped[list] = mapped_column(JSON, default=list)  # bullet feature list
+    # When true, admins may optionally pin this subscriber to specific workers
+    dedicated_worker: Mapped[bool] = mapped_column(Boolean, default=False)
+    scrape_settings_id: Mapped[int | None] = mapped_column(ForeignKey("scrape_settings.id"), nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
@@ -163,6 +188,7 @@ class WorkerNode(Base):
     is_draining: Mapped[bool] = mapped_column(Boolean, default=False)
     max_browsers: Mapped[int] = mapped_column(Integer, default=2)
     proxy_pool_id: Mapped[int | None] = mapped_column(ForeignKey("proxy_pools.id"), nullable=True)
+    scrape_settings_id: Mapped[int | None] = mapped_column(ForeignKey("scrape_settings.id"), nullable=True)
     last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     cpu_percent: Mapped[float] = mapped_column(Float, default=0)
     mem_percent: Mapped[float] = mapped_column(Float, default=0)
@@ -188,7 +214,12 @@ class WorkerNode(Base):
 class ScrapeSettings(Base):
     __tablename__ = "scrape_settings"
 
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(128), default="Default")
+    slug: Mapped[str] = mapped_column(String(64), default="default", index=True)
+    description: Mapped[str] = mapped_column(Text, default="")
+    is_default: Mapped[bool] = mapped_column(Boolean, default=False)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     engine: Mapped[str] = mapped_column(String(32), default="chrome")
     threads: Mapped[int] = mapped_column(Integer, default=2)
     block_resources: Mapped[str] = mapped_column(String(16), default="media")
@@ -204,6 +235,9 @@ class ScrapeSettings(Base):
     captcha_key: Mapped[str] = mapped_column(String(255), default="")
     captcha_host: Mapped[str] = mapped_column(String(255), default="")
     captcha_retries: Mapped[int] = mapped_column(Integer, default=2)
+    captcha_backup_provider: Mapped[str] = mapped_column(String(32), default="none")
+    captcha_backup_key: Mapped[str] = mapped_column(String(255), default="")
+    captcha_backup_host: Mapped[str] = mapped_column(String(255), default="")
     nav_timeout: Mapped[int] = mapped_column(Integer, default=45)
     proxy_attempts: Mapped[int] = mapped_column(Integer, default=3)
     # Extra scrape/worker flags (defaults for new workers + lease fallback)
@@ -215,6 +249,7 @@ class ScrapeSettings(Base):
     no_preflight: Mapped[bool] = mapped_column(Boolean, default=False)
     fresh: Mapped[bool] = mapped_column(Boolean, default=False)
     debug: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
 class Job(Base):
@@ -298,6 +333,7 @@ class BotWorkflow(Base):
     description: Mapped[str] = mapped_column(Text, default="")
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     is_demo: Mapped[bool] = mapped_column(Boolean, default=False)
+    sort_order: Mapped[int] = mapped_column(Integer, default=0)
     definition: Mapped[dict] = mapped_column(JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 

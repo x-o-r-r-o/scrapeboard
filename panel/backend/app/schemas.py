@@ -43,6 +43,8 @@ class UserOut(BaseModel):
     totp_enabled: bool
     telegram_id: str | None
     perms: dict[str, Any]
+    worker_ids: list[int] = []
+    dedicated_worker: bool = False
     created_at: datetime
 
     model_config = {"from_attributes": True}
@@ -55,6 +57,7 @@ class UserCreate(BaseModel):
     role: Literal["admin", "user"] = "user"
     telegram_id: str | None = None
     perms: dict[str, Any] = Field(default_factory=dict)
+    worker_ids: list[int] | None = None
 
 
 class UserUpdate(BaseModel):
@@ -63,8 +66,15 @@ class UserUpdate(BaseModel):
     is_active: bool | None = None
     telegram_id: str | None = None
     perms: dict[str, Any] | None = None
+    worker_ids: list[int] | None = None
     password: str | None = Field(default=None, min_length=8)
     reset_2fa: bool = False
+
+
+class UserPermsSchema(BaseModel):
+    keys: list[dict[str, Any]]
+    defaults: dict[str, Any]
+    engines: list[str]
 
 
 class SecuritySettingsOut(BaseModel):
@@ -96,6 +106,11 @@ class PackageOut(BaseModel):
     threads: int
     max_upload_mb: int
     allowed_engines: list
+    description: str = ""
+    headings: list = Field(default_factory=list)
+    features: list = Field(default_factory=list)
+    dedicated_worker: bool = False
+    scrape_settings_id: int | None = None
     is_active: bool
 
     model_config = {"from_attributes": True}
@@ -110,6 +125,12 @@ class PackageCreate(BaseModel):
     threads: int = 2
     max_upload_mb: int = 5
     allowed_engines: list = Field(default_factory=lambda: ["all"])
+    description: str = ""
+    headings: list = Field(default_factory=list)
+    features: list = Field(default_factory=list)
+    dedicated_worker: bool = False
+    scrape_settings_id: int | None = None
+    create_scrape_profile: bool = True
     is_active: bool = True
 
 
@@ -121,6 +142,11 @@ class PackageUpdate(BaseModel):
     threads: int | None = None
     max_upload_mb: int | None = None
     allowed_engines: list | None = None
+    description: str | None = None
+    headings: list | None = None
+    features: list | None = None
+    dedicated_worker: bool | None = None
+    scrape_settings_id: int | None = None
     is_active: bool | None = None
 
 
@@ -162,12 +188,94 @@ class SubscriptionOut(BaseModel):
     days_left: float = 0
 
 
+class SubscriptionAdminOut(BaseModel):
+    id: int
+    user_id: int
+    username: str
+    telegram_id: str | None = None
+    package_id: int | None = None
+    package_name: str
+    threads: int
+    max_upload_mb: int
+    tier: int
+    starts_at: datetime
+    expires_at: datetime
+    is_active: bool
+    days_left: float = 0
+    user_is_active: bool = True
+
+
+class SubscriptionUpdate(BaseModel):
+    package_id: int | None = None
+    package_name: str | None = None
+    threads: int | None = None
+    max_upload_mb: int | None = None
+    tier: int | None = None
+    expires_at: datetime | None = None
+    is_active: bool | None = None
+
+
+class SubscriptionExtend(BaseModel):
+    days: int = Field(ge=1, le=3650, default=30)
+
+
+class GrantRequest(BaseModel):
+    user_id: int | None = None
+    telegram_id: str | None = None
+    package_id: int
+    duration_days: int | None = Field(default=None, ge=1, le=3650)
+    notify: bool = True
+
+
+class TelegramUserCreate(BaseModel):
+    telegram_id: str = Field(min_length=3, max_length=64)
+    username: str | None = Field(default=None, min_length=3, max_length=64)
+    email: str | None = None
+    password: str | None = Field(default=None, min_length=8)
+    package_id: int | None = None
+    duration_days: int | None = Field(default=None, ge=1, le=3650)
+    is_active: bool = True
+    notify: bool = False
+    perms: dict[str, Any] | None = None
+    worker_ids: list[int] | None = None
+
+
+class TelegramUserUpdate(BaseModel):
+    telegram_id: str | None = Field(default=None, min_length=3, max_length=64)
+    username: str | None = Field(default=None, min_length=3, max_length=64)
+    email: EmailStr | str | None = None
+    is_active: bool | None = None
+    unlink_telegram: bool = False
+    password: str | None = Field(default=None, min_length=8)
+    reset_2fa: bool = False
+    perms: dict[str, Any] | None = None
+    worker_ids: list[int] | None = None
+
+
+class SubscriberOut(BaseModel):
+    user_id: int
+    username: str
+    email: str
+    role: str
+    is_active: bool
+    telegram_id: str | None
+    totp_enabled: bool
+    created_at: datetime
+    subscription: SubscriptionAdminOut | None = None
+    has_active_subscription: bool = False
+    perms: dict[str, Any] = Field(default_factory=dict)
+    worker_ids: list[int] = []
+    dedicated_worker: bool = False
+
+
 class ProxyPoolOut(BaseModel):
     id: int
     name: str
     description: str
     proxy_count: int
     is_active: bool
+    worker_ids: list[int] = []
+    worker_names: list[str] = []
 
     model_config = {"from_attributes": True}
 
@@ -184,6 +292,10 @@ class ProxyPoolUpdate(BaseModel):
     description: str | None = None
     proxies_text: str | None = None
     is_active: bool | None = None
+
+
+class ProxyPoolAssign(BaseModel):
+    worker_ids: list[int] = Field(default_factory=list)
 
 
 class WorkerConfigUpdate(BaseModel):
@@ -203,6 +315,9 @@ class WorkerConfigUpdate(BaseModel):
     captcha_key: str | None = None
     captcha_host: str | None = None
     captcha_retries: int | None = None
+    captcha_backup_provider: str | None = None
+    captcha_backup_key: str | None = None
+    captcha_backup_host: str | None = None
     nav_timeout: int | None = None
     proxy_attempts: int | None = None
     headless: bool | None = None
@@ -223,6 +338,9 @@ class WorkerOut(BaseModel):
     is_draining: bool
     max_browsers: int
     proxy_pool_id: int | None
+    proxy_pool_name: str | None = None
+    scrape_settings_id: int | None = None
+    scrape_settings_name: str | None = None
     last_seen_at: datetime | None
     cpu_percent: float
     mem_percent: float
@@ -248,7 +366,8 @@ class WorkerCreate(BaseModel):
     name: str
     max_browsers: int = 2
     proxy_pool_id: int | None = None
-    # If omitted, seeded from global Scrape settings
+    scrape_settings_id: int | None = None
+    # If omitted, seeded from assigned scrape profile
     worker_config: WorkerConfigUpdate | None = None
     use_global_scrape_defaults: bool = True
 
@@ -265,12 +384,19 @@ class WorkerUpdate(BaseModel):
     is_draining: bool | None = None
     max_browsers: int | None = None
     proxy_pool_id: int | None = None
+    scrape_settings_id: int | None = None
     worker_config: WorkerConfigUpdate | None = None
-    # When true, replace worker_config from current global Scrape settings
+    # When true, replace worker_config from assigned scrape profile
     reset_config_from_global: bool = False
 
 
 class ScrapeSettingsOut(BaseModel):
+    id: int = 1
+    name: str = "Default"
+    slug: str = "default"
+    description: str = ""
+    is_default: bool = False
+    is_active: bool = True
     engine: str
     threads: int
     block_resources: str
@@ -286,6 +412,9 @@ class ScrapeSettingsOut(BaseModel):
     captcha_key_configured: bool
     captcha_host: str
     captcha_retries: int
+    captcha_backup_provider: str = "none"
+    captcha_backup_key_configured: bool = False
+    captcha_backup_host: str = ""
     nav_timeout: int
     proxy_attempts: int
     headless: bool = True
@@ -296,9 +425,25 @@ class ScrapeSettingsOut(BaseModel):
     no_preflight: bool = False
     fresh: bool = False
     debug: bool = False
+    worker_count: int = 0
+    package_count: int = 0
+
+
+class ScrapeSettingsCreate(BaseModel):
+    name: str
+    slug: str | None = None
+    description: str = ""
+    clone_from_id: int | None = None
+    is_default: bool = False
+    is_active: bool = True
 
 
 class ScrapeSettingsUpdate(BaseModel):
+    name: str | None = None
+    slug: str | None = None
+    description: str | None = None
+    is_default: bool | None = None
+    is_active: bool | None = None
     engine: str | None = None
     threads: int | None = None
     block_resources: str | None = None
@@ -314,6 +459,9 @@ class ScrapeSettingsUpdate(BaseModel):
     captcha_key: str | None = None
     captcha_host: str | None = None
     captcha_retries: int | None = None
+    captcha_backup_provider: str | None = None
+    captcha_backup_key: str | None = None
+    captcha_backup_host: str | None = None
     nav_timeout: int | None = None
     proxy_attempts: int | None = None
     headless: bool | None = None
@@ -324,18 +472,23 @@ class ScrapeSettingsUpdate(BaseModel):
     no_preflight: bool | None = None
     fresh: bool | None = None
     debug: bool | None = None
+    apply_to_workers: bool = False
 
 
 class JobOut(BaseModel):
     id: int
     public_id: str
     owner_id: int
+    owner_username: str | None = None
+    owner_telegram_id: str | None = None
     status: str
     settings: dict
     total_searches: int
     done_searches: int
     rows_saved: int
     result_zip: str | None
+    result_exists: bool = False
+    result_bytes: int | None = None
     error: str | None
     created_at: datetime
     started_at: datetime | None
@@ -343,6 +496,29 @@ class JobOut(BaseModel):
     pct: float = 0
 
     model_config = {"from_attributes": True}
+
+
+class JobFileEntry(BaseModel):
+    name: str
+    path: str
+    size_bytes: int
+    kind: str  # zip | part | merged | input | other
+
+
+class JobFilesOut(BaseModel):
+    job_id: int
+    public_id: str
+    files: list[JobFileEntry]
+    total_bytes: int = 0
+
+
+class StorageOwnerOut(BaseModel):
+    user_id: int
+    username: str
+    telegram_id: str | None
+    uploads_bytes: int
+    results_bytes: int
+    job_count: int
 
 
 class JobCreate(BaseModel):
@@ -410,9 +586,27 @@ class BotWorkflowOut(BaseModel):
     description: str
     enabled: bool
     is_demo: bool
+    sort_order: int = 0
     definition: dict
 
     model_config = {"from_attributes": True}
+
+
+class BotWorkflowCreate(BaseModel):
+    key: str
+    name: str
+    description: str = ""
+    enabled: bool = True
+    sort_order: int = 0
+    definition: dict = {}
+
+
+class BotWorkflowUpdate(BaseModel):
+    name: str | None = None
+    description: str | None = None
+    enabled: bool | None = None
+    sort_order: int | None = None
+    definition: dict | None = None
 
 
 class MessageOut(BaseModel):

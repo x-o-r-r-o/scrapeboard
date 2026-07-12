@@ -48,6 +48,17 @@ async def active_subscription(db: AsyncSession, user: User) -> Subscription | No
     return sub
 
 
+async def user_has_dedicated_worker(db: AsyncSession, user: User) -> bool:
+    """True when the user's live subscription package includes dedicated_worker."""
+    if user.role == "admin":
+        return True
+    sub = await active_subscription(db, user)
+    if not sub or not sub.package_id:
+        return False
+    pkg = await db.get(Package, sub.package_id)
+    return bool(pkg and getattr(pkg, "dedicated_worker", False))
+
+
 async def can_purchase(db: AsyncSession, user: User, pkg: Package) -> tuple[bool, str]:
     if user.role == "admin":
         return False, "Admins do not need a subscription"
@@ -57,7 +68,13 @@ async def can_purchase(db: AsyncSession, user: User, pkg: Package) -> tuple[bool
     return True, ""
 
 
-async def activate_subscription(db: AsyncSession, user: User, pkg: Package) -> Subscription:
+async def activate_subscription(
+    db: AsyncSession,
+    user: User,
+    pkg: Package,
+    *,
+    duration_days: int | None = None,
+) -> Subscription:
     # deactivate older
     old = (
         await db.execute(
@@ -67,6 +84,7 @@ async def activate_subscription(db: AsyncSession, user: User, pkg: Package) -> S
     for s in old:
         s.is_active = False
     now = utcnow()
+    days = int(duration_days if duration_days is not None else pkg.duration_days)
     sub = Subscription(
         user_id=user.id,
         package_id=pkg.id,
@@ -75,13 +93,83 @@ async def activate_subscription(db: AsyncSession, user: User, pkg: Package) -> S
         max_upload_mb=pkg.max_upload_mb,
         tier=pkg.tier,
         starts_at=now,
-        expires_at=now + timedelta(days=pkg.duration_days),
+        expires_at=now + timedelta(days=max(1, days)),
         is_active=True,
     )
     db.add(sub)
     await db.commit()
     await db.refresh(sub)
     return sub
+
+
+async def revoke_subscription(db: AsyncSession, sub: Subscription) -> Subscription:
+    sub.is_active = False
+    await db.commit()
+    await db.refresh(sub)
+    return sub
+
+
+async def extend_subscription(db: AsyncSession, sub: Subscription, days: int) -> Subscription:
+    now = utcnow()
+    exp = sub.expires_at if sub.expires_at.tzinfo else sub.expires_at.replace(tzinfo=timezone.utc)
+    base = exp if exp > now else now
+    sub.expires_at = base + timedelta(days=max(1, int(days)))
+    sub.is_active = True
+    await db.commit()
+    await db.refresh(sub)
+    return sub
+
+
+async def update_subscription(
+    db: AsyncSession,
+    sub: Subscription,
+    *,
+    package: Package | None = None,
+    package_name: str | None = None,
+    threads: int | None = None,
+    max_upload_mb: int | None = None,
+    tier: int | None = None,
+    expires_at: datetime | None = None,
+    is_active: bool | None = None,
+) -> Subscription:
+    if package is not None:
+        sub.package_id = package.id
+        sub.package_name = package.name
+        if threads is None:
+            sub.threads = package.threads
+        if max_upload_mb is None:
+            sub.max_upload_mb = package.max_upload_mb
+        if tier is None:
+            sub.tier = package.tier
+    if package_name is not None:
+        sub.package_name = package_name
+    if threads is not None:
+        sub.threads = threads
+    if max_upload_mb is not None:
+        sub.max_upload_mb = max_upload_mb
+    if tier is not None:
+        sub.tier = tier
+    if expires_at is not None:
+        sub.expires_at = expires_at if expires_at.tzinfo else expires_at.replace(tzinfo=timezone.utc)
+    if is_active is not None:
+        sub.is_active = is_active
+    await db.commit()
+    await db.refresh(sub)
+    return sub
+
+
+def subscription_days_left(sub: Subscription) -> float:
+    now = utcnow()
+    exp = sub.expires_at if sub.expires_at.tzinfo else sub.expires_at.replace(tzinfo=timezone.utc)
+    return max(0.0, (exp - now).total_seconds() / 86400)
+
+
+def subscription_is_live(sub: Subscription) -> bool:
+    if not sub.is_active:
+        return False
+    now = utcnow()
+    exp = sub.expires_at if sub.expires_at.tzinfo else sub.expires_at.replace(tzinfo=timezone.utc)
+    return exp > now
 
 
 def _parse_trc20_tx(data: dict, wallet: str, min_amount: float, contract: str) -> tuple[bool, str, float]:

@@ -13,10 +13,10 @@ const USER_LINKS: NavLink[] = [
 const ADMIN_LINKS: NavLink[] = [
   { to: "/app/admin/users", label: "Users" },
   { to: "/app/admin/packages", label: "Packages" },
-  { to: "/app/admin/billing", label: "Billing" },
+  { to: "/app/admin/billing", label: "Billing & Telegram" },
   { to: "/app/admin/proxies", label: "Proxy pools" },
   { to: "/app/admin/workers", label: "Workers" },
-  { to: "/app/admin/scrape", label: "Scrape settings" },
+  { to: "/app/admin/scrape", label: "Scrape profiles" },
   { to: "/app/admin/security", label: "Security" },
   { to: "/app/admin/bot", label: "Bot builder" },
 ];

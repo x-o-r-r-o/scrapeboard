@@ -31,7 +31,7 @@ ROOT = Path(__file__).resolve().parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-VERSION = "0.5.0"
+VERSION = "0.6.0"
 CONFIG_NAME = "worker_config.json"
 HOST_OS = platform.system()  # Windows | Darwin | Linux
 
@@ -310,6 +310,8 @@ def sync_local_config_from_panel(hb: dict, config_file: Path | None = None) -> N
     merged = dict(scrape)
     if not merged.get("captcha_key") and prev.get("captcha_key"):
         merged["captcha_key"] = prev["captcha_key"]
+    if not merged.get("captcha_backup_key") and prev.get("captcha_backup_key"):
+        merged["captcha_backup_key"] = prev["captcha_backup_key"]
     cfg["scrape"] = merged
     if hb.get("max_browsers") is not None:
         try:
@@ -524,6 +526,56 @@ def main(argv=None) -> int:
         print("  Check panel URL, worker token, and that the panel is reachable.", flush=True)
         return 1
 
+    # Concurrent user instances: each lease runs in its own thread under
+    # work_root/user_{owner_id}/{job_id}/ so users never share folders.
+    active: dict[str, threading.Thread] = {}
+    active_lock = threading.Lock()
+    try:
+        cfg0 = load_config() or {}
+        max_slots = max(1, int(cfg0.get("max_browsers") or 2))
+    except Exception:
+        max_slots = 2
+
+    def _instance_key(job: dict, chunk: dict) -> str:
+        return f"{job.get('job_id')}:{chunk.get('id')}"
+
+    def _run_instance(job: dict, chunk: dict) -> None:
+        key = _instance_key(job, chunk)
+        owner_id = job.get("owner_id")
+        if owner_id is None:
+            # derive from public_id prefix when panel is older
+            try:
+                owner_id = int(str(job.get("job_id") or "").split("_", 1)[0])
+            except (TypeError, ValueError, IndexError):
+                owner_id = "unknown"
+        instance_dir = work_root / f"user_{owner_id}" / str(job["job_id"])
+        print(
+            f"[worker] start instance user={owner_id} job={job['job_id']} "
+            f"chunk={chunk['id']} dir={instance_dir}",
+            flush=True,
+        )
+        rows = 0
+        try:
+            rows, zip_path = run_chunk(
+                job,
+                chunk,
+                instance_dir,
+                skip_setup=rt["skip_setup"],
+            )
+            if zip_path and zip_path.exists():
+                client.upload(job["job_id"], chunk["id"], zip_path)
+                print(f"[worker] uploaded chunk={chunk['id']} user={owner_id}", flush=True)
+        except Exception as e:
+            print(f"[worker] chunk error user={owner_id} chunk={chunk['id']}: {e}", flush=True)
+            rows = 0
+        try:
+            client.ack(job["job_id"], chunk["id"], rows)
+            print(f"[worker] ack chunk={chunk['id']} rows={rows}", flush=True)
+        except Exception as e:
+            print(f"[worker] ack error: {e}", flush=True)
+        with active_lock:
+            active.pop(key, None)
+
     while True:
         try:
             hb = client.heartbeat()
@@ -531,49 +583,79 @@ def main(argv=None) -> int:
                 sync_local_config_from_panel(hb, Path(rt["config_path"]))
             except Exception as e:
                 print(f"[worker] config sync warning: {e}", flush=True)
+            if hb.get("max_browsers") is not None:
+                try:
+                    max_slots = max(1, int(hb["max_browsers"]))
+                except (TypeError, ValueError):
+                    pass
             if not hb.get("enabled", True):
                 print("[worker] disabled by panel; sleeping", flush=True)
                 time.sleep(10)
                 continue
             if hb.get("drain"):
-                print("[worker] draining; no new leases", flush=True)
+                with active_lock:
+                    running = len(active)
+                if running:
+                    print(f"[worker] draining; waiting on {running} instance(s)", flush=True)
+                else:
+                    print("[worker] draining; no new leases", flush=True)
                 time.sleep(5)
                 continue
-            lease = client.lease()
-            chunk = lease.get("chunk")
-            if not chunk:
-                time.sleep(2)
+
+            with active_lock:
+                # prune dead threads
+                for k, t in list(active.items()):
+                    if not t.is_alive():
+                        active.pop(k, None)
+                slots_free = max_slots - len(active)
+
+            if slots_free <= 0:
+                time.sleep(1)
                 continue
-            job = lease["job"]
-            print(
-                f"[worker] leased job={job['job_id']} chunk={chunk['id']} "
-                f"[{chunk['start']}:{chunk['end']}] "
-                f"engine={job.get('settings', {}).get('engine')} "
-                f"threads={job.get('settings', {}).get('threads')}",
-                flush=True,
-            )
-            rows = 0
-            try:
-                rows, zip_path = run_chunk(
-                    job,
-                    chunk,
-                    work_root / job["job_id"],
-                    skip_setup=rt["skip_setup"],
+
+            # Fill free slots (one lease attempt per free slot per loop)
+            leased_any = False
+            for _ in range(slots_free):
+                lease = client.lease()
+                if lease.get("slots_full"):
+                    break
+                chunk = lease.get("chunk")
+                if not chunk:
+                    break
+                job = lease["job"]
+                key = _instance_key(job, chunk)
+                with active_lock:
+                    if key in active:
+                        break
+                    t = threading.Thread(
+                        target=_run_instance,
+                        args=(job, chunk),
+                        name=f"scrape-{key}",
+                        daemon=True,
+                    )
+                    active[key] = t
+                    t.start()
+                    leased_any = True
+                print(
+                    f"[worker] leased job={job['job_id']} chunk={chunk['id']} "
+                    f"owner={job.get('owner_id')} "
+                    f"engine={job.get('settings', {}).get('engine')} "
+                    f"threads={job.get('settings', {}).get('threads')} "
+                    f"slots={len(active)}/{max_slots}",
+                    flush=True,
                 )
-                if zip_path and zip_path.exists():
-                    client.upload(job["job_id"], chunk["id"], zip_path)
-                    print(f"[worker] uploaded chunk={chunk['id']}", flush=True)
-            except Exception as e:
-                print(f"[worker] chunk error: {e}", flush=True)
-                rows = 0
-            client.ack(job["job_id"], chunk["id"], rows)
-            print(f"[worker] ack chunk={chunk['id']} rows={rows}", flush=True)
+            if not leased_any:
+                time.sleep(2)
         except KeyboardInterrupt:
-            print("[worker] stop", flush=True)
+            print("[worker] stop — waiting for instances…", flush=True)
             try:
                 gs.shutdown_all("worker interrupt")
             except Exception:
                 pass
+            with active_lock:
+                threads = list(active.values())
+            for t in threads:
+                t.join(timeout=30)
             return 0
         except Exception as e:
             print(f"[worker] loop error: {e}; retry in 5s", flush=True)

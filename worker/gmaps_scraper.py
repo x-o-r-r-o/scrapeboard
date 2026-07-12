@@ -1503,6 +1503,36 @@ class CaptchaSolver:
         raise TimeoutError("captcha solve timed out")
 
 
+class CaptchaSolverChain:
+    """Try primary captcha provider, then backup on failure."""
+
+    def __init__(self, solvers: list):
+        self.solvers = [s for s in solvers if s is not None]
+        self.provider = "+".join(s.provider for s in self.solvers) if self.solvers else "none"
+
+    def validate(self, log=print):
+        for s in self.solvers:
+            try:
+                s.validate(log=log)
+            except SystemExit:
+                if len(self.solvers) == 1:
+                    raise
+                log(f"[warn] captcha provider {s.provider} failed validation; will try backup if needed")
+
+    def solve_recaptcha_v2(self, sitekey: str, page_url: str) -> str:
+        last_err: Exception | None = None
+        for i, s in enumerate(self.solvers):
+            try:
+                if i > 0:
+                    # best-effort log via print; callers usually pass their own log to validate
+                    print(f"[captcha] primary failed — trying backup {s.provider}")
+                return s.solve_recaptcha_v2(sitekey, page_url)
+            except Exception as e:
+                last_err = e
+                continue
+        raise last_err or RuntimeError("no captcha solvers configured")
+
+
 def detect_recaptcha_sitekey(page) -> str | None:
     """Return the reCAPTCHA site key rendered on the page, if any."""
     try:
@@ -2001,6 +2031,13 @@ def parse_args(argv=None):
     p.add_argument("--captcha-retries", type=int, default=2, dest="captcha_retries",
                    help="Extra times to re-solve if the captcha isn't accepted "
                         "(wrong/expired token or a fresh challenge). Default 2.")
+    p.add_argument("--captcha-backup-provider", choices=["none", "2captcha", "captchaai"],
+                   default="none", dest="captcha_backup_provider",
+                   help="Backup captcha provider if primary fails.")
+    p.add_argument("--captcha-backup-key", default=None, dest="captcha_backup_key",
+                   help="API key for the backup captcha provider.")
+    p.add_argument("--captcha-backup-host", default=None, dest="captcha_backup_host",
+                   help="Override host for the backup captcha provider.")
 
     p.add_argument("--no-stealth", action="store_true", help="Disable stealth injection.")
     p.add_argument("--scrape-websites", choices=["yes", "no"], default="yes",
@@ -3134,11 +3171,27 @@ def execute_run(args, state=None) -> dict:
                 "already_done": True}
 
     solver = None
+    solvers = []
     if args.captcha_provider != "none":
         if not args.captcha_key:
             raise SystemExit("[fatal] --captcha-provider set but --captcha-key is missing.")
-        solver = CaptchaSolver(args.captcha_provider, args.captcha_key, args.captcha_host)
-        solver.validate()   # fail fast on a bad key
+        solvers.append(CaptchaSolver(args.captcha_provider, args.captcha_key, args.captcha_host))
+    backup_provider = getattr(args, "captcha_backup_provider", "none") or "none"
+    backup_key = getattr(args, "captcha_backup_key", None)
+    if backup_provider != "none":
+        if not backup_key:
+            print("[warn] captcha backup provider set but key missing — ignoring backup")
+        else:
+            solvers.append(
+                CaptchaSolver(
+                    backup_provider,
+                    backup_key,
+                    getattr(args, "captcha_backup_host", None),
+                )
+            )
+    if solvers:
+        solver = solvers[0] if len(solvers) == 1 else CaptchaSolverChain(solvers)
+        solver.validate()   # fail fast on a bad key (or warn if backup exists)
 
     pacer = Pacer(args.min_delay, args.max_delay, args.cooldown_every,
                   args.cooldown_min, args.cooldown_max)

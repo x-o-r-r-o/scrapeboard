@@ -2,7 +2,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, Header, HTTPException, UploadFile
-from sqlalchemy import func, select, update
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import require_admin, require_ready_user
@@ -14,11 +14,13 @@ from app.core.security import (
     hash_worker_token,
     verify_password,
 )
-from app.models import Job, JobChunk, ProxyPool, ScrapeSettings, User, WorkerNode
+from app.models import Job, JobChunk, Package, ProxyPool, ScrapeSettings, User, UserWorker, WorkerNode
 from app.schemas import (
+    ProxyPoolAssign,
     ProxyPoolCreate,
     ProxyPoolOut,
     ProxyPoolUpdate,
+    ScrapeSettingsCreate,
     ScrapeSettingsOut,
     ScrapeSettingsUpdate,
     WorkerCreate,
@@ -27,8 +29,16 @@ from app.schemas import (
     WorkerUpdate,
 )
 from app.services import jobs as jobs_svc
+from app.services.billing import user_has_dedicated_worker
 from app.services.notify import notify_user_telegram
 from app.services.safe_zip import UnsafeArchiveError, safe_extract_csv_zip
+from app.services.scrape_profiles import (
+    clone_profile,
+    ensure_default_profile,
+    ensure_workers_have_default_profile,
+    get_default_profile,
+    resolve_scrape_for_worker,
+)
 from app.services.worker_config import (
     apply_worker_config_update,
     merge_lease_settings,
@@ -44,8 +54,19 @@ def _proxy_count(text: str) -> int:
     return sum(1 for line in (text or "").splitlines() if line.strip() and not line.strip().startswith("#"))
 
 
-def _scrape_out(s: ScrapeSettings) -> ScrapeSettingsOut:
+def _scrape_out(
+    s: ScrapeSettings,
+    *,
+    worker_count: int = 0,
+    package_count: int = 0,
+) -> ScrapeSettingsOut:
     return ScrapeSettingsOut(
+        id=s.id,
+        name=getattr(s, "name", None) or "Default",
+        slug=getattr(s, "slug", None) or "default",
+        description=getattr(s, "description", None) or "",
+        is_default=bool(getattr(s, "is_default", False)),
+        is_active=bool(getattr(s, "is_active", True)),
         engine=s.engine,
         threads=s.threads,
         block_resources=s.block_resources,
@@ -59,8 +80,11 @@ def _scrape_out(s: ScrapeSettings) -> ScrapeSettingsOut:
         cooldown_max=s.cooldown_max,
         captcha_provider=s.captcha_provider,
         captcha_key_configured=bool(s.captcha_key),
-        captcha_host=s.captcha_host,
+        captcha_host=s.captcha_host or "",
         captcha_retries=s.captcha_retries,
+        captcha_backup_provider=getattr(s, "captcha_backup_provider", None) or "none",
+        captcha_backup_key_configured=bool(getattr(s, "captcha_backup_key", "") or ""),
+        captcha_backup_host=getattr(s, "captcha_backup_host", None) or "",
         nav_timeout=s.nav_timeout,
         proxy_attempts=s.proxy_attempts,
         headless=bool(getattr(s, "headless", True)),
@@ -71,6 +95,23 @@ def _scrape_out(s: ScrapeSettings) -> ScrapeSettingsOut:
         no_preflight=bool(getattr(s, "no_preflight", False)),
         fresh=bool(getattr(s, "fresh", False)),
         debug=bool(getattr(s, "debug", False)),
+        worker_count=worker_count,
+        package_count=package_count,
+    )
+
+
+async def _pool_out(db: AsyncSession, p: ProxyPool) -> ProxyPoolOut:
+    workers = (
+        await db.execute(select(WorkerNode).where(WorkerNode.proxy_pool_id == p.id).order_by(WorkerNode.id))
+    ).scalars().all()
+    return ProxyPoolOut(
+        id=p.id,
+        name=p.name,
+        description=p.description or "",
+        proxy_count=_proxy_count(p.proxies_text),
+        is_active=p.is_active,
+        worker_ids=[w.id for w in workers],
+        worker_names=[w.name for w in workers],
     )
 
 
@@ -79,6 +120,8 @@ def _worker_out(
     scrape: ScrapeSettings | None = None,
     *,
     active_leases: int = 0,
+    pool_name: str | None = None,
+    profile_name: str | None = None,
 ) -> WorkerOut:
     online = False
     if w.last_seen_at:
@@ -95,6 +138,9 @@ def _worker_out(
         is_draining=w.is_draining,
         max_browsers=w.max_browsers,
         proxy_pool_id=w.proxy_pool_id,
+        proxy_pool_name=pool_name,
+        scrape_settings_id=getattr(w, "scrape_settings_id", None),
+        scrape_settings_name=profile_name,
         last_seen_at=w.last_seen_at,
         cpu_percent=float(w.cpu_percent or 0),
         mem_percent=float(w.mem_percent or 0),
@@ -116,14 +162,18 @@ def _worker_out(
 
 
 def _redact_worker_config(cfg: dict) -> dict:
-    """Heartbeat-safe config: never send captcha_key over the wire on heartbeat."""
+    """Heartbeat-safe config: never send captcha keys over the wire on heartbeat."""
     out = dict(cfg or {})
     if out.get("captcha_key"):
-        out["captcha_key"] = ""
         out["captcha_key_configured"] = True
     else:
         out["captcha_key_configured"] = False
+    if out.get("captcha_backup_key"):
+        out["captcha_backup_key_configured"] = True
+    else:
+        out["captcha_backup_key_configured"] = False
     out.pop("captcha_key", None)
+    out.pop("captcha_backup_key", None)
     return out
 
 
@@ -146,10 +196,7 @@ def _install_hint(token: str) -> str:
 @router.get("/proxy-pools", response_model=list[ProxyPoolOut])
 async def list_pools(_: User = Depends(require_admin), __: User = Depends(require_ready_user), db: AsyncSession = Depends(get_db)):
     rows = (await db.execute(select(ProxyPool).order_by(ProxyPool.id))).scalars().all()
-    return [
-        ProxyPoolOut(id=p.id, name=p.name, description=p.description, proxy_count=_proxy_count(p.proxies_text), is_active=p.is_active)
-        for p in rows
-    ]
+    return [await _pool_out(db, p) for p in rows]
 
 
 @router.post("/proxy-pools", response_model=ProxyPoolOut)
@@ -158,7 +205,7 @@ async def create_pool(body: ProxyPoolCreate, _: User = Depends(require_admin), _
     db.add(p)
     await db.commit()
     await db.refresh(p)
-    return ProxyPoolOut(id=p.id, name=p.name, description=p.description, proxy_count=_proxy_count(p.proxies_text), is_active=p.is_active)
+    return await _pool_out(db, p)
 
 
 @router.get("/proxy-pools/{pool_id}")
@@ -166,14 +213,8 @@ async def get_pool(pool_id: int, _: User = Depends(require_admin), __: User = De
     p = await db.get(ProxyPool, pool_id)
     if not p:
         raise HTTPException(404, "Not found")
-    return {
-        "id": p.id,
-        "name": p.name,
-        "description": p.description,
-        "proxies_text": p.proxies_text,
-        "proxy_count": _proxy_count(p.proxies_text),
-        "is_active": p.is_active,
-    }
+    out = await _pool_out(db, p)
+    return {**out.model_dump(), "proxies_text": p.proxies_text}
 
 
 @router.patch("/proxy-pools/{pool_id}", response_model=ProxyPoolOut)
@@ -185,7 +226,42 @@ async def update_pool(pool_id: int, body: ProxyPoolUpdate, _: User = Depends(req
         setattr(p, k, v)
     await db.commit()
     await db.refresh(p)
-    return ProxyPoolOut(id=p.id, name=p.name, description=p.description, proxy_count=_proxy_count(p.proxies_text), is_active=p.is_active)
+    return await _pool_out(db, p)
+
+
+@router.post("/proxy-pools/{pool_id}/assign", response_model=ProxyPoolOut)
+async def assign_pool_workers(
+    pool_id: int,
+    body: ProxyPoolAssign,
+    _: User = Depends(require_admin),
+    __: User = Depends(require_ready_user),
+    db: AsyncSession = Depends(get_db),
+):
+    p = await db.get(ProxyPool, pool_id)
+    if not p:
+        raise HTTPException(404, "Not found")
+    wanted = set(int(x) for x in body.worker_ids)
+    # Clear workers currently on this pool but not in the new set
+    current = (
+        await db.execute(select(WorkerNode).where(WorkerNode.proxy_pool_id == pool_id))
+    ).scalars().all()
+    for w in current:
+        if w.id not in wanted:
+            w.proxy_pool_id = None
+    # Assign requested workers
+    if wanted:
+        rows = (
+            await db.execute(select(WorkerNode).where(WorkerNode.id.in_(wanted)))
+        ).scalars().all()
+        found = {w.id for w in rows}
+        missing = wanted - found
+        if missing:
+            raise HTTPException(404, f"Workers not found: {sorted(missing)}")
+        for w in rows:
+            w.proxy_pool_id = pool_id
+    await db.commit()
+    await db.refresh(p)
+    return await _pool_out(db, p)
 
 
 @router.delete("/proxy-pools/{pool_id}")
@@ -193,6 +269,11 @@ async def delete_pool(pool_id: int, _: User = Depends(require_admin), __: User =
     p = await db.get(ProxyPool, pool_id)
     if not p:
         raise HTTPException(404, "Not found")
+    workers = (
+        await db.execute(select(WorkerNode).where(WorkerNode.proxy_pool_id == pool_id))
+    ).scalars().all()
+    for w in workers:
+        w.proxy_pool_id = None
     await db.delete(p)
     await db.commit()
     return {"detail": "Deleted"}
@@ -200,9 +281,25 @@ async def delete_pool(pool_id: int, _: User = Depends(require_admin), __: User =
 
 # --- workers ---
 
+async def _enrich_worker(db: AsyncSession, w: WorkerNode, leases: dict[int, int] | None = None) -> WorkerOut:
+    scrape = await resolve_scrape_for_worker(db, w)
+    pool_name = None
+    if w.proxy_pool_id:
+        pool = await db.get(ProxyPool, w.proxy_pool_id)
+        pool_name = pool.name if pool else None
+    profile_name = scrape.name if scrape else None
+    return _worker_out(
+        w,
+        scrape,
+        active_leases=(leases or {}).get(w.id, 0),
+        pool_name=pool_name,
+        profile_name=profile_name,
+    )
+
+
 @router.get("/workers", response_model=list[WorkerOut])
 async def list_workers(_: User = Depends(require_admin), __: User = Depends(require_ready_user), db: AsyncSession = Depends(get_db)):
-    scrape = await db.get(ScrapeSettings, 1)
+    await ensure_workers_have_default_profile(db)
     rows = (await db.execute(select(WorkerNode).order_by(WorkerNode.id))).scalars().all()
     lease_rows = (
         await db.execute(
@@ -212,15 +309,18 @@ async def list_workers(_: User = Depends(require_admin), __: User = Depends(requ
         )
     ).all()
     leases = {int(wid): int(cnt) for wid, cnt in lease_rows if wid is not None}
-    return [_worker_out(w, scrape, active_leases=leases.get(w.id, 0)) for w in rows]
+    return [await _enrich_worker(db, w, leases) for w in rows]
 
 
 @router.post("/workers", response_model=WorkerCreateResponse)
 async def create_worker(body: WorkerCreate, _: User = Depends(require_admin), __: User = Depends(require_ready_user), db: AsyncSession = Depends(get_db)):
     raw = generate_worker_token()
-    scrape = await db.get(ScrapeSettings, 1)
+    default = await get_default_profile(db)
+    profile = default
+    if body.scrape_settings_id:
+        profile = await db.get(ScrapeSettings, body.scrape_settings_id) or default
     if body.use_global_scrape_defaults or body.worker_config is None:
-        cfg = scrape_settings_to_config(scrape)
+        cfg = scrape_settings_to_config(profile)
     else:
         cfg = normalize_worker_config({})
     if body.worker_config is not None:
@@ -229,14 +329,18 @@ async def create_worker(body: WorkerCreate, _: User = Depends(require_admin), __
         name=body.name,
         max_browsers=body.max_browsers,
         proxy_pool_id=body.proxy_pool_id,
+        scrape_settings_id=profile.id,
         worker_config=cfg,
     )
     _set_worker_token(w, raw)
     db.add(w)
     await db.commit()
     await db.refresh(w)
-    scrape = await db.get(ScrapeSettings, 1)
-    return WorkerCreateResponse(worker=_worker_out(w, scrape), token=raw, install_hint=_install_hint(raw))
+    return WorkerCreateResponse(
+        worker=await _enrich_worker(db, w),
+        token=raw,
+        install_hint=_install_hint(raw),
+    )
 
 
 @router.patch("/workers/{worker_id}", response_model=WorkerOut)
@@ -250,14 +354,13 @@ async def update_worker(worker_id: int, body: WorkerUpdate, _: User = Depends(re
     for k, v in data.items():
         setattr(w, k, v)
     if reset:
-        scrape = await db.get(ScrapeSettings, 1)
+        scrape = await resolve_scrape_for_worker(db, w)
         w.worker_config = scrape_settings_to_config(scrape)
     elif cfg_patch is not None:
         w.worker_config = apply_worker_config_update(w.worker_config or {}, cfg_patch)
     await db.commit()
     await db.refresh(w)
-    scrape = await db.get(ScrapeSettings, 1)
-    return _worker_out(w, scrape)
+    return await _enrich_worker(db, w)
 
 
 @router.post("/workers/{worker_id}/rotate-token", response_model=WorkerCreateResponse)
@@ -269,37 +372,172 @@ async def rotate_token(worker_id: int, _: User = Depends(require_admin), __: Use
     _set_worker_token(w, raw)
     await db.commit()
     await db.refresh(w)
-    scrape = await db.get(ScrapeSettings, 1)
     return WorkerCreateResponse(
-        worker=_worker_out(w, scrape),
+        worker=await _enrich_worker(db, w),
         token=raw,
         install_hint=_install_hint(raw),
     )
 
 
-# --- scrape settings ---
+# --- scrape profiles ---
+
+async def _profile_counts(db: AsyncSession, profile_id: int) -> tuple[int, int]:
+    wc = int(
+        (
+            await db.execute(
+                select(func.count()).select_from(WorkerNode).where(WorkerNode.scrape_settings_id == profile_id)
+            )
+        ).scalar_one()
+        or 0
+    )
+    pc = int(
+        (
+            await db.execute(
+                select(func.count()).select_from(Package).where(Package.scrape_settings_id == profile_id)
+            )
+        ).scalar_one()
+        or 0
+    )
+    return wc, pc
+
+
+@router.get("/scrape-profiles", response_model=list[ScrapeSettingsOut])
+async def list_scrape_profiles(_: User = Depends(require_admin), __: User = Depends(require_ready_user), db: AsyncSession = Depends(get_db)):
+    await ensure_default_profile(db)
+    rows = (await db.execute(select(ScrapeSettings).order_by(ScrapeSettings.id))).scalars().all()
+    out = []
+    for s in rows:
+        wc, pc = await _profile_counts(db, s.id)
+        out.append(_scrape_out(s, worker_count=wc, package_count=pc))
+    return out
+
+
+@router.post("/scrape-profiles", response_model=ScrapeSettingsOut)
+async def create_scrape_profile(
+    body: ScrapeSettingsCreate,
+    _: User = Depends(require_admin),
+    __: User = Depends(require_ready_user),
+    db: AsyncSession = Depends(get_db),
+):
+    source = None
+    if body.clone_from_id:
+        source = await db.get(ScrapeSettings, body.clone_from_id)
+    profile = await clone_profile(
+        db,
+        name=body.name,
+        slug=body.slug,
+        description=body.description,
+        source=source,
+        is_default=body.is_default,
+    )
+    if body.is_default:
+        others = (
+            await db.execute(select(ScrapeSettings).where(ScrapeSettings.id != profile.id))
+        ).scalars().all()
+        for o in others:
+            o.is_default = False
+        profile.is_default = True
+        await db.commit()
+        await db.refresh(profile)
+    if not body.is_active:
+        profile.is_active = False
+        await db.commit()
+        await db.refresh(profile)
+    wc, pc = await _profile_counts(db, profile.id)
+    return _scrape_out(profile, worker_count=wc, package_count=pc)
+
+
+@router.get("/scrape-profiles/{profile_id}", response_model=ScrapeSettingsOut)
+async def get_scrape_profile(
+    profile_id: int,
+    _: User = Depends(require_admin),
+    __: User = Depends(require_ready_user),
+    db: AsyncSession = Depends(get_db),
+):
+    s = await db.get(ScrapeSettings, profile_id)
+    if not s:
+        raise HTTPException(404, "Not found")
+    wc, pc = await _profile_counts(db, s.id)
+    return _scrape_out(s, worker_count=wc, package_count=pc)
+
+
+@router.patch("/scrape-profiles/{profile_id}", response_model=ScrapeSettingsOut)
+async def update_scrape_profile(
+    profile_id: int,
+    body: ScrapeSettingsUpdate,
+    _: User = Depends(require_admin),
+    __: User = Depends(require_ready_user),
+    db: AsyncSession = Depends(get_db),
+):
+    s = await db.get(ScrapeSettings, profile_id)
+    if not s:
+        raise HTTPException(404, "Not found")
+    data = body.model_dump(exclude_unset=True)
+    apply_workers = data.pop("apply_to_workers", False)
+    for secret in ("captcha_key", "captcha_backup_key"):
+        if secret in data and (data[secret] is None or data[secret] == ""):
+            data.pop(secret)
+    if data.get("is_default"):
+        others = (
+            await db.execute(select(ScrapeSettings).where(ScrapeSettings.id != s.id))
+        ).scalars().all()
+        for o in others:
+            o.is_default = False
+    for k, v in data.items():
+        setattr(s, k, v)
+    await db.commit()
+    await db.refresh(s)
+    if apply_workers:
+        workers = (
+            await db.execute(select(WorkerNode).where(WorkerNode.scrape_settings_id == s.id))
+        ).scalars().all()
+        cfg = scrape_settings_to_config(s)
+        for w in workers:
+            w.worker_config = cfg
+        await db.commit()
+    wc, pc = await _profile_counts(db, s.id)
+    return _scrape_out(s, worker_count=wc, package_count=pc)
+
+
+@router.delete("/scrape-profiles/{profile_id}")
+async def delete_scrape_profile(
+    profile_id: int,
+    _: User = Depends(require_admin),
+    __: User = Depends(require_ready_user),
+    db: AsyncSession = Depends(get_db),
+):
+    s = await db.get(ScrapeSettings, profile_id)
+    if not s:
+        raise HTTPException(404, "Not found")
+    if s.is_default or s.id == 1:
+        raise HTTPException(400, "Cannot delete the default scrape profile")
+    default = await get_default_profile(db)
+    workers = (
+        await db.execute(select(WorkerNode).where(WorkerNode.scrape_settings_id == profile_id))
+    ).scalars().all()
+    for w in workers:
+        w.scrape_settings_id = default.id
+    packages = (
+        await db.execute(select(Package).where(Package.scrape_settings_id == profile_id))
+    ).scalars().all()
+    for p in packages:
+        p.scrape_settings_id = default.id
+    await db.delete(s)
+    await db.commit()
+    return {"detail": "Deleted"}
+
 
 @router.get("/settings/scrape", response_model=ScrapeSettingsOut)
 async def get_scrape(_: User = Depends(require_admin), __: User = Depends(require_ready_user), db: AsyncSession = Depends(get_db)):
-    s = await db.get(ScrapeSettings, 1) or ScrapeSettings(id=1)
-    if not await db.get(ScrapeSettings, 1):
-        db.add(s)
-        await db.commit()
-        await db.refresh(s)
-    return _scrape_out(s)
+    s = await get_default_profile(db)
+    wc, pc = await _profile_counts(db, s.id)
+    return _scrape_out(s, worker_count=wc, package_count=pc)
 
 
 @router.put("/settings/scrape", response_model=ScrapeSettingsOut)
 async def update_scrape(body: ScrapeSettingsUpdate, _: User = Depends(require_admin), __: User = Depends(require_ready_user), db: AsyncSession = Depends(get_db)):
-    s = await db.get(ScrapeSettings, 1)
-    if not s:
-        s = ScrapeSettings(id=1)
-        db.add(s)
-    for k, v in body.model_dump(exclude_unset=True).items():
-        setattr(s, k, v)
-    await db.commit()
-    await db.refresh(s)
-    return _scrape_out(s)
+    s = await get_default_profile(db)
+    return await update_scrape_profile(s.id, body, _, __, db)
 
 
 # --- worker agent protocol ---
@@ -406,7 +644,7 @@ async def worker_heartbeat(
         w.host_os = str(body.get("os") or body.get("host_os"))[:64]
     w.version = str(body.get("version") or w.version)
     await db.commit()
-    scrape = await db.get(ScrapeSettings, 1)
+    scrape = await resolve_scrape_for_worker(db, w)
     effective = merge_lease_settings(
         scrape=scrape,
         worker_config=w.worker_config or {},
@@ -420,7 +658,8 @@ async def worker_heartbeat(
         "name": w.name,
         "max_browsers": w.max_browsers,
         "proxy_pool_id": w.proxy_pool_id,
-        # Redacted: captcha_key only delivered inside job leases
+        "scrape_settings_id": w.scrape_settings_id,
+        # Redacted: captcha keys only delivered inside job leases
         "worker_config": _redact_worker_config(effective),
     }
 
@@ -434,26 +673,101 @@ async def worker_lease(
     if w.is_draining or not w.is_enabled:
         return {"chunk": None}
 
-    job = (
-        await db.execute(select(Job).where(Job.status == "running").order_by(Job.id))
-    ).scalars().first()
-    if not job:
-        queued = (
-            await db.execute(select(Job).where(Job.status == "queued").order_by(Job.id))
-        ).scalars().first()
-        if queued:
-            queued.status = "running"
-            queued.started_at = datetime.now(timezone.utc)
-            await db.commit()
-            job = queued
-        else:
-            return {"chunk": None}
+    # max_browsers = concurrent user-job instances (leases) this worker may hold
+    active_leases = int(
+        (
+            await db.execute(
+                select(func.count())
+                .select_from(JobChunk)
+                .where(JobChunk.worker_id == w.id, JobChunk.state == "leased")
+            )
+        ).scalar_one()
+        or 0
+    )
+    slot_cap = max(1, int(w.max_browsers or 1))
+    if active_leases >= slot_cap:
+        return {"chunk": None, "slots_full": True, "active_leases": active_leases, "max_browsers": slot_cap}
 
-    # reclaim stale leases
+    # Prefer spreading across users: owners already active on this worker go last
+    busy_owners = set(
+        (
+            await db.execute(
+                select(Job.owner_id)
+                .join(JobChunk, JobChunk.job_id == Job.id)
+                .where(JobChunk.worker_id == w.id, JobChunk.state == "leased")
+            )
+        ).scalars().all()
+    )
+
+    async def _owner_allows(owner_id: int) -> bool:
+        """Shared-pool vs pin rule for leasing this worker.
+
+        - No UserWorker rows → any enabled worker (shared pool / round-robin).
+        - Pinning applies ONLY when the owner has a dedicated_worker package
+          AND one or more workers assigned.
+        - dedicated_worker package but empty assignment → still any worker.
+        - Without dedicated_worker → ignore UserWorker rows (shared pool).
+        """
+        owner = await db.get(User, owner_id)
+        if not owner:
+            return False
+        if not await user_has_dedicated_worker(db, owner):
+            return True  # shared pool: UserWorker rows (if any) are ignored
+        allowed = (
+            await db.execute(select(UserWorker.worker_id).where(UserWorker.user_id == owner_id))
+        ).scalars().all()
+        if not allowed:
+            return True  # dedicated but unassigned → optional pin; shared pool OK
+        return w.id in {int(x) for x in allowed}
+
+    async def _has_pending(job_id: int) -> bool:
+        row = (
+            await db.execute(
+                select(JobChunk.id).where(JobChunk.job_id == job_id, JobChunk.state == "pending").limit(1)
+            )
+        ).scalars().first()
+        return row is not None
+
+    async def _next_job(*, skip_ids: set[int] | None = None) -> Job | None:
+        skip = skip_ids or set()
+        primary: list[Job] = []
+        secondary: list[Job] = []
+        for status in ("running", "queued"):
+            candidates = (
+                await db.execute(select(Job).where(Job.status == status).order_by(Job.id))
+            ).scalars().all()
+            for cand in candidates:
+                if cand.id in skip:
+                    continue
+                if not await _owner_allows(cand.owner_id):
+                    continue
+                if status == "running" and not await _has_pending(cand.id):
+                    continue
+                if cand.owner_id in busy_owners:
+                    secondary.append(cand)
+                else:
+                    primary.append(cand)
+        for cand in primary + secondary:
+            if cand.status == "queued":
+                cand.status = "running"
+                cand.started_at = datetime.now(timezone.utc)
+                await db.commit()
+                await db.refresh(cand)
+            return cand
+        return None
+
+    job = await _next_job()
+    if not job:
+        return {"chunk": None}
+
+    # reclaim stale leases (global for this worker + current job)
     stale_before = datetime.now(timezone.utc) - timedelta(seconds=120)
     stale = (
         await db.execute(
-            select(JobChunk).where(JobChunk.job_id == job.id, JobChunk.state == "leased")
+            select(JobChunk).where(
+                JobChunk.state == "leased",
+                or_(JobChunk.job_id == job.id, JobChunk.worker_id == w.id),
+            )
         )
     ).scalars().all()
     for c in stale:
@@ -463,13 +777,28 @@ async def worker_lease(
             c.worker_id = None
     await db.commit()
 
+    # Re-check capacity after reclaim
+    active_leases = int(
+        (
+            await db.execute(
+                select(func.count())
+                .select_from(JobChunk)
+                .where(JobChunk.worker_id == w.id, JobChunk.state == "leased")
+            )
+        ).scalar_one()
+        or 0
+    )
+    if active_leases >= slot_cap:
+        return {"chunk": None, "slots_full": True, "active_leases": active_leases, "max_browsers": slot_cap}
+
     await db.refresh(job)
     if job.status == "stopped":
         return {"chunk": None}
 
     # Atomic claim: only one worker wins the pending → leased transition
     claimed: JobChunk | None = None
-    for _ in range(5):
+    tried: set[int] = set()
+    for _ in range(8):
         candidate = (
             await db.execute(
                 select(JobChunk)
@@ -478,7 +807,11 @@ async def worker_lease(
             )
         ).scalars().first()
         if not candidate:
-            return {"chunk": None}
+            tried.add(job.id)
+            job = await _next_job(skip_ids=tried)
+            if not job:
+                return {"chunk": None}
+            continue
         now = datetime.now(timezone.utc)
         result = await db.execute(
             update(JobChunk)
@@ -493,7 +826,7 @@ async def worker_lease(
     if not claimed:
         return {"chunk": None}
 
-    scrape = await db.get(ScrapeSettings, 1)
+    scrape = await resolve_scrape_for_worker(db, w)
     proxies_text = ""
     if w.proxy_pool_id:
         pool = await db.get(ProxyPool, w.proxy_pool_id)
@@ -526,12 +859,15 @@ async def worker_lease(
         },
         "job": {
             "job_id": job.public_id,
+            "owner_id": job.owner_id,
             "keywords": keywords,
             "locations": locations,
             "settings": settings,
             "proxies_text": proxies_text,
             "ts": job.public_id,
         },
+        "active_leases": active_leases + 1,
+        "max_browsers": slot_cap,
     }
 
 
@@ -553,7 +889,7 @@ async def worker_upload(
         raise HTTPException(409, "Job is not active")
     await _require_chunk_lease(db, w, job, chunk_id)
 
-    dest_dir = jobs_svc.job_parts_dir(job.public_id) / str(chunk_id)
+    dest_dir = jobs_svc.job_parts_dir(job.public_id, job.owner_id) / str(chunk_id)
     dest_dir.mkdir(parents=True, exist_ok=True)
 
     max_bytes = int(cfg.worker_upload_max_bytes)

@@ -135,11 +135,61 @@ DEMO_COMMANDS = [
         "key": "approve",
         "command": "/approve",
         "title": "Approve payment",
-        "description": "Approve manual payment: /approve <user_id> <package>",
+        "description": "Approve pending order: /approve <order_id>",
         "response_text": "",
         "enabled": False,
         "audience": "admins",
         "sort_order": 220,
+    },
+    {
+        "key": "grant",
+        "command": "/grant",
+        "title": "Grant subscription",
+        "description": "/grant <telegram_id|username> <package_slug> [days]",
+        "response_text": "",
+        "enabled": True,
+        "audience": "admins",
+        "sort_order": 230,
+    },
+    {
+        "key": "revoke",
+        "command": "/revoke",
+        "title": "Revoke subscription",
+        "description": "/revoke <telegram_id|username>",
+        "response_text": "",
+        "enabled": True,
+        "audience": "admins",
+        "sort_order": 240,
+    },
+    {
+        "key": "extend",
+        "command": "/extend",
+        "title": "Extend subscription",
+        "description": "/extend <telegram_id|username> <days>",
+        "response_text": "",
+        "enabled": True,
+        "audience": "admins",
+        "sort_order": 250,
+    },
+    {
+        "key": "disable",
+        "command": "/disable",
+        "title": "Disable user",
+        "description": "/disable <telegram_id|username>",
+        "response_text": "",
+        "enabled": True,
+        "audience": "admins",
+        "sort_order": 260,
+    },
+    {
+        "key": "enable",
+        "command": "/enable",
+        "title": "Enable user",
+        "description": "/enable <telegram_id|username>",
+        "response_text": "",
+        "enabled": True,
+        "audience": "admins",
+        "sort_order": 270,
     },
 ]
 
@@ -150,6 +200,7 @@ DEMO_WORKFLOWS = [
         "description": "Guide new Telegram users: account link → subscription → ready",
         "enabled": True,
         "is_demo": True,
+"sort_order": 10,
         "definition": {
             "trigger": "command:/start",
             "steps": [
@@ -165,6 +216,7 @@ DEMO_WORKFLOWS = [
         "description": "/buy → payment instructions → /paid → on-chain verify → activate",
         "enabled": True,
         "is_demo": True,
+"sort_order": 20,
         "definition": {
             "trigger": "command:/buy",
             "steps": [
@@ -183,6 +235,7 @@ DEMO_WORKFLOWS = [
         "description": "Bank/other details → admin approve in panel or /approve",
         "enabled": True,
         "is_demo": True,
+"sort_order": 30,
         "definition": {
             "trigger": "command:/buy",
             "steps": [
@@ -200,6 +253,7 @@ DEMO_WORKFLOWS = [
         "description": "Upload inputs → /run → progress → ZIP via Telegram + panel",
         "enabled": True,
         "is_demo": True,
+"sort_order": 40,
         "definition": {
             "trigger": "command:/run",
             "steps": [
@@ -218,6 +272,7 @@ DEMO_WORKFLOWS = [
         "description": "/stop → cancel → merge partial → send ZIP",
         "enabled": True,
         "is_demo": True,
+"sort_order": 50,
         "definition": {
             "trigger": "command:/stop",
             "steps": [
@@ -233,6 +288,7 @@ DEMO_WORKFLOWS = [
         "description": "Cron: remind before expiry; block /run when expired",
         "enabled": True,
         "is_demo": True,
+"sort_order": 60,
         "definition": {
             "trigger": "cron:daily",
             "steps": [
@@ -248,6 +304,7 @@ DEMO_WORKFLOWS = [
         "description": "/support → ticket → configured support chat",
         "enabled": True,
         "is_demo": True,
+"sort_order": 70,
         "definition": {
             "trigger": "command:/support",
             "steps": [
@@ -264,6 +321,7 @@ DEMO_WORKFLOWS = [
         "description": "Admin alert when a worker misses heartbeats",
         "enabled": True,
         "is_demo": True,
+"sort_order": 80,
         "definition": {
             "trigger": "event:worker_offline",
             "steps": [
@@ -277,6 +335,7 @@ DEMO_WORKFLOWS = [
         "description": "Invalid/replay TxID → user message + rate limit",
         "enabled": True,
         "is_demo": True,
+"sort_order": 90,
         "definition": {
             "trigger": "event:payment_failed",
             "steps": [

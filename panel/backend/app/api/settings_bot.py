@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -12,13 +12,21 @@ from app.schemas import (
     BotCommandUpdate,
     BotSettingsOut,
     BotSettingsUpdate,
+    BotWorkflowCreate,
     BotWorkflowOut,
+    BotWorkflowUpdate,
     MessageOut,
     SecuritySettingsOut,
     SecuritySettingsUpdate,
 )
 
 router = APIRouter(tags=["settings-bot"])
+
+
+def _slugify_key(raw: str) -> str:
+    key = "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in (raw or "").strip().lower())
+    key = key.strip("_-")[:64]
+    return key or "workflow"
 
 
 @router.get("/settings/security", response_model=SecuritySettingsOut)
@@ -107,7 +115,6 @@ async def update_command(
 ):
     c = await db.get(BotCommand, command_id)
     if not c:
-        from fastapi import HTTPException
         raise HTTPException(404, "Not found")
     for k, v in body.model_dump(exclude_unset=True).items():
         setattr(c, k, v)
@@ -118,7 +125,78 @@ async def update_command(
 
 @router.get("/bot/workflows", response_model=list[BotWorkflowOut])
 async def list_workflows(_: User = Depends(require_admin), __: User = Depends(require_ready_user), db: AsyncSession = Depends(get_db)):
-    return (await db.execute(select(BotWorkflow).order_by(BotWorkflow.id))).scalars().all()
+    return (
+        await db.execute(select(BotWorkflow).order_by(BotWorkflow.sort_order, BotWorkflow.id))
+    ).scalars().all()
+
+
+@router.get("/bot/workflows/{workflow_id}", response_model=BotWorkflowOut)
+async def get_workflow(
+    workflow_id: int,
+    _: User = Depends(require_admin),
+    __: User = Depends(require_ready_user),
+    db: AsyncSession = Depends(get_db),
+):
+    w = await db.get(BotWorkflow, workflow_id)
+    if not w:
+        raise HTTPException(404, "Not found")
+    return w
+
+
+@router.post("/bot/workflows", response_model=BotWorkflowOut)
+async def create_workflow(
+    body: BotWorkflowCreate,
+    _: User = Depends(require_admin),
+    __: User = Depends(require_ready_user),
+    db: AsyncSession = Depends(get_db),
+):
+    key = _slugify_key(body.key)
+    exists = (await db.execute(select(BotWorkflow).where(BotWorkflow.key == key))).scalar_one_or_none()
+    if exists:
+        raise HTTPException(400, f"Workflow key '{key}' already exists")
+    definition = dict(body.definition) if isinstance(body.definition, dict) else {}
+    if not definition.get("trigger"):
+        definition["trigger"] = "command:/start"
+    if not isinstance(definition.get("steps"), list):
+        definition["steps"] = []
+    w = BotWorkflow(
+        key=key,
+        name=(body.name or key).strip() or key,
+        description=body.description or "",
+        enabled=bool(body.enabled),
+        is_demo=False,
+        sort_order=int(body.sort_order or 0),
+        definition=definition,
+    )
+    db.add(w)
+    await db.commit()
+    await db.refresh(w)
+    return w
+
+
+@router.patch("/bot/workflows/{workflow_id}", response_model=BotWorkflowOut)
+async def update_workflow(
+    workflow_id: int,
+    body: BotWorkflowUpdate,
+    _: User = Depends(require_admin),
+    __: User = Depends(require_ready_user),
+    db: AsyncSession = Depends(get_db),
+):
+    w = await db.get(BotWorkflow, workflow_id)
+    if not w:
+        raise HTTPException(404, "Not found")
+    data = body.model_dump(exclude_unset=True)
+    if "definition" in data and data["definition"] is not None:
+        if not isinstance(data["definition"], dict):
+            raise HTTPException(400, "definition must be an object")
+        steps = data["definition"].get("steps")
+        if steps is not None and not isinstance(steps, list):
+            raise HTTPException(400, "definition.steps must be a list")
+    for k, v in data.items():
+        setattr(w, k, v)
+    await db.commit()
+    await db.refresh(w)
+    return w
 
 
 @router.post("/bot/workflows/{workflow_id}/toggle", response_model=BotWorkflowOut)
@@ -128,7 +206,6 @@ async def toggle_workflow(
     __: User = Depends(require_ready_user),
     db: AsyncSession = Depends(get_db),
 ):
-    from fastapi import HTTPException
     w = await db.get(BotWorkflow, workflow_id)
     if not w:
         raise HTTPException(404, "Not found")
@@ -138,6 +215,21 @@ async def toggle_workflow(
     return w
 
 
+@router.delete("/bot/workflows/{workflow_id}", response_model=MessageOut)
+async def delete_workflow(
+    workflow_id: int,
+    _: User = Depends(require_admin),
+    __: User = Depends(require_ready_user),
+    db: AsyncSession = Depends(get_db),
+):
+    w = await db.get(BotWorkflow, workflow_id)
+    if not w:
+        raise HTTPException(404, "Not found")
+    await db.delete(w)
+    await db.commit()
+    return MessageOut(detail="Workflow deleted")
+
+
 @router.post("/bot/install-demos", response_model=MessageOut)
 async def install_demos(_: User = Depends(require_admin), __: User = Depends(require_ready_user), db: AsyncSession = Depends(get_db)):
     existing_cmds = {c.key for c in (await db.execute(select(BotCommand))).scalars().all()}
@@ -145,15 +237,17 @@ async def install_demos(_: User = Depends(require_admin), __: User = Depends(req
         if cmd["key"] not in existing_cmds:
             db.add(BotCommand(**cmd))
     existing_wf = {w.key for w in (await db.execute(select(BotWorkflow))).scalars().all()}
-    for wf in DEMO_WORKFLOWS:
-        if wf["key"] not in existing_wf:
-            db.add(BotWorkflow(**wf))
+    for i, wf in enumerate(DEMO_WORKFLOWS):
+        payload = {**wf, "sort_order": wf.get("sort_order", (i + 1) * 10)}
+        if payload["key"] not in existing_wf:
+            db.add(BotWorkflow(**payload))
         else:
-            row = (await db.execute(select(BotWorkflow).where(BotWorkflow.key == wf["key"]))).scalar_one()
-            row.definition = wf["definition"]
-            row.description = wf["description"]
-            row.name = wf["name"]
+            row = (await db.execute(select(BotWorkflow).where(BotWorkflow.key == payload["key"]))).scalar_one()
+            row.definition = payload["definition"]
+            row.description = payload["description"]
+            row.name = payload["name"]
             row.is_demo = True
+            row.sort_order = payload["sort_order"]
     await db.commit()
     return MessageOut(detail="Demo commands and workflows installed/refreshed")
 

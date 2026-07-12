@@ -7,12 +7,12 @@ import { BillingAdminPage } from "./pages/BillingAdminPage";
 import BotBuilderPage from "./pages/BotBuilderPage";
 import {
   PackagesAdminPage,
-  ProxiesAdminPage,
-  ScrapeAdminPage,
   SecurityAdminPage,
   UsersAdminPage,
   WorkersAdminPage,
 } from "./pages/AdminPages";
+import { ProxiesAdminPage } from "./pages/ProxyPoolsPage";
+import { ScrapeAdminPage } from "./pages/ScrapeProfilesPage";
 
 export default function App() {
   return (

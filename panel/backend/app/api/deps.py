@@ -110,17 +110,4 @@ def client_ip(request: Request) -> str:
     return request.client.host if request.client else "unknown"
 
 
-DEFAULT_USER_PERMS = {
-    "can_run": True,
-    "can_stop": True,
-    "can_upload_inputs": True,
-    "max_threads": 4,
-    "allowed_engines": "all",
-}
-
-
-def effective_perms(user: User) -> dict:
-    if user.role == "admin":
-        return {**DEFAULT_USER_PERMS, "can_run": True, "can_stop": True, "can_upload_inputs": True, "max_threads": 999}
-    merged = {**DEFAULT_USER_PERMS, **(user.perms or {})}
-    return merged
+from app.services.perms import DEFAULT_USER_PERMS, effective_perms  # noqa: F401 — re-export

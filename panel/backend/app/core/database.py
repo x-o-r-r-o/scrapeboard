@@ -47,9 +47,23 @@ def _migrate_sqlite(sync_conn) -> None:
         ("load_avg_15", "FLOAT DEFAULT 0"),
         ("host_os", "VARCHAR(64) DEFAULT ''"),
         ("hostname", "VARCHAR(128) DEFAULT ''"),
+        ("scrape_settings_id", "INTEGER"),
     ):
         if col not in workers:
             sync_conn.execute(text(f"ALTER TABLE worker_nodes ADD COLUMN {col} {decl}"))
+
+    packages = _sqlite_columns(sync_conn, "packages")
+    if "scrape_settings_id" not in packages:
+        sync_conn.execute(text("ALTER TABLE packages ADD COLUMN scrape_settings_id INTEGER"))
+    for col, decl in (
+        ("description", "TEXT DEFAULT ''"),
+        ("headings", "JSON DEFAULT '[]'"),
+        ("features", "JSON DEFAULT '[]'"),
+        ("allowed_engines", "JSON DEFAULT '[\"all\"]'"),
+        ("dedicated_worker", "BOOLEAN DEFAULT 0"),
+    ):
+        if col not in packages:
+            sync_conn.execute(text(f"ALTER TABLE packages ADD COLUMN {col} {decl}"))
 
     scrape = _sqlite_columns(sync_conn, "scrape_settings")
     alters = [
@@ -61,10 +75,31 @@ def _migrate_sqlite(sync_conn) -> None:
         ("no_preflight", "BOOLEAN DEFAULT 0"),
         ("fresh", "BOOLEAN DEFAULT 0"),
         ("debug", "BOOLEAN DEFAULT 0"),
+        ("name", "VARCHAR(128) DEFAULT 'Default'"),
+        ("slug", "VARCHAR(64) DEFAULT 'default'"),
+        ("description", "TEXT DEFAULT ''"),
+        ("is_default", "BOOLEAN DEFAULT 0"),
+        ("is_active", "BOOLEAN DEFAULT 1"),
+        ("captcha_backup_provider", "VARCHAR(32) DEFAULT 'none'"),
+        ("captcha_backup_key", "VARCHAR(255) DEFAULT ''"),
+        ("captcha_backup_host", "VARCHAR(255) DEFAULT ''"),
+        ("created_at", "DATETIME"),
     ]
     for col, decl in alters:
         if col not in scrape:
             sync_conn.execute(text(f"ALTER TABLE scrape_settings ADD COLUMN {col} {decl}"))
+
+    # Ensure row id=1 is marked default when present
+    sync_conn.execute(
+        text(
+            "UPDATE scrape_settings SET name=COALESCE(NULLIF(name,''),'Default'), "
+            "slug=COALESCE(NULLIF(slug,''),'default'), is_default=1, is_active=1 WHERE id=1"
+        )
+    )
+
+    bot_workflows = _sqlite_columns(sync_conn, "bot_workflows")
+    if bot_workflows and "sort_order" not in bot_workflows:
+        sync_conn.execute(text("ALTER TABLE bot_workflows ADD COLUMN sort_order INTEGER DEFAULT 0"))
 
 
 async def init_db() -> None:

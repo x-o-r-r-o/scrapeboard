@@ -13,36 +13,50 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
-from app.models import Job, JobChunk, ScrapeSettings, User
+from app.models import Job, JobChunk, Package, ScrapeSettings, User
 from app.services.billing import active_subscription
 
-DEFAULT_USER_PERMS = {
-    "can_run": True,
-    "can_stop": True,
-    "can_upload_inputs": True,
-    "max_threads": 4,
-    "allowed_engines": "all",
-}
-
-
-def effective_perms(user: User) -> dict:
-    if user.role == "admin":
-        return {**DEFAULT_USER_PERMS, "can_run": True, "can_stop": True, "can_upload_inputs": True, "max_threads": 999}
-    return {**DEFAULT_USER_PERMS, **(user.perms or {})}
+from app.services.perms import DEFAULT_USER_PERMS, effective_perms
 
 
 def utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def job_parts_dir(public_id: str) -> Path:
-    d = get_settings().results_dir / public_id / "parts"
+def owner_id_from_public_id(public_id: str) -> int | None:
+    """public_id is `{user_id}_{timestamp}_{hex}`."""
+    try:
+        return int(str(public_id).split("_", 1)[0])
+    except (TypeError, ValueError, IndexError):
+        return None
+
+
+def job_result_root(public_id: str, owner_id: int | None = None) -> Path:
+    """Per-user isolated result tree: results/user_{id}/{public_id}/.
+
+    Falls back to legacy results/{public_id}/ when that exists (read path).
+    New writes always use the user-scoped layout when owner_id is known.
+    """
+    cfg = get_settings()
+    oid = owner_id if owner_id is not None else owner_id_from_public_id(public_id)
+    if oid is not None:
+        scoped = cfg.results_dir / f"user_{oid}" / public_id
+        legacy = cfg.results_dir / public_id
+        # Prefer existing tree (legacy or scoped); default new work to scoped
+        if scoped.exists() or not legacy.exists():
+            return scoped
+        return legacy
+    return cfg.results_dir / public_id
+
+
+def job_parts_dir(public_id: str, owner_id: int | None = None) -> Path:
+    d = job_result_root(public_id, owner_id) / "parts"
     d.mkdir(parents=True, exist_ok=True)
     return d
 
 
-def job_merge_dir(public_id: str) -> Path:
-    d = get_settings().results_dir / public_id / "merged"
+def job_merge_dir(public_id: str, owner_id: int | None = None) -> Path:
+    d = job_result_root(public_id, owner_id) / "merged"
     d.mkdir(parents=True, exist_ok=True)
     return d
 
@@ -74,7 +88,16 @@ async def create_job_from_bytes(
     if len(kw_bytes) + len(loc_bytes) > max_bytes:
         raise ValueError(f"Upload exceeds plan limit ({max_mb} MB)")
 
-    settings_row = await db.get(ScrapeSettings, 1)
+    settings_row = None
+    package_engines = None
+    if user.role != "admin" and sub and getattr(sub, "package_id", None):
+        pkg = await db.get(Package, sub.package_id)
+        if pkg:
+            package_engines = pkg.allowed_engines
+            if getattr(pkg, "scrape_settings_id", None):
+                settings_row = await db.get(ScrapeSettings, pkg.scrape_settings_id)
+    if settings_row is None:
+        settings_row = await db.get(ScrapeSettings, 1)
     overrides = overrides or {}
     settings = {
         "engine": overrides.get("engine") or (settings_row.engine if settings_row else "chrome"),
@@ -93,8 +116,8 @@ async def create_job_from_bytes(
         thread_cap = min(thread_cap, sub.threads)
     settings["threads"] = min(int(settings["threads"]), thread_cap)
 
-    ae = perms.get("allowed_engines", "all")
-    if ae != "all" and settings["engine"] not in ae and user.role != "admin":
+    ae = package_engines if package_engines else perms.get("allowed_engines", "all")
+    if ae and ae != "all" and settings["engine"] not in ae and user.role != "admin":
         raise PermissionError(f"Engine {settings['engine']} not allowed")
 
     cfg = get_settings()
@@ -151,10 +174,11 @@ async def create_job_from_bytes(
     return job
 
 
-def merge_job_csvs(public_id: str) -> Path | None:
+def merge_job_csvs(public_id: str, owner_id: int | None = None) -> Path | None:
     """Merge all part CSVs into per-location files and return zip path."""
-    parts = job_parts_dir(public_id)
-    merge = job_merge_dir(public_id)
+    oid = owner_id if owner_id is not None else owner_id_from_public_id(public_id)
+    parts = job_parts_dir(public_id, oid)
+    merge = job_merge_dir(public_id, oid)
     by_loc: dict[str, list[dict]] = {}
     seen: dict[str, set[tuple[str, str]]] = {}
 
@@ -205,7 +229,9 @@ def merge_job_csvs(public_id: str) -> Path | None:
                 w.writerow(r)
         written.append(out)
 
-    zip_path = get_settings().results_dir / public_id / f"results_{public_id}.zip"
+    root = job_result_root(public_id, oid)
+    root.mkdir(parents=True, exist_ok=True)
+    zip_path = root / f"results_{public_id}.zip"
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
         for p in written:
             zf.write(p, p.name)
@@ -213,7 +239,7 @@ def merge_job_csvs(public_id: str) -> Path | None:
 
 
 async def finalize_job(db: AsyncSession, job: Job, cancelled: bool = False) -> Path | None:
-    zip_path = merge_job_csvs(job.public_id)
+    zip_path = merge_job_csvs(job.public_id, job.owner_id)
     if zip_path:
         job.result_zip = str(zip_path)
     if cancelled and job.status not in ("completed", "stopped", "failed"):

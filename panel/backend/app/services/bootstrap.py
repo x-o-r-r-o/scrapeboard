@@ -9,11 +9,11 @@ from app.models import (
     BotSettings,
     BotWorkflow,
     Package,
-    ScrapeSettings,
     SecuritySettings,
     User,
 )
 from app.bot.demos import DEMO_COMMANDS, DEMO_WORKFLOWS
+from app.services.scrape_profiles import clone_profile, ensure_default_profile, ensure_workers_have_default_profile
 
 
 async def bootstrap(db: AsyncSession) -> None:
@@ -23,8 +23,8 @@ async def bootstrap(db: AsyncSession) -> None:
         db.add(SecuritySettings(id=1))
     if not await db.get(BillingSettings, 1):
         db.add(BillingSettings(id=1))
-    if not await db.get(ScrapeSettings, 1):
-        db.add(ScrapeSettings(id=1))
+    await db.flush()
+    default_profile = await ensure_default_profile(db)
     if not await db.get(BotSettings, 1):
         db.add(BotSettings(id=1))
 
@@ -46,12 +46,30 @@ async def bootstrap(db: AsyncSession) -> None:
 
     pkg_count = (await db.execute(select(Package))).scalars().first()
     if not pkg_count:
-        for p in (
-            Package(slug="basic", name="Basic", tier=1, price_usdt=10, duration_days=30, threads=2, max_upload_mb=2),
-            Package(slug="pro", name="Pro", tier=2, price_usdt=25, duration_days=30, threads=5, max_upload_mb=10),
-            Package(slug="max", name="Max", tier=3, price_usdt=60, duration_days=30, threads=12, max_upload_mb=50),
+        for slug, name, tier, price, threads, upload in (
+            ("basic", "Basic", 1, 10, 2, 2),
+            ("pro", "Pro", 2, 25, 5, 10),
+            ("max", "Max", 3, 60, 12, 50),
         ):
-            db.add(p)
+            profile = await clone_profile(
+                db,
+                name=f"{name} scrape",
+                slug=f"{slug}-scrape",
+                description=f"Default scrape profile for {name} package",
+                source=default_profile,
+            )
+            db.add(
+                Package(
+                    slug=slug,
+                    name=name,
+                    tier=tier,
+                    price_usdt=price,
+                    duration_days=30,
+                    threads=threads,
+                    max_upload_mb=upload,
+                    scrape_settings_id=profile.id,
+                )
+            )
 
     existing_cmds = {c.key for c in (await db.execute(select(BotCommand))).scalars().all()}
     for cmd in DEMO_COMMANDS:
@@ -59,8 +77,9 @@ async def bootstrap(db: AsyncSession) -> None:
             db.add(BotCommand(**cmd))
 
     existing_wf = {w.key for w in (await db.execute(select(BotWorkflow))).scalars().all()}
-    for wf in DEMO_WORKFLOWS:
+    for i, wf in enumerate(DEMO_WORKFLOWS):
         if wf["key"] not in existing_wf:
-            db.add(BotWorkflow(**wf))
+            db.add(BotWorkflow(**{**wf, "sort_order": wf.get("sort_order", (i + 1) * 10)}))
 
     await db.commit()
+    await ensure_workers_have_default_profile(db)

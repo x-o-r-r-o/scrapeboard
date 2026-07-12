@@ -21,6 +21,7 @@ from app.models import (
     Order,
     Package,
     PaymentTxid,
+    Subscription,
     SupportTicket,
     User,
     WorkerNode,
@@ -131,6 +132,9 @@ class TelegramBotRuntime:
         user = (await db.execute(select(User).where(User.telegram_id == str(uid)))).scalar_one_or_none()
 
         if msg.get("document"):
+            if user and not user.is_active:
+                await self._send(token, chat_id, "⛔ Your account is disabled. Contact support.")
+                return
             await self._handle_document(db, token, chat_id, user, msg["document"], msg.get("caption") or "")
             return
 
@@ -142,6 +146,17 @@ class TelegramBotRuntime:
         cmd = parts[0].lower().split("@")[0]
         args = parts[1:]
 
+        if user and not user.is_active and cmd not in ("/whoami", "/id", "/start", "/help"):
+            await self._send(token, chat_id, "⛔ Your account is disabled. Contact support.")
+            return
+
+        has_sub = False
+        if user and user.is_active:
+            if user.role == "admin":
+                has_sub = True
+            else:
+                has_sub = bool(await billing_svc.active_subscription(db, user))
+
         commands = {
             c.command: c
             for c in (await db.execute(select(BotCommand).where(BotCommand.enabled == True))).scalars().all()  # noqa: E712
@@ -149,7 +164,10 @@ class TelegramBotRuntime:
 
         if cmd in ("/whoami", "/id"):
             link = f"linked as {user.username}" if user else "not linked to a panel account"
-            await self._send(token, chat_id, f"Your Telegram id: {uid}\nPanel: {link}")
+            status = ""
+            if user:
+                status = " · disabled" if not user.is_active else (" · subscribed" if has_sub else " · no subscription")
+            await self._send(token, chat_id, f"Your Telegram id: {uid}\nPanel: {link}{status}")
             return
 
         if cmd == "/start":
@@ -157,7 +175,7 @@ class TelegramBotRuntime:
             return
 
         if cmd == "/help":
-            await self._send(token, chat_id, self._help_text(commands, settings, user))
+            await self._send(token, chat_id, self._help_text(commands, settings, user, has_sub))
             return
 
         # billing open commands
@@ -166,7 +184,7 @@ class TelegramBotRuntime:
             return
 
         meta = commands.get(cmd)
-        if meta and not self._audience_ok(meta.audience, user):
+        if meta and not self._audience_ok(meta.audience, user, has_sub):
             await self._send(token, chat_id, "⛔ Not allowed for your role.")
             return
 
@@ -192,7 +210,7 @@ class TelegramBotRuntime:
             return
 
         # admin telegram commands
-        if cmd in ("/servers", "/pending", "/approve", "/users"):
+        if cmd in ("/servers", "/pending", "/approve", "/users", "/grant", "/revoke", "/extend", "/disable", "/enable"):
             if user.role != "admin" or not settings.admin_commands_enabled:
                 await self._send(token, chat_id, "⛔ Admins only (enable admin commands in Bot Builder).")
                 return
@@ -519,26 +537,146 @@ class TelegramBotRuntime:
                 await self._send(token, int(user.telegram_id), f"✅ Subscription {pkg.name} active until {sub.expires_at.date()}.")
         elif cmd == "/users":
             users = (await db.execute(select(User).order_by(User.id))).scalars().all()
-            lines = [f"• {u.id} {u.username} ({u.role}) tg={u.telegram_id or '-'}" for u in users]
-            await self._send(token, chat_id, "Users:\n" + "\n".join(lines))
+            lines = []
+            for u in users:
+                sub = await billing_svc.active_subscription(db, u)
+                flag = "ON" if u.is_active else "OFF"
+                plan = sub.package_name if sub else "-"
+                lines.append(f"• {u.id} {u.username} [{flag}] tg={u.telegram_id or '-'} plan={plan}")
+            await self._send(token, chat_id, "Users:\n" + "\n".join(lines[:80]))
+        elif cmd == "/grant":
+            # /grant <telegram_id|username> <package_slug> [days]
+            if len(args) < 2:
+                await self._send(token, chat_id, "Usage: /grant <telegram_id|username> <package_slug> [days]")
+                return
+            target = await self._find_user(db, args[0])
+            if not target:
+                await self._send(token, chat_id, "User not found.")
+                return
+            pkg = (
+                await db.execute(select(Package).where(Package.slug == args[1]))
+            ).scalar_one_or_none()
+            if not pkg:
+                await self._send(token, chat_id, "Package not found.")
+                return
+            days = int(args[2]) if len(args) > 2 and args[2].isdigit() else None
+            sub = await billing_svc.activate_subscription(db, target, pkg, duration_days=days)
+            await self._send(
+                token,
+                chat_id,
+                f"✅ Granted {pkg.name} → {target.username} until {sub.expires_at.date()}",
+            )
+            if target.telegram_id:
+                await self._send(
+                    token,
+                    int(target.telegram_id),
+                    f"✅ Subscription {pkg.name} active until {sub.expires_at.date()}.",
+                )
+        elif cmd == "/revoke":
+            # /revoke <telegram_id|username>
+            if not args:
+                await self._send(token, chat_id, "Usage: /revoke <telegram_id|username>")
+                return
+            target = await self._find_user(db, args[0])
+            if not target:
+                await self._send(token, chat_id, "User not found.")
+                return
+            sub = await billing_svc.active_subscription(db, target)
+            if not sub:
+                await self._send(token, chat_id, "No active subscription.")
+                return
+            await billing_svc.revoke_subscription(db, sub)
+            await self._send(token, chat_id, f"Revoked subscription for {target.username}.")
+            if target.telegram_id:
+                await self._send(token, int(target.telegram_id), "⚠️ Your subscription was revoked.")
+        elif cmd == "/extend":
+            # /extend <telegram_id|username> <days>
+            if len(args) < 2 or not args[1].isdigit():
+                await self._send(token, chat_id, "Usage: /extend <telegram_id|username> <days>")
+                return
+            target = await self._find_user(db, args[0])
+            if not target:
+                await self._send(token, chat_id, "User not found.")
+                return
+            sub = await billing_svc.active_subscription(db, target)
+            if not sub:
+                # extend last sub or require grant
+                sub = (
+                    await db.execute(
+                        select(Subscription)
+                        .where(Subscription.user_id == target.id)
+                        .order_by(Subscription.expires_at.desc())
+                    )
+                ).scalars().first()
+            if not sub:
+                await self._send(token, chat_id, "No subscription to extend. Use /grant first.")
+                return
+            sub = await billing_svc.extend_subscription(db, sub, int(args[1]))
+            await self._send(
+                token,
+                chat_id,
+                f"Extended {target.username} by {args[1]}d → {sub.expires_at.date()}",
+            )
+            if target.telegram_id:
+                await self._send(
+                    token,
+                    int(target.telegram_id),
+                    f"✅ Subscription extended until {sub.expires_at.date()}.",
+                )
+        elif cmd == "/disable":
+            if not args:
+                await self._send(token, chat_id, "Usage: /disable <telegram_id|username>")
+                return
+            target = await self._find_user(db, args[0])
+            if not target:
+                await self._send(token, chat_id, "User not found.")
+                return
+            if target.role == "admin":
+                await self._send(token, chat_id, "Cannot disable an admin.")
+                return
+            target.is_active = False
+            await db.commit()
+            await self._send(token, chat_id, f"Disabled {target.username}.")
+        elif cmd == "/enable":
+            if not args:
+                await self._send(token, chat_id, "Usage: /enable <telegram_id|username>")
+                return
+            target = await self._find_user(db, args[0])
+            if not target:
+                await self._send(token, chat_id, "User not found.")
+                return
+            target.is_active = True
+            await db.commit()
+            await self._send(token, chat_id, f"Enabled {target.username}.")
 
-    def _audience_ok(self, audience: str, user: User | None) -> bool:
+    async def _find_user(self, db: AsyncSession, key: str) -> User | None:
+        key = key.strip()
+        if key.isdigit():
+            by_tg = (await db.execute(select(User).where(User.telegram_id == key))).scalar_one_or_none()
+            if by_tg:
+                return by_tg
+            by_id = await db.get(User, int(key))
+            if by_id:
+                return by_id
+        return (await db.execute(select(User).where(User.username == key))).scalar_one_or_none()
+
+    def _audience_ok(self, audience: str, user: User | None, has_sub: bool = False) -> bool:
         if audience == "everyone":
             return True
-        if not user:
+        if not user or not user.is_active:
             return False
         if audience == "admins":
             return user.role == "admin"
         if audience == "users":
             return True
         if audience == "subscribers":
-            return True
+            return has_sub or user.role == "admin"
         return False
 
-    def _help_text(self, commands: dict, settings: BotSettings, user: User | None) -> str:
+    def _help_text(self, commands: dict, settings: BotSettings, user: User | None, has_sub: bool = False) -> str:
         lines = ["Commands:"]
         for c in sorted(commands.values(), key=lambda x: x.sort_order):
-            if not self._audience_ok(c.audience, user):
+            if not self._audience_ok(c.audience, user, has_sub):
                 continue
             if c.audience == "admins" and not settings.admin_commands_enabled:
                 continue

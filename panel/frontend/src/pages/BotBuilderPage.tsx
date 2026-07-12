@@ -10,15 +10,217 @@ type Command = {
   enabled: boolean;
   audience: string;
 };
+type WorkflowStep = Record<string, string>;
 type Workflow = {
   id: number;
+  key: string;
   name: string;
   description: string;
   enabled: boolean;
   is_demo: boolean;
+  sort_order: number;
+  definition: {
+    trigger?: string;
+    steps?: WorkflowStep[];
+    [k: string]: unknown;
+  };
+};
+
+type WorkflowDraft = {
+  key: string;
+  name: string;
+  description: string;
+  enabled: boolean;
+  sort_order: number;
+  trigger: string;
+  steps: WorkflowStep[];
 };
 
 type Tab = "connection" | "commands" | "workflows";
+
+const EMPTY_DRAFT: WorkflowDraft = {
+  key: "",
+  name: "",
+  description: "",
+  enabled: true,
+  sort_order: 100,
+  trigger: "command:/start",
+  steps: [{ action: "" }],
+};
+
+const STEP_KINDS = ["action", "say", "if", "wait"] as const;
+type StepKind = (typeof STEP_KINDS)[number];
+
+function stepKind(step: WorkflowStep): StepKind {
+  for (const k of STEP_KINDS) {
+    if (k in step) return k;
+  }
+  return "action";
+}
+
+function stepValue(step: WorkflowStep): string {
+  const k = stepKind(step);
+  return String(step[k] ?? "");
+}
+
+function toDraft(w: Workflow): WorkflowDraft {
+  const steps = Array.isArray(w.definition?.steps) && w.definition.steps.length
+    ? w.definition.steps.map((s) => ({ ...s }))
+    : [{ action: "" }];
+  return {
+    key: w.key,
+    name: w.name,
+    description: w.description || "",
+    enabled: w.enabled,
+    sort_order: w.sort_order ?? 0,
+    trigger: String(w.definition?.trigger || "command:/start"),
+    steps,
+  };
+}
+
+function draftDefinition(d: WorkflowDraft) {
+  return {
+    trigger: d.trigger.trim() || "command:/start",
+    steps: d.steps
+      .map((s) => {
+        const kind = stepKind(s);
+        const val = String(s[kind] ?? "").trim();
+        if (!val) return null;
+        const out: WorkflowStep = { [kind]: val };
+        // preserve companion "say" when kind is "if"
+        if (kind === "if" && s.say) out.say = String(s.say);
+        return out;
+      })
+      .filter(Boolean) as WorkflowStep[],
+  };
+}
+
+function updateStep(draft: WorkflowDraft, index: number, patch: { kind?: StepKind; value?: string; say?: string }) {
+  const steps = draft.steps.map((s, i) => {
+    if (i !== index) return s;
+    if (patch.kind) {
+      const next: WorkflowStep = { [patch.kind]: patch.value ?? stepValue(s) };
+      if (patch.kind === "if") {
+        const say = patch.say !== undefined ? patch.say : s.say;
+        if (say) next.say = String(say);
+      }
+      return next;
+    }
+    const kind = stepKind(s);
+    const next: WorkflowStep = { [kind]: patch.value !== undefined ? patch.value : stepValue(s) };
+    if (kind === "if" || patch.say !== undefined) {
+      const say = patch.say !== undefined ? patch.say : s.say;
+      if (say) next.say = String(say);
+    }
+    return next;
+  });
+  return { ...draft, steps };
+}
+
+function StepEditor({
+  draft,
+  onChange,
+}: {
+  draft: WorkflowDraft;
+  onChange: (d: WorkflowDraft) => void;
+}) {
+  return (
+    <div className="stack" style={{ gap: "0.65rem" }}>
+      <label className="field">
+        Trigger
+        <input
+          className="input"
+          value={draft.trigger}
+          onChange={(e) => onChange({ ...draft, trigger: e.target.value })}
+          placeholder="command:/start · cron:daily · event:worker_offline"
+        />
+      </label>
+      <div>
+        <div className="field" style={{ marginBottom: "0.4rem" }}>
+          Steps
+        </div>
+        <p className="muted" style={{ margin: "0 0 0.55rem", fontSize: "0.85rem" }}>
+          Each step is an action, message (say), condition (if), or wait — matching the Telegram bot workflow model.
+        </p>
+        <div className="stack" style={{ gap: "0.5rem" }}>
+          {draft.steps.map((step, i) => {
+            const kind = stepKind(step);
+            return (
+              <div key={i} className="card" style={{ padding: "0.75rem", display: "grid", gap: "0.45rem", gridTemplateColumns: "120px 1fr auto" }}>
+                <select
+                  className="input"
+                  value={kind}
+                  onChange={(e) => onChange(updateStep(draft, i, { kind: e.target.value as StepKind }))}
+                >
+                  {STEP_KINDS.map((k) => (
+                    <option key={k} value={k}>
+                      {k}
+                    </option>
+                  ))}
+                </select>
+                <input
+                  className="input"
+                  value={stepValue(step)}
+                  onChange={(e) => onChange(updateStep(draft, i, { value: e.target.value }))}
+                  placeholder={
+                    kind === "action"
+                      ? "create_order"
+                      : kind === "say"
+                        ? "Message text"
+                        : kind === "if"
+                          ? "no_subscription"
+                          : "command:/paid"
+                  }
+                />
+                <button
+                  className="btn secondary sm"
+                  type="button"
+                  onClick={() => onChange({ ...draft, steps: draft.steps.filter((_, j) => j !== i) })}
+                  disabled={draft.steps.length <= 1}
+                >
+                  Remove
+                </button>
+                {kind === "if" ? (
+                  <label className="field" style={{ gridColumn: "1 / -1" }}>
+                    Message when condition matches (say)
+                    <input
+                      className="input"
+                      value={String(step.say || "")}
+                      onChange={(e) => onChange(updateStep(draft, i, { say: e.target.value }))}
+                      placeholder="Optional reply text"
+                    />
+                  </label>
+                ) : null}
+              </div>
+            );
+          })}
+        </div>
+        <div className="page-actions" style={{ marginTop: "0.55rem" }}>
+          <button
+            className="btn secondary sm"
+            type="button"
+            onClick={() => onChange({ ...draft, steps: [...draft.steps, { action: "" }] })}
+          >
+            Add step
+          </button>
+          <button
+            className="btn secondary sm"
+            type="button"
+            onClick={() => {
+              const steps = [...draft.steps];
+              if (steps.length < 2) return;
+              const last = steps.pop()!;
+              steps.unshift(last);
+              onChange({ ...draft, steps });
+            }}
+          >
+            Rotate order
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
 
 export default function BotBuilderPage() {
   const [settings, setSettings] = useState<BotSettings>({});
@@ -29,6 +231,10 @@ export default function BotBuilderPage() {
   const [error, setError] = useState("");
   const [tab, setTab] = useState<Tab>("connection");
   const [saving, setSaving] = useState(false);
+  const [creating, setCreating] = useState(false);
+  const [createDraft, setCreateDraft] = useState<WorkflowDraft>(EMPTY_DRAFT);
+  const [editId, setEditId] = useState<number | null>(null);
+  const [editDraft, setEditDraft] = useState<WorkflowDraft | null>(null);
 
   async function refresh() {
     const [s, c, w] = await Promise.all([
@@ -74,6 +280,56 @@ export default function BotBuilderPage() {
     }
   }
 
+  async function createWorkflow(e: FormEvent) {
+    e.preventDefault();
+    setError("");
+    setMsg("");
+    try {
+      await api("/api/bot/workflows", {
+        method: "POST",
+        body: JSON.stringify({
+          key: createDraft.key,
+          name: createDraft.name,
+          description: createDraft.description,
+          enabled: createDraft.enabled,
+          sort_order: createDraft.sort_order,
+          definition: draftDefinition(createDraft),
+        }),
+      });
+      setCreateDraft(EMPTY_DRAFT);
+      setCreating(false);
+      setMsg("Workflow created.");
+      await refresh();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Create failed");
+    }
+  }
+
+  async function saveWorkflow(e: FormEvent) {
+    e.preventDefault();
+    if (editId == null || !editDraft) return;
+    setError("");
+    setMsg("");
+    try {
+      await api(`/api/bot/workflows/${editId}`, {
+        method: "PATCH",
+        body: JSON.stringify({
+          name: editDraft.name,
+          description: editDraft.description,
+          enabled: editDraft.enabled,
+          sort_order: editDraft.sort_order,
+          definition: draftDefinition(editDraft),
+        }),
+      });
+      setEditId(null);
+      setEditDraft(null);
+      setMsg("Workflow updated.");
+      await refresh();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Update failed");
+    }
+  }
+
   const enabled = Boolean(settings.enabled);
   const tokenOk = Boolean(settings.token_configured);
   const username = String(settings.username || "");
@@ -84,8 +340,8 @@ export default function BotBuilderPage() {
         <div>
           <h1>Bot builder</h1>
           <p className="subtitle">
-            Connect your Telegram bot (BotFather token), toggle commands, and manage demo workflows — same control
-            surface style as Omnidesk bots.
+            Connect your Telegram bot (BotFather token), toggle commands, and manage workflows — same control surface
+            style as Omnidesk bots.
           </p>
         </div>
         <div className="page-actions">
@@ -324,10 +580,149 @@ export default function BotBuilderPage() {
 
       {tab === "workflows" ? (
         <div className="stack">
-          {workflows.length === 0 ? (
+          <div className="page-actions">
+            <button
+              className="btn"
+              type="button"
+              onClick={() => {
+                setCreating(true);
+                setCreateDraft({
+                  ...EMPTY_DRAFT,
+                  sort_order: (workflows.reduce((m, w) => Math.max(m, w.sort_order || 0), 0) || 0) + 10,
+                });
+                setEditId(null);
+                setEditDraft(null);
+              }}
+            >
+              Add workflow
+            </button>
+          </div>
+
+          {creating ? (
+            <form className="card stack" onSubmit={createWorkflow}>
+              <h3 style={{ margin: 0 }}>New workflow</h3>
+              <div className="form-grid two">
+                <label className="field">
+                  Key
+                  <input
+                    className="input"
+                    required
+                    value={createDraft.key}
+                    onChange={(e) => setCreateDraft({ ...createDraft, key: e.target.value })}
+                    placeholder="onboarding_custom"
+                  />
+                </label>
+                <label className="field">
+                  Name
+                  <input
+                    className="input"
+                    required
+                    value={createDraft.name}
+                    onChange={(e) => setCreateDraft({ ...createDraft, name: e.target.value })}
+                  />
+                </label>
+                <label className="field full">
+                  Description
+                  <textarea
+                    className="input"
+                    rows={2}
+                    value={createDraft.description}
+                    onChange={(e) => setCreateDraft({ ...createDraft, description: e.target.value })}
+                  />
+                </label>
+                <label className="field">
+                  Sort order
+                  <input
+                    className="input"
+                    type="number"
+                    value={createDraft.sort_order}
+                    onChange={(e) => setCreateDraft({ ...createDraft, sort_order: Number(e.target.value) || 0 })}
+                  />
+                </label>
+                <label className="check-row" style={{ alignItems: "center" }}>
+                  <input
+                    type="checkbox"
+                    checked={createDraft.enabled}
+                    onChange={(e) => setCreateDraft({ ...createDraft, enabled: e.target.checked })}
+                  />
+                  Enabled
+                </label>
+              </div>
+              <StepEditor draft={createDraft} onChange={setCreateDraft} />
+              <div className="page-actions">
+                <button className="btn" type="submit">
+                  Create workflow
+                </button>
+                <button className="btn secondary" type="button" onClick={() => setCreating(false)}>
+                  Cancel
+                </button>
+              </div>
+            </form>
+          ) : null}
+
+          {editId != null && editDraft ? (
+            <form className="card stack" onSubmit={saveWorkflow}>
+              <h3 style={{ margin: 0 }}>Edit workflow · <code>{editDraft.key}</code></h3>
+              <div className="form-grid two">
+                <label className="field">
+                  Name
+                  <input
+                    className="input"
+                    required
+                    value={editDraft.name}
+                    onChange={(e) => setEditDraft({ ...editDraft, name: e.target.value })}
+                  />
+                </label>
+                <label className="field">
+                  Sort order
+                  <input
+                    className="input"
+                    type="number"
+                    value={editDraft.sort_order}
+                    onChange={(e) => setEditDraft({ ...editDraft, sort_order: Number(e.target.value) || 0 })}
+                  />
+                </label>
+                <label className="field full">
+                  Description
+                  <textarea
+                    className="input"
+                    rows={2}
+                    value={editDraft.description}
+                    onChange={(e) => setEditDraft({ ...editDraft, description: e.target.value })}
+                  />
+                </label>
+                <label className="check-row" style={{ alignItems: "center" }}>
+                  <input
+                    type="checkbox"
+                    checked={editDraft.enabled}
+                    onChange={(e) => setEditDraft({ ...editDraft, enabled: e.target.checked })}
+                  />
+                  Enabled
+                </label>
+              </div>
+              <StepEditor draft={editDraft} onChange={setEditDraft} />
+              <div className="page-actions">
+                <button className="btn" type="submit">
+                  Save workflow
+                </button>
+                <button
+                  className="btn secondary"
+                  type="button"
+                  onClick={() => {
+                    setEditId(null);
+                    setEditDraft(null);
+                  }}
+                >
+                  Cancel
+                </button>
+              </div>
+            </form>
+          ) : null}
+
+          {workflows.length === 0 && !creating ? (
             <div className="card empty-state">
               <strong>No workflows yet</strong>
-              <p className="muted">Import demos for onboarding, payments, jobs, and support flows.</p>
+              <p className="muted">Add a custom workflow or import demos for onboarding, payments, jobs, and support flows.</p>
             </div>
           ) : (
             <div className="grid-cards">
@@ -353,8 +748,46 @@ export default function BotBuilderPage() {
                     </label>
                   </div>
                   <div className="item-card-meta">
+                    <span className="chip">{w.key}</span>
                     {w.is_demo ? <span className="chip">demo</span> : <span className="chip">custom</span>}
+                    <span className="chip">order {w.sort_order ?? 0}</span>
+                    <span className="chip">{String(w.definition?.trigger || "—")}</span>
+                    <span className="chip">{Array.isArray(w.definition?.steps) ? w.definition.steps.length : 0} steps</span>
                     <span className={`badge ${w.enabled ? "ok" : ""}`}>{w.enabled ? "Active" : "Off"}</span>
+                  </div>
+                  <div className="page-actions" style={{ marginTop: "0.65rem" }}>
+                    <button
+                      className="btn secondary sm"
+                      type="button"
+                      onClick={() => {
+                        setCreating(false);
+                        setEditId(w.id);
+                        setEditDraft(toDraft(w));
+                      }}
+                    >
+                      Edit
+                    </button>
+                    <button
+                      className="btn secondary sm"
+                      type="button"
+                      onClick={async () => {
+                        if (!confirm(`Delete workflow “${w.name}”?`)) return;
+                        setError("");
+                        try {
+                          await api(`/api/bot/workflows/${w.id}`, { method: "DELETE" });
+                          if (editId === w.id) {
+                            setEditId(null);
+                            setEditDraft(null);
+                          }
+                          setMsg("Workflow deleted.");
+                          await refresh();
+                        } catch (err) {
+                          setError(err instanceof Error ? err.message : "Delete failed");
+                        }
+                      }}
+                    >
+                      Delete
+                    </button>
                   </div>
                 </div>
               ))}
