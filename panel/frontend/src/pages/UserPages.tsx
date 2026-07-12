@@ -23,15 +23,127 @@ type Sub = {
   expires_at: string;
 } | null;
 
+type LiveWorker = {
+  id: number;
+  name: string;
+  status: string;
+  online: boolean;
+  cpu_percent: number;
+  mem_percent: number;
+  disk_percent: number;
+  mem_used_gb: number;
+  mem_total_gb: number;
+  disk_used_gb: number;
+  disk_total_gb: number;
+  load_avg_1: number;
+  host_os: string;
+  hostname: string;
+  version: string;
+  max_browsers: number;
+  active_leases: number;
+  load_ratio: number;
+};
+
+type LiveUser = {
+  id: number;
+  username: string;
+  role: string;
+  is_active: boolean;
+  jobs_queued: number;
+  jobs_running: number;
+  jobs_completed: number;
+  rows_saved_total: number;
+  rows_saved_today: number;
+  subscription: string | null;
+  subscription_days_left: number | null;
+};
+
+type LiveStats = {
+  generated_at: string;
+  scope: string;
+  overview: {
+    workers_total: number;
+    workers_online: number;
+    workers_busy: number;
+    workers_offline: number;
+    avg_cpu: number;
+    avg_mem: number;
+    avg_disk: number;
+    active_leases: number;
+    jobs_queued: number;
+    jobs_running: number;
+    jobs_completed: number;
+    jobs_failed: number;
+    jobs_finished_today: number;
+    rows_saved_today: number;
+    users_total: number;
+    users_with_running_jobs: number;
+  };
+  workers: LiveWorker[];
+  users: LiveUser[];
+};
+
+function Meter({ label, value, detail }: { label: string; value: number; detail?: string }) {
+  const pct = Math.max(0, Math.min(100, Number.isFinite(value) ? value : 0));
+  const tone = pct >= 90 ? "danger" : pct >= 75 ? "warn" : "ok";
+  return (
+    <div className="meter">
+      {label ? (
+        <div className="meter-head">
+          <span>{label}</span>
+          <span>
+            {pct.toFixed(0)}%{detail ? ` · ${detail}` : ""}
+          </span>
+        </div>
+      ) : (
+        <div className="meter-head">
+          <span>
+            {pct.toFixed(0)}%{detail ? ` · ${detail}` : ""}
+          </span>
+        </div>
+      )}
+      <div className="meter-track">
+        <div className={`meter-fill ${tone}`} style={{ width: `${pct}%` }} />
+      </div>
+    </div>
+  );
+}
+
+function statusBadge(status: string) {
+  const cls =
+    status === "online" ? "ok" : status === "draining" ? "warn" : status === "disabled" || status === "offline" ? "danger" : "";
+  return <span className={`badge ${cls}`}>{status}</span>;
+}
+
 export function DashboardPage() {
   const { user } = useOutletContext<{ user: User }>();
-  const [jobs, setJobs] = useState<Job[]>([]);
+  const [live, setLive] = useState<LiveStats | null>(null);
   const [sub, setSub] = useState<Sub>(null);
+  const [error, setError] = useState("");
 
   useEffect(() => {
-    api<Job[]>("/api/jobs").then(setJobs).catch(() => setJobs([]));
+    let cancelled = false;
+    async function tick() {
+      try {
+        const data = await api<LiveStats>("/api/stats/live");
+        if (!cancelled) {
+          setLive(data);
+          setError("");
+        }
+      } catch (e) {
+        if (!cancelled) setError(e instanceof Error ? e.message : "Failed to load live stats");
+      }
+    }
+    tick();
     api<Sub>("/api/subscriptions/me").then(setSub).catch(() => setSub(null));
+    const t = setInterval(tick, 4000);
+    return () => {
+      cancelled = true;
+      clearInterval(t);
+    };
   }, []);
+
+  const o = live?.overview;
 
   return (
     <div className="stack">
@@ -39,12 +151,15 @@ export function DashboardPage() {
         <div>
           <h1>Dashboard</h1>
           <p className="subtitle">
-            Signed in as <strong>{user.username}</strong> ({user.role}). Stats below are{" "}
-            {user.role === "admin" ? "global" : "only yours"}.
+            Live stats · {user.role === "admin" ? "fleet + all users" : "your account"}
+            {live?.generated_at ? ` · updated ${new Date(live.generated_at).toLocaleTimeString()}` : ""}
           </p>
         </div>
+        <span className="badge ok live-pulse">LIVE</span>
       </div>
-      <div className="grid-cards">
+      {error ? <p className="error">{error}</p> : null}
+
+      <div className="grid-cards cols-3">
         <div className="card">
           <h3 style={{ margin: 0 }}>Subscription</h3>
           {sub ? (
@@ -56,12 +171,168 @@ export function DashboardPage() {
           )}
         </div>
         <div className="card">
-          <h3 style={{ margin: 0 }}>Jobs</h3>
-          <p>
-            {jobs.length} total · {jobs.filter((j) => j.status === "running").length} running
+          <h3 style={{ margin: 0 }}>Jobs now</h3>
+          <p className="stat-xl">
+            {o ? o.jobs_running : "—"} <span className="muted">running</span>
           </p>
+          <p className="muted">{o ? `${o.jobs_queued} queued · ${o.jobs_finished_today} finished today` : "…"}</p>
+        </div>
+        <div className="card">
+          <h3 style={{ margin: 0 }}>Rows today</h3>
+          <p className="stat-xl">{o ? o.rows_saved_today.toLocaleString() : "—"}</p>
+          <p className="muted">{o ? `${o.jobs_completed} completed · ${o.jobs_failed} failed` : "…"}</p>
         </div>
       </div>
+
+      {user.role === "admin" && o ? (
+        <div className="grid-cards cols-3">
+          <div className="card">
+            <h3 style={{ margin: 0 }}>Workers</h3>
+            <p className="stat-xl">
+              {o.workers_online}/{o.workers_total} <span className="muted">online</span>
+            </p>
+            <p className="muted">
+              {o.workers_busy} busy · {o.active_leases} leases · {o.workers_offline} offline
+            </p>
+          </div>
+          <div className="card">
+            <h3 style={{ margin: 0 }}>Fleet load</h3>
+            <Meter label="CPU avg" value={o.avg_cpu} />
+            <Meter label="RAM avg" value={o.avg_mem} />
+            <Meter label="Disk avg" value={o.avg_disk} />
+          </div>
+          <div className="card">
+            <h3 style={{ margin: 0 }}>Users</h3>
+            <p className="stat-xl">
+              {o.users_with_running_jobs}/{o.users_total} <span className="muted">active</span>
+            </p>
+            <p className="muted">Users with at least one running job</p>
+          </div>
+        </div>
+      ) : null}
+
+      {user.role === "admin" && live && live.workers.length > 0 ? (
+        <div className="card">
+          <h3 style={{ marginTop: 0 }}>Workers — live</h3>
+          <div className="table-wrap">
+            <table className="table">
+              <thead>
+                <tr>
+                  <th>Worker</th>
+                  <th>Status</th>
+                  <th>Load</th>
+                  <th>CPU</th>
+                  <th>RAM</th>
+                  <th>Disk</th>
+                  <th>Host</th>
+                </tr>
+              </thead>
+              <tbody>
+                {live.workers.map((w) => (
+                  <tr key={w.id}>
+                    <td>
+                      <strong>{w.name}</strong>
+                      <div className="muted" style={{ fontSize: "0.8rem" }}>
+                        v{w.version || "—"}
+                      </div>
+                    </td>
+                    <td>{statusBadge(w.status)}</td>
+                    <td>
+                      {w.active_leases}/{w.max_browsers}
+                      <div className="meter" style={{ marginTop: 4 }}>
+                        <div className="meter-track">
+                          <div
+                            className={`meter-fill ${w.load_ratio >= 0.9 ? "danger" : w.load_ratio >= 0.7 ? "warn" : "ok"}`}
+                            style={{ width: `${Math.min(100, w.load_ratio * 100)}%` }}
+                          />
+                        </div>
+                      </div>
+                    </td>
+                    <td>
+                      <Meter label="" value={w.cpu_percent} detail={w.load_avg_1 ? `load ${w.load_avg_1}` : undefined} />
+                    </td>
+                    <td>
+                      <Meter
+                        label=""
+                        value={w.mem_percent}
+                        detail={w.mem_total_gb ? `${w.mem_used_gb}/${w.mem_total_gb} GB` : undefined}
+                      />
+                    </td>
+                    <td>
+                      <Meter
+                        label=""
+                        value={w.disk_percent}
+                        detail={w.disk_total_gb ? `${w.disk_used_gb}/${w.disk_total_gb} GB` : undefined}
+                      />
+                    </td>
+                    <td>
+                      <code>{w.hostname || "—"}</code>
+                      <div className="muted" style={{ fontSize: "0.8rem" }}>
+                        {w.host_os || "—"}
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      ) : null}
+
+      {live && live.users.length > 0 ? (
+        <div className="card">
+          <h3 style={{ marginTop: 0 }}>{user.role === "admin" ? "Users — live" : "Your activity"}</h3>
+          <div className="table-wrap">
+            <table className="table">
+              <thead>
+                <tr>
+                  <th>User</th>
+                  <th>Plan</th>
+                  <th>Queued</th>
+                  <th>Running</th>
+                  <th>Completed</th>
+                  <th>Rows today</th>
+                  <th>Rows total</th>
+                </tr>
+              </thead>
+              <tbody>
+                {live.users.map((u) => (
+                  <tr key={u.id}>
+                    <td>
+                      <strong>{u.username}</strong>
+                      <div className="muted" style={{ fontSize: "0.8rem" }}>
+                        {u.role}
+                        {!u.is_active ? " · inactive" : ""}
+                      </div>
+                    </td>
+                    <td>
+                      {u.subscription ? (
+                        <>
+                          {u.subscription}
+                          {u.subscription_days_left != null ? (
+                            <div className="muted" style={{ fontSize: "0.8rem" }}>
+                              {u.subscription_days_left.toFixed(1)}d left
+                            </div>
+                          ) : null}
+                        </>
+                      ) : (
+                        <span className="muted">—</span>
+                      )}
+                    </td>
+                    <td>{u.jobs_queued}</td>
+                    <td>
+                      {u.jobs_running > 0 ? <span className="badge ok">{u.jobs_running}</span> : u.jobs_running}
+                    </td>
+                    <td>{u.jobs_completed}</td>
+                    <td>{u.rows_saved_today.toLocaleString()}</td>
+                    <td>{u.rows_saved_total.toLocaleString()}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }

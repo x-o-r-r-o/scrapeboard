@@ -3,7 +3,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api import auth, billing, infra, jobs, settings_bot, users
+from app.api import auth, billing, infra, jobs, settings_bot, stats, users
 from app.bot.runtime import bot_runtime
 from app.core.config import get_settings
 from app.core.database import SessionLocal, init_db
@@ -35,6 +35,7 @@ def create_app() -> FastAPI:
     app.include_router(billing.router, prefix="/api")
     app.include_router(infra.router, prefix="/api")
     app.include_router(jobs.router, prefix="/api")
+    app.include_router(stats.router, prefix="/api")
     app.include_router(settings_bot.router, prefix="/api")
 
     @app.get("/api/health")

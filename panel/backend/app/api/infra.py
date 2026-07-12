@@ -2,7 +2,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, Header, HTTPException, UploadFile
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import require_admin, require_ready_user
@@ -74,7 +74,12 @@ def _scrape_out(s: ScrapeSettings) -> ScrapeSettingsOut:
     )
 
 
-def _worker_out(w: WorkerNode, scrape: ScrapeSettings | None = None) -> WorkerOut:
+def _worker_out(
+    w: WorkerNode,
+    scrape: ScrapeSettings | None = None,
+    *,
+    active_leases: int = 0,
+) -> WorkerOut:
     online = False
     if w.last_seen_at:
         ts = w.last_seen_at if w.last_seen_at.tzinfo else w.last_seen_at.replace(tzinfo=timezone.utc)
@@ -91,10 +96,21 @@ def _worker_out(w: WorkerNode, scrape: ScrapeSettings | None = None) -> WorkerOu
         max_browsers=w.max_browsers,
         proxy_pool_id=w.proxy_pool_id,
         last_seen_at=w.last_seen_at,
-        cpu_percent=w.cpu_percent,
-        mem_percent=w.mem_percent,
-        version=w.version,
+        cpu_percent=float(w.cpu_percent or 0),
+        mem_percent=float(w.mem_percent or 0),
+        disk_percent=float(getattr(w, "disk_percent", 0) or 0),
+        mem_used_gb=float(getattr(w, "mem_used_gb", 0) or 0),
+        mem_total_gb=float(getattr(w, "mem_total_gb", 0) or 0),
+        disk_used_gb=float(getattr(w, "disk_used_gb", 0) or 0),
+        disk_total_gb=float(getattr(w, "disk_total_gb", 0) or 0),
+        load_avg_1=float(getattr(w, "load_avg_1", 0) or 0),
+        load_avg_5=float(getattr(w, "load_avg_5", 0) or 0),
+        load_avg_15=float(getattr(w, "load_avg_15", 0) or 0),
+        host_os=str(getattr(w, "host_os", "") or ""),
+        hostname=str(getattr(w, "hostname", "") or ""),
+        version=w.version or "",
         online=online,
+        active_leases=active_leases,
         worker_config=public_worker_config(raw),
     )
 
@@ -188,7 +204,15 @@ async def delete_pool(pool_id: int, _: User = Depends(require_admin), __: User =
 async def list_workers(_: User = Depends(require_admin), __: User = Depends(require_ready_user), db: AsyncSession = Depends(get_db)):
     scrape = await db.get(ScrapeSettings, 1)
     rows = (await db.execute(select(WorkerNode).order_by(WorkerNode.id))).scalars().all()
-    return [_worker_out(w, scrape) for w in rows]
+    lease_rows = (
+        await db.execute(
+            select(JobChunk.worker_id, func.count())
+            .where(JobChunk.state == "leased", JobChunk.worker_id.is_not(None))
+            .group_by(JobChunk.worker_id)
+        )
+    ).all()
+    leases = {int(wid): int(cnt) for wid, cnt in lease_rows if wid is not None}
+    return [_worker_out(w, scrape, active_leases=leases.get(w.id, 0)) for w in rows]
 
 
 @router.post("/workers", response_model=WorkerCreateResponse)
@@ -341,6 +365,10 @@ async def worker_hello(
     body = body or {}
     w.last_seen_at = datetime.now(timezone.utc)
     w.version = str(body.get("version") or w.version)
+    if body.get("os") or body.get("host_os"):
+        w.host_os = str(body.get("os") or body.get("host_os"))[:64]
+    if body.get("hostname"):
+        w.hostname = str(body.get("hostname"))[:128]
     await db.commit()
     return {
         "ok": True,
@@ -364,6 +392,18 @@ async def worker_heartbeat(
     w.last_seen_at = datetime.now(timezone.utc)
     w.cpu_percent = float(body.get("cpu") or 0)
     w.mem_percent = float(body.get("mem") or 0)
+    w.disk_percent = float(body.get("disk") or body.get("disk_percent") or 0)
+    w.mem_used_gb = float(body.get("mem_used_gb") or 0)
+    w.mem_total_gb = float(body.get("mem_total_gb") or 0)
+    w.disk_used_gb = float(body.get("disk_used_gb") or 0)
+    w.disk_total_gb = float(body.get("disk_total_gb") or 0)
+    w.load_avg_1 = float(body.get("load_1") or body.get("load_avg_1") or 0)
+    w.load_avg_5 = float(body.get("load_5") or body.get("load_avg_5") or 0)
+    w.load_avg_15 = float(body.get("load_15") or body.get("load_avg_15") or 0)
+    if body.get("hostname"):
+        w.hostname = str(body.get("hostname"))[:128]
+    if body.get("os") or body.get("host_os"):
+        w.host_os = str(body.get("os") or body.get("host_os"))[:64]
     w.version = str(body.get("version") or w.version)
     await db.commit()
     scrape = await db.get(ScrapeSettings, 1)

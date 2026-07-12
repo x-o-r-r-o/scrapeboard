@@ -189,6 +189,67 @@ textarea.input {
   color: #f0a0a6;
 }
 
+.stat-xl {
+  font-size: 1.75rem;
+  font-weight: 650;
+  margin: 0.35rem 0 0.15rem;
+  letter-spacing: -0.02em;
+}
+
+.meter {
+  display: grid;
+  gap: 0.25rem;
+  min-width: 88px;
+}
+
+.meter-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.5rem;
+  font-size: 0.75rem;
+  color: var(--muted);
+}
+
+.meter-track {
+  height: 6px;
+  border-radius: 999px;
+  background: #24353f;
+  overflow: hidden;
+}
+
+.meter-fill {
+  height: 100%;
+  border-radius: inherit;
+  background: var(--accent);
+  transition: width 0.4s ease;
+}
+
+.meter-fill.warn {
+  background: var(--warn);
+}
+
+.meter-fill.danger {
+  background: var(--danger);
+}
+
+.meter-fill.ok {
+  background: var(--accent);
+}
+
+.live-pulse {
+  animation: live-pulse 1.6s ease-in-out infinite;
+}
+
+@keyframes live-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.55;
+  }
+}
+
 .stack {
   display: grid;
   gap: 1rem;

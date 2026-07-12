@@ -216,7 +216,19 @@ type WorkerRow = {
   is_draining: boolean;
   cpu_percent: number;
   mem_percent: number;
+  disk_percent: number;
+  mem_used_gb: number;
+  mem_total_gb: number;
+  disk_used_gb: number;
+  disk_total_gb: number;
+  load_avg_1: number;
+  load_avg_5: number;
+  load_avg_15: number;
+  host_os: string;
+  hostname: string;
+  version: string;
   max_browsers: number;
+  active_leases: number;
   proxy_pool_id: number | null;
   worker_config: WorkerConfig;
 };
@@ -440,37 +452,83 @@ export function WorkersAdminPage() {
             <tr>
               <th>Name</th>
               <th>Status</th>
-              <th>CPU/Mem</th>
-              <th>Browsers</th>
-              <th>Pool</th>
+              <th>Load</th>
+              <th>CPU</th>
+              <th>RAM</th>
+              <th>Disk</th>
+              <th>Host</th>
               <th>Engine</th>
               <th />
             </tr>
           </thead>
           <tbody>
-            {workers.map((w) => (
-              <tr key={w.id} style={{ background: selectedId === w.id ? "color-mix(in srgb, var(--accent) 12%, transparent)" : undefined }}>
-                <td>{w.name}</td>
-                <td>
-                  <span className={`badge ${w.online ? "ok" : ""}`}>{w.online ? "online" : "offline"}</span>
-                  {w.is_draining ? " draining" : ""}
-                  {!w.is_enabled ? " disabled" : ""}
-                </td>
-                <td>
-                  {w.cpu_percent.toFixed(0)}% / {w.mem_percent.toFixed(0)}%
-                </td>
-                <td>{w.max_browsers}</td>
-                <td>{w.proxy_pool_id ?? "—"}</td>
-                <td>
-                  <code>{String(w.worker_config?.engine || "—")}</code>
-                </td>
-                <td>
-                  <button className="btn secondary" type="button" onClick={() => openEdit(w)}>
-                    Settings
-                  </button>
-                </td>
-              </tr>
-            ))}
+            {workers.map((w) => {
+              const status = !w.is_enabled ? "disabled" : w.is_draining ? "draining" : w.online ? "online" : "offline";
+              const statusCls =
+                status === "online" ? "ok" : status === "draining" ? "warn" : status === "offline" || status === "disabled" ? "danger" : "";
+              const leaseLoad = (w.active_leases || 0) / Math.max(1, w.max_browsers);
+              return (
+                <tr key={w.id} style={{ background: selectedId === w.id ? "color-mix(in srgb, var(--accent) 12%, transparent)" : undefined }}>
+                  <td>
+                    <strong>{w.name}</strong>
+                    <div className="muted" style={{ fontSize: "0.8rem" }}>
+                      v{w.version || "—"} · {w.token_prefix}…
+                    </div>
+                  </td>
+                  <td>
+                    <span className={`badge ${statusCls}`}>{status}</span>
+                  </td>
+                  <td>
+                    {w.active_leases ?? 0}/{w.max_browsers}
+                    <div className="meter" style={{ marginTop: 4, minWidth: 72 }}>
+                      <div className="meter-track">
+                        <div
+                          className={`meter-fill ${leaseLoad >= 0.9 ? "danger" : leaseLoad >= 0.7 ? "warn" : "ok"}`}
+                          style={{ width: `${Math.min(100, leaseLoad * 100)}%` }}
+                        />
+                      </div>
+                    </div>
+                  </td>
+                  <td>
+                    {w.cpu_percent.toFixed(0)}%
+                    {w.load_avg_1 ? <div className="muted" style={{ fontSize: "0.75rem" }}>load {w.load_avg_1}</div> : null}
+                  </td>
+                  <td>
+                    {w.mem_percent.toFixed(0)}%
+                    {w.mem_total_gb ? (
+                      <div className="muted" style={{ fontSize: "0.75rem" }}>
+                        {w.mem_used_gb}/{w.mem_total_gb} GB
+                      </div>
+                    ) : null}
+                  </td>
+                  <td>
+                    {(w.disk_percent || 0).toFixed(0)}%
+                    {w.disk_total_gb ? (
+                      <div className="muted" style={{ fontSize: "0.75rem" }}>
+                        {w.disk_used_gb}/{w.disk_total_gb} GB
+                      </div>
+                    ) : null}
+                  </td>
+                  <td>
+                    <code>{w.hostname || "—"}</code>
+                    <div className="muted" style={{ fontSize: "0.75rem" }}>
+                      {w.host_os || "—"}
+                    </div>
+                  </td>
+                  <td>
+                    <code>{String(w.worker_config?.engine || "—")}</code>
+                    <div className="muted" style={{ fontSize: "0.75rem" }}>
+                      pool {w.proxy_pool_id ?? "—"}
+                    </div>
+                  </td>
+                  <td>
+                    <button className="btn secondary" type="button" onClick={() => openEdit(w)}>
+                      Settings
+                    </button>
+                  </td>
+                </tr>
+              );
+            })}
           </tbody>
         </table>
       </div>

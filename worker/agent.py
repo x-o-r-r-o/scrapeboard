@@ -31,7 +31,7 @@ ROOT = Path(__file__).resolve().parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-VERSION = "0.4.0"
+VERSION = "0.5.0"
 CONFIG_NAME = "worker_config.json"
 HOST_OS = platform.system()  # Windows | Darwin | Linux
 
@@ -137,12 +137,54 @@ def run_setup_wizard(prompt=input) -> dict:
     return cfg
 
 
-def _cpu_mem():
+def _host_stats():
+    """CPU, RAM, disk, load averages for heartbeat telemetry."""
+    out = {
+        "cpu": 0.0,
+        "mem": 0.0,
+        "disk": 0.0,
+        "mem_used_gb": 0.0,
+        "mem_total_gb": 0.0,
+        "disk_used_gb": 0.0,
+        "disk_total_gb": 0.0,
+        "load_1": 0.0,
+        "load_5": 0.0,
+        "load_15": 0.0,
+        "hostname": "",
+        "os": HOST_OS,
+    }
+    try:
+        import socket
+
+        out["hostname"] = socket.gethostname()[:128]
+    except Exception:
+        pass
     try:
         import psutil
-        return psutil.cpu_percent(interval=None), psutil.virtual_memory().percent
+
+        out["cpu"] = float(psutil.cpu_percent(interval=None))
+        vm = psutil.virtual_memory()
+        out["mem"] = float(vm.percent)
+        out["mem_used_gb"] = round(vm.used / (1024**3), 2)
+        out["mem_total_gb"] = round(vm.total / (1024**3), 2)
+        root = "C:\\" if HOST_OS == "Windows" else "/"
+        du = psutil.disk_usage(root)
+        out["disk"] = float(du.percent)
+        out["disk_used_gb"] = round(du.used / (1024**3), 2)
+        out["disk_total_gb"] = round(du.total / (1024**3), 2)
+        try:
+            load = psutil.getloadavg()
+            out["load_1"], out["load_5"], out["load_15"] = (round(float(x), 2) for x in load)
+        except (AttributeError, OSError):
+            pass
     except Exception:
-        return 0.0, 0.0
+        pass
+    return out
+
+
+def _cpu_mem():
+    s = _host_stats()
+    return s["cpu"], s["mem"]
 
 
 class PanelClient:
@@ -155,9 +197,15 @@ class PanelClient:
         self.worker_name = worker_name
 
     def hello(self):
+        stats = _host_stats()
         r = self.requests.post(
             f"{self.base}/api/worker-api/hello",
-            json={"version": VERSION, "name": self.worker_name, "os": HOST_OS},
+            json={
+                "version": VERSION,
+                "name": self.worker_name,
+                "os": HOST_OS,
+                "hostname": stats.get("hostname") or "",
+            },
             headers=self.headers,
             timeout=20,
         )
@@ -165,10 +213,26 @@ class PanelClient:
         return r.json()
 
     def heartbeat(self):
-        cpu, mem = _cpu_mem()
+        stats = _host_stats()
+        payload = {
+            "cpu": stats["cpu"],
+            "mem": stats["mem"],
+            "disk": stats["disk"],
+            "mem_used_gb": stats["mem_used_gb"],
+            "mem_total_gb": stats["mem_total_gb"],
+            "disk_used_gb": stats["disk_used_gb"],
+            "disk_total_gb": stats["disk_total_gb"],
+            "load_1": stats["load_1"],
+            "load_5": stats["load_5"],
+            "load_15": stats["load_15"],
+            "hostname": stats["hostname"],
+            "version": VERSION,
+            "name": self.worker_name,
+            "os": HOST_OS,
+        }
         r = self.requests.post(
             f"{self.base}/api/worker-api/heartbeat",
-            json={"cpu": cpu, "mem": mem, "version": VERSION, "name": self.worker_name, "os": HOST_OS},
+            json=payload,
             headers=self.headers,
             timeout=20,
         )

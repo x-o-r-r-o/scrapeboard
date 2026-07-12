@@ -226,8 +226,19 @@ class WorkerOut(BaseModel):
     last_seen_at: datetime | None
     cpu_percent: float
     mem_percent: float
+    disk_percent: float = 0
+    mem_used_gb: float = 0
+    mem_total_gb: float = 0
+    disk_used_gb: float = 0
+    disk_total_gb: float = 0
+    load_avg_1: float = 0
+    load_avg_5: float = 0
+    load_avg_15: float = 0
+    host_os: str = ""
+    hostname: str = ""
     version: str
     online: bool = False
+    active_leases: int = 0
     worker_config: dict = {}
 
     model_config = {"from_attributes": True}

@@ -124,7 +124,7 @@ python agent.py --panel-url https://scrape.cvmso.com --token <TOKEN>
 
 ## What the agent does
 
-1. `POST /api/worker-api/heartbeat` — online + CPU/RAM  
+1. `POST /api/worker-api/heartbeat` — online + CPU/RAM/disk/load + host identity  
 2. `POST /api/worker-api/lease` — chunk + keywords/locations + settings + proxies  
 3. Runs `gmaps_scraper` for that chunk  
 4. Zips CSV parts → `POST /api/worker-api/upload`  

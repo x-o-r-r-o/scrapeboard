@@ -36,6 +36,20 @@ def _migrate_sqlite(sync_conn) -> None:
         sync_conn.execute(text("ALTER TABLE worker_nodes ADD COLUMN worker_config JSON DEFAULT '{}'"))
     if "token_lookup" not in workers:
         sync_conn.execute(text("ALTER TABLE worker_nodes ADD COLUMN token_lookup VARCHAR(64) DEFAULT ''"))
+    for col, decl in (
+        ("disk_percent", "FLOAT DEFAULT 0"),
+        ("mem_used_gb", "FLOAT DEFAULT 0"),
+        ("mem_total_gb", "FLOAT DEFAULT 0"),
+        ("disk_used_gb", "FLOAT DEFAULT 0"),
+        ("disk_total_gb", "FLOAT DEFAULT 0"),
+        ("load_avg_1", "FLOAT DEFAULT 0"),
+        ("load_avg_5", "FLOAT DEFAULT 0"),
+        ("load_avg_15", "FLOAT DEFAULT 0"),
+        ("host_os", "VARCHAR(64) DEFAULT ''"),
+        ("hostname", "VARCHAR(128) DEFAULT ''"),
+    ):
+        if col not in workers:
+            sync_conn.execute(text(f"ALTER TABLE worker_nodes ADD COLUMN {col} {decl}"))
 
     scrape = _sqlite_columns(sync_conn, "scrape_settings")
     alters = [
