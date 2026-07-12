@@ -88,12 +88,27 @@ sync_repo() {
   chown -R "${SITE_USER}:${SITE_USER}" "$(dirname "$APP_DIR")"
 }
 
+env_quote() {
+  # Safe dotenv double-quoted value (handles #, spaces, quotes, &, etc.)
+  local v="${1-}"
+  v="${v//\\/\\\\}"
+  v="${v//\"/\\\"}"
+  v="${v//$'\n'/\\n}"
+  v="${v//$'\r'/}"
+  printf '"%s"' "$v"
+}
+
 write_backend_env() {
   echo "==> Writing panel/backend/.env ..."
   local secret="${SECRET_KEY:-}"
   if [[ -z "$secret" ]]; then
     if [[ -f "${BACKEND_DIR}/.env" ]] && grep -q '^SECRET_KEY=' "${BACKEND_DIR}/.env"; then
+      # strip optional surrounding quotes from existing value
       secret="$(grep '^SECRET_KEY=' "${BACKEND_DIR}/.env" | head -1 | cut -d= -f2-)"
+      secret="${secret#\"}"
+      secret="${secret%\"}"
+      secret="${secret#\'}"
+      secret="${secret%\'}"
     else
       secret="$(openssl rand -hex 32)"
     fi
@@ -111,17 +126,26 @@ write_backend_env() {
   mkdir -p "$data_dir" "${data_dir}/uploads" "${data_dir}/results"
   chown -R "${SITE_USER}:${SITE_USER}" "${APP_DIR}/panel"
 
+  local q_secret q_user q_email q_pass q_db q_cors q_url
+  q_secret="$(env_quote "$secret")"
+  q_user="$(env_quote "$admin_user")"
+  q_email="$(env_quote "$admin_email")"
+  q_pass="$(env_quote "$admin_pass")"
+  q_db="$(env_quote "sqlite+aiosqlite:///${data_dir}/panel.db")"
+  q_cors="$(env_quote "https://${DOMAIN},http://127.0.0.1:${API_PORT}")"
+  q_url="$(env_quote "https://${DOMAIN}")"
+
   cat > "${BACKEND_DIR}/.env" <<EOF
 APP_NAME=Scrapeboard
 ENVIRONMENT=production
-SECRET_KEY=${secret}
-DATABASE_URL=sqlite+aiosqlite:///${data_dir}/panel.db
-CORS_ORIGINS=https://${DOMAIN},http://127.0.0.1:${API_PORT}
+SECRET_KEY=${q_secret}
+DATABASE_URL=${q_db}
+CORS_ORIGINS=${q_cors}
 ACCESS_TOKEN_EXPIRE_MINUTES=60
-BOOTSTRAP_ADMIN_USERNAME=${admin_user}
-BOOTSTRAP_ADMIN_EMAIL=${admin_email}
-BOOTSTRAP_ADMIN_PASSWORD=${admin_pass}
-PUBLIC_URL=https://${DOMAIN}
+BOOTSTRAP_ADMIN_USERNAME=${q_user}
+BOOTSTRAP_ADMIN_EMAIL=${q_email}
+BOOTSTRAP_ADMIN_PASSWORD=${q_pass}
+PUBLIC_URL=${q_url}
 API_PORT=${API_PORT}
 EOF
   chown "${SITE_USER}:${SITE_USER}" "${BACKEND_DIR}/.env"

@@ -126,6 +126,7 @@ Does not overwrite an existing `panel/backend/.env` (secrets stay).
 | Problem | Fix |
 |---------|-----|
 | `dubious ownership` on install | `chown -R cvmso:cvmso /home/cvmso/apps/scrapeboard` then re-run install (script now does this automatically) |
+| Invalid login on first boot | Password with `#` was truncated in `.env`. Quote passwords; or run `bash deploy/hestiacp/reset_admin_password.sh 'NewPass'` |
 | 502 on `/api` | `systemctl status scrapeboard` — API down |
 | Blank page | Re-run update (frontend build + rsync) |
 | nginx fail | Do **not** add a second `location /`; `nginx -t` |
