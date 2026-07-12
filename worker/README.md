@@ -458,14 +458,15 @@ Standalone engine CLI (`gmaps_scraper.py`) is separate — see [`SCRAPER.md`](SC
 
 Work directories are isolated per user: `work_root/user_{owner_id}/{job_id}/`.
 
-### Resource guard (agent **0.8.4+**)
+### Resource guard (agent **0.8.5+**)
 
-The worker already reports host **CPU/RAM** on every heartbeat. From **0.8.4** it also uses those metrics for **backpressure**:
+The worker already reports host **CPU/RAM** on every heartbeat. From **0.8.4** it also uses those metrics for **backpressure** (clarified in **0.8.5**):
 
-1. When host CPU **or** RAM is at/above the configured max (default **80%**), the agent **stops taking new leases** and logs `[resource] throttling cpu=… ram=…`.
-2. In-flight scrapes keep running to completion (no hard-kill on brief spikes).
-3. Leasing resumes only after **both** CPU and RAM fall to/below the resume thresholds (default **70%** = max−10 hysteresis) — logs `[resource] resume …`.
-4. Heartbeat may include `resource_throttling: true` so the panel can show busy/skip state (ignored by older panels).
+1. When host CPU **or** RAM is at/above the configured max (default **80%**), the agent **pauses starting new leases**, sleeps, and retries — logs `[resource] pausing new leases …`.
+2. **Jobs are never declined, denied, errored, or skipped** because of the cap. They remain queued/running on the panel until this worker resumes or another worker leases them.
+3. In-flight scrapes keep running to completion (no hard-kill on brief spikes).
+4. Leasing resumes only after **both** CPU and RAM fall to/below the resume thresholds (default **70%** = max−10 hysteresis) — logs `[resource] resume …`.
+5. Heartbeat may include `resource_throttling: true` (status only; ignored by older panels).
 
 Metrics are **host-wide** via `psutil` (same as heartbeat telemetry). Inside Docker/K8s without cgroup-aware limits surfaced to the process, reported % may reflect the **host**, not the container quota — set caps accordingly or use host-level cgroup limits separately.
 
