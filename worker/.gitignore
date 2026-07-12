@@ -5,3 +5,5 @@ logs/
 *.csv
 results/
 .DS_Store
+worker_config.json
+worker_config.json.tmp

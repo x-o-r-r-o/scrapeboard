@@ -373,22 +373,25 @@ See [Telegram Bot Builder](#telegram-bot-builder).
 
 ## Worker setup
 
-Workers are **scrape-only**. No Telegram, billing, or user UI.
+Workers are **scrape-only** and run on **Windows, macOS, or Linux**.
 
-### On each worker machine
+### First run (interactive setup + auto browser install)
 
 ```bash
-# copy the worker/ folder (or whole repo)
 cd worker
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
+# Windows:  setup_and_run.bat
+# macOS:    open setup_and_run.command   (or bash setup_and_run.sh)
+# Linux:    bash setup_and_run.sh
 
-# first engine may auto-install browsers on first job
-python agent.py --panel-url https://scrape.cvmso.com --token YOUR_WORKER_TOKEN
+# Or:
+python3 -m venv .venv && source .venv/bin/activate   # Win: py -3 -m venv .venv && .venv\Scripts\activate
+pip install -r requirements.txt
+python agent.py                # wizard → saves worker_config.json
+python agent.py --selftest     # optional: verify browser stack
 ```
 
-Keep it running under `tmux`, `screen`, or systemd on the worker host.
+Wizard asks for panel URL (`https://scrape.cvmso.com`), worker token, name, default engine.  
+Browsers/packages auto-install per engine on first use (same as the original scraper).
 
 ### What the agent does
 

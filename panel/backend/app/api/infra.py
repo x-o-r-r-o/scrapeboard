@@ -130,7 +130,11 @@ async def create_worker(body: WorkerCreate, _: User = Depends(require_admin), __
     db.add(w)
     await db.commit()
     await db.refresh(w)
-    hint = f'python agent.py --panel-url http://PANEL_HOST:8000 --token {raw}'
+    hint = (
+        f'python agent.py --setup\n'
+        f'# or:\n'
+        f'python agent.py --panel-url https://scrape.cvmso.com --token {raw}'
+    )
     return WorkerCreateResponse(worker=_worker_out(w), token=raw, install_hint=hint)
 
 
@@ -159,7 +163,11 @@ async def rotate_token(worker_id: int, _: User = Depends(require_admin), __: Use
     return WorkerCreateResponse(
         worker=_worker_out(w),
         token=raw,
-        install_hint=f'python agent.py --panel-url http://PANEL_HOST:8000 --token {raw}',
+        install_hint=(
+            f"python agent.py --setup\n"
+            f"# or:\n"
+            f"python agent.py --panel-url https://scrape.cvmso.com --token {raw}"
+        ),
     )
 
 
