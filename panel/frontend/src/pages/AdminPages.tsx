@@ -388,20 +388,25 @@ export function WorkersAdminPage() {
 
   return (
     <div className="stack">
-      <h1>Workers</h1>
-      <p className="muted">
-        Create workers, assign proxy pools, and set per-worker scrape flags. Those flags are merged into each lease and synced into the agent&apos;s local worker config.
-      </p>
-      <form className="card" onSubmit={create} style={{ display: "flex", gap: "0.75rem", flexWrap: "wrap", alignItems: "end" }}>
-        <label>
+      <div className="page-header">
+        <div>
+          <h1>Workers</h1>
+          <p className="subtitle">
+            Create workers, assign proxy pools, and set per-worker scrape flags. Those flags are merged into each lease
+            and synced into the agent&apos;s local worker config.
+          </p>
+        </div>
+      </div>
+      <form className="card form-grid two" onSubmit={create} style={{ alignItems: "end" }}>
+        <label className="field">
           Name
-          <input className="input" style={{ minWidth: 180 }} placeholder="Worker name" value={name} onChange={(e) => setName(e.target.value)} required />
+          <input className="input" placeholder="Worker name" value={name} onChange={(e) => setName(e.target.value)} required />
         </label>
-        <label>
+        <label className="field">
           Max browsers
-          <input className="input" type="number" min={1} max={64} style={{ width: 100 }} value={createBrowsers} onChange={(e) => setCreateBrowsers(Number(e.target.value) || 1)} />
+          <input className="input" type="number" min={1} max={64} value={createBrowsers} onChange={(e) => setCreateBrowsers(Number(e.target.value) || 1)} />
         </label>
-        <label>
+        <label className="field">
           Proxy pool
           <select className="input" value={createPool} onChange={(e) => setCreatePool(e.target.value === "" ? "" : Number(e.target.value))}>
             <option value="">None</option>
@@ -731,182 +736,6 @@ export function SecurityAdminPage() {
       </form>
       {msg ? <p className="muted">{msg}</p> : null}
       <style>{`.stack{display:grid;gap:1rem}h1{margin:0}label{display:grid;gap:.3rem;font-size:.85rem;color:var(--muted)}`}</style>
-    </div>
-  );
-}
-
-export function BotBuilderPage() {
-  const [settings, setSettings] = useState<Record<string, unknown>>({});
-  const [token, setToken] = useState("");
-  const [commands, setCommands] = useState<Array<{ id: number; command: string; title: string; enabled: boolean; audience: string }>>([]);
-  const [workflows, setWorkflows] = useState<Array<{ id: number; name: string; description: string; enabled: boolean; is_demo: boolean }>>([]);
-  const [msg, setMsg] = useState("");
-
-  async function refresh() {
-    setSettings(await api("/api/bot/settings"));
-    setCommands(await api("/api/bot/commands"));
-    setWorkflows(await api("/api/bot/workflows"));
-  }
-
-  useEffect(() => {
-    refresh().catch(() => undefined);
-  }, []);
-
-  async function saveSettings(e: FormEvent) {
-    e.preventDefault();
-    const body: Record<string, unknown> = {
-      enabled: Boolean(settings.enabled),
-      username: settings.username,
-      welcome_text: settings.welcome_text,
-      notify_interval_sec: Number(settings.notify_interval_sec || 300),
-      support_enabled: Boolean(settings.support_enabled),
-      support_chat_id: settings.support_chat_id,
-      public_packages: Boolean(settings.public_packages),
-      deliver_results_telegram: Boolean(settings.deliver_results_telegram),
-      admin_commands_enabled: Boolean(settings.admin_commands_enabled),
-    };
-    if (token) body.token = token;
-    await api("/api/bot/settings", { method: "PUT", body: JSON.stringify(body) });
-    setToken("");
-    setMsg("Bot settings saved; runtime restarted.");
-    await refresh();
-  }
-
-  return (
-    <div className="stack">
-      <h1>Bot builder</h1>
-      <p className="muted">Connect BotFather token, toggle commands, manage demo workflows, support chat.</p>
-      <form className="card" onSubmit={saveSettings} style={{ display: "grid", gap: "0.7rem", maxWidth: 640 }}>
-        <label>
-          <input type="checkbox" checked={Boolean(settings.enabled)} onChange={(e) => setSettings({ ...settings, enabled: e.target.checked })} /> Enabled
-        </label>
-        <label>
-          Bot token {settings.token_configured ? <span className="badge ok">configured</span> : null}
-          <input className="input" type="password" placeholder="Paste new token to update" value={token} onChange={(e) => setToken(e.target.value)} />
-        </label>
-        <label>
-          Username
-          <input className="input" value={String(settings.username || "")} onChange={(e) => setSettings({ ...settings, username: e.target.value })} />
-        </label>
-        <label>
-          Welcome text
-          <textarea className="input" rows={3} value={String(settings.welcome_text || "")} onChange={(e) => setSettings({ ...settings, welcome_text: e.target.value })} />
-        </label>
-        <label>
-          <input type="checkbox" checked={Boolean(settings.support_enabled)} onChange={(e) => setSettings({ ...settings, support_enabled: e.target.checked })} /> Support via Telegram
-        </label>
-        <label>
-          Support chat id
-          <input className="input" value={String(settings.support_chat_id || "")} onChange={(e) => setSettings({ ...settings, support_chat_id: e.target.value })} />
-        </label>
-        <label>
-          <input type="checkbox" checked={Boolean(settings.admin_commands_enabled)} onChange={(e) => setSettings({ ...settings, admin_commands_enabled: e.target.checked })} /> Admin Telegram commands
-        </label>
-        <label>
-          <input type="checkbox" checked={Boolean(settings.public_packages)} onChange={(e) => setSettings({ ...settings, public_packages: e.target.checked })} /> Public /packages
-        </label>
-        <button className="btn" type="submit">
-          Save bot settings
-        </button>
-      </form>
-
-      <div className="card" style={{ display: "flex", gap: "0.75rem", flexWrap: "wrap" }}>
-        <button
-          className="btn secondary"
-          type="button"
-          onClick={async () => {
-            await api("/api/bot/install-demos", { method: "POST" });
-            setMsg("Demo commands & workflows installed.");
-            await refresh();
-          }}
-        >
-          Install / refresh demos
-        </button>
-        <button
-          className="btn secondary"
-          type="button"
-          onClick={async () => {
-            await api("/api/bot/restart", { method: "POST" });
-            setMsg("Bot runtime restarted.");
-          }}
-        >
-          Restart bot runtime
-        </button>
-      </div>
-      {msg ? <p className="muted">{msg}</p> : null}
-
-      <div className="card">
-        <h3>Commands</h3>
-        <table className="table">
-          <thead>
-            <tr>
-              <th>Command</th>
-              <th>Title</th>
-              <th>Audience</th>
-              <th>Enabled</th>
-            </tr>
-          </thead>
-          <tbody>
-            {commands.map((c) => (
-              <tr key={c.id}>
-                <td>
-                  <code>{c.command}</code>
-                </td>
-                <td>{c.title}</td>
-                <td>{c.audience}</td>
-                <td>
-                  <button
-                    className="btn secondary"
-                    type="button"
-                    onClick={async () => {
-                      await api(`/api/bot/commands/${c.id}`, { method: "PATCH", body: JSON.stringify({ enabled: !c.enabled }) });
-                      await refresh();
-                    }}
-                  >
-                    {c.enabled ? "On" : "Off"}
-                  </button>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-
-      <div className="card">
-        <h3>Workflows (incl. demos)</h3>
-        <table className="table">
-          <thead>
-            <tr>
-              <th>Name</th>
-              <th>Description</th>
-              <th>Demo</th>
-              <th>Enabled</th>
-            </tr>
-          </thead>
-          <tbody>
-            {workflows.map((w) => (
-              <tr key={w.id}>
-                <td>{w.name}</td>
-                <td className="muted">{w.description}</td>
-                <td>{w.is_demo ? "yes" : "no"}</td>
-                <td>
-                  <button
-                    className="btn secondary"
-                    type="button"
-                    onClick={async () => {
-                      await api(`/api/bot/workflows/${w.id}/toggle`, { method: "POST" });
-                      await refresh();
-                    }}
-                  >
-                    {w.enabled ? "On" : "Off"}
-                  </button>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-      <style>{`.stack{display:grid;gap:1rem}h1,h3{margin:0}label{display:grid;gap:.3rem;font-size:.85rem;color:var(--muted)}`}</style>
     </div>
   );
 }

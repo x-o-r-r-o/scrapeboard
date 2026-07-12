@@ -24,9 +24,16 @@ export default function LoginPage() {
   const [loading, setLoading] = useState(false);
 
   useEffect(() => {
-    api<PublicConfig>("/api/auth/public-config").then(setCfg).catch(() =>
-      setCfg({ registration_enabled: false, recaptcha_mode: "none", recaptcha_site_key: "", totp_required: true })
-    );
+    api<PublicConfig>("/api/auth/public-config")
+      .then(setCfg)
+      .catch(() =>
+        setCfg({
+          registration_enabled: false,
+          recaptcha_mode: "none",
+          recaptcha_site_key: "",
+          totp_required: true,
+        }),
+      );
   }, []);
 
   useEffect(() => {
@@ -50,8 +57,8 @@ export default function LoginPage() {
     if (cfg.recaptcha_mode === "v3") {
       return new Promise((resolve, reject) => {
         window.grecaptcha?.ready(() => {
-          window.grecaptcha!
-            .execute(cfg.recaptcha_site_key, { action: "login" })
+          window
+            .grecaptcha!.execute(cfg.recaptcha_site_key, { action: "login" })
             .then(resolve)
             .catch(reject);
         });
@@ -94,20 +101,38 @@ export default function LoginPage() {
   return (
     <div className="login-shell">
       <form className="card login-card" onSubmit={onSubmit}>
-        <p className="brand">GMaps Panel</p>
+        <p className="brand">Scrapeboard</p>
         <h1>Sign in</h1>
         <p className="muted">Invite-only. No self-registration. 2FA required.</p>
-        <label>
+        <label className="field">
           Username
-          <input className="input" value={username} onChange={(e) => setUsername(e.target.value)} autoComplete="username" />
+          <input
+            className="input"
+            value={username}
+            onChange={(e) => setUsername(e.target.value)}
+            autoComplete="username"
+            autoCapitalize="none"
+          />
         </label>
-        <label>
+        <label className="field">
           Password
-          <input className="input" type="password" value={password} onChange={(e) => setPassword(e.target.value)} autoComplete="current-password" />
+          <input
+            className="input"
+            type="password"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            autoComplete="current-password"
+          />
         </label>
-        <label>
+        <label className="field">
           2FA code (if enabled)
-          <input className="input" value={totp} onChange={(e) => setTotp(e.target.value)} inputMode="numeric" autoComplete="one-time-code" />
+          <input
+            className="input"
+            value={totp}
+            onChange={(e) => setTotp(e.target.value)}
+            inputMode="numeric"
+            autoComplete="one-time-code"
+          />
         </label>
         {cfg?.recaptcha_mode === "v2" && cfg.recaptcha_site_key ? (
           <div className="g-recaptcha" data-sitekey={cfg.recaptcha_site_key} />
@@ -117,13 +142,6 @@ export default function LoginPage() {
           {loading ? "Signing in…" : "Sign in"}
         </button>
       </form>
-      <style>{`
-        .login-shell { min-height: 100vh; display:grid; place-items:center; padding: 1.5rem; }
-        .login-card { width: min(420px, 100%); display:grid; gap: 0.85rem; }
-        .brand { margin:0; letter-spacing:0.12em; text-transform:uppercase; color: var(--accent); font-size:0.75rem; font-weight:700; }
-        h1 { margin:0; font-size:1.7rem; }
-        label { display:grid; gap:0.35rem; font-size:0.85rem; color: var(--muted); }
-      `}</style>
     </div>
   );
 }

@@ -1,11 +1,94 @@
 import { useEffect, useState } from "react";
-import { Link, Navigate, Outlet, useNavigate } from "react-router-dom";
+import { Link, Navigate, Outlet, useLocation, useNavigate } from "react-router-dom";
 import { api, getToken, setToken, type User } from "../api";
+
+type NavLink = { to: string; label: string };
+
+const USER_LINKS: NavLink[] = [
+  { to: "/app", label: "Dashboard" },
+  { to: "/app/jobs", label: "Jobs" },
+  { to: "/app/subscription", label: "Subscription" },
+];
+
+const ADMIN_LINKS: NavLink[] = [
+  { to: "/app/admin/users", label: "Users" },
+  { to: "/app/admin/packages", label: "Packages" },
+  { to: "/app/admin/billing", label: "Billing" },
+  { to: "/app/admin/proxies", label: "Proxy pools" },
+  { to: "/app/admin/workers", label: "Workers" },
+  { to: "/app/admin/scrape", label: "Scrape settings" },
+  { to: "/app/admin/security", label: "Security" },
+  { to: "/app/admin/bot", label: "Bot builder" },
+];
+
+function NavLinks({
+  links,
+  onNavigate,
+  pathname,
+}: {
+  links: NavLink[];
+  onNavigate?: () => void;
+  pathname: string;
+}) {
+  return (
+    <>
+      {links.map((l) => {
+        const active = pathname === l.to || (l.to !== "/app" && pathname.startsWith(l.to));
+        return (
+          <Link key={l.to} to={l.to} className={active ? "active" : undefined} onClick={onNavigate}>
+            {l.label}
+          </Link>
+        );
+      })}
+    </>
+  );
+}
+
+function SidebarBody({
+  user,
+  pathname,
+  onNavigate,
+  onSignOut,
+}: {
+  user: User;
+  pathname: string;
+  onNavigate?: () => void;
+  onSignOut: () => void;
+}) {
+  const isAdmin = user.role === "admin";
+  return (
+    <>
+      <div>
+        <div className="shell-brand">Scrapeboard</div>
+        <div className="shell-brand-sub">Maps control panel</div>
+      </div>
+      <nav className="shell-nav">
+        <NavLinks links={USER_LINKS} pathname={pathname} onNavigate={onNavigate} />
+        {isAdmin ? (
+          <>
+            <div className="nav-label">Admin</div>
+            <NavLinks links={ADMIN_LINKS} pathname={pathname} onNavigate={onNavigate} />
+          </>
+        ) : null}
+      </nav>
+      <div style={{ display: "grid", gap: "0.45rem" }}>
+        <div className="muted" style={{ fontSize: "0.8rem", padding: "0 0.25rem" }}>
+          {user.username} · {user.role}
+        </div>
+        <button className="btn secondary" type="button" onClick={onSignOut}>
+          Sign out
+        </button>
+      </div>
+    </>
+  );
+}
 
 export default function AppShell() {
   const nav = useNavigate();
+  const { pathname } = useLocation();
   const [user, setUser] = useState<User | null>(null);
   const [error, setError] = useState("");
+  const [mobileOpen, setMobileOpen] = useState(false);
 
   useEffect(() => {
     if (!getToken()) return;
@@ -18,59 +101,59 @@ export default function AppShell() {
       .catch((e) => setError(e.message));
   }, [nav]);
 
+  useEffect(() => {
+    setMobileOpen(false);
+  }, [pathname]);
+
   if (!getToken()) return <Navigate to="/login" replace />;
-  if (error) return <p className="error">{error}</p>;
+  if (error) return <p className="error" style={{ padding: "1.5rem" }}>{error}</p>;
   if (!user) return <p className="muted" style={{ padding: "2rem" }}>Loading…</p>;
 
-  const isAdmin = user.role === "admin";
+  const signOut = () => {
+    setToken(null);
+    nav("/login");
+  };
+
+  const pageTitle =
+    [...USER_LINKS, ...ADMIN_LINKS].find((l) => pathname === l.to || (l.to !== "/app" && pathname.startsWith(l.to)))
+      ?.label || "Scrapeboard";
 
   return (
     <div className="shell">
-      <aside>
-        <div className="brand">GMaps Panel</div>
-        <nav>
-          <Link to="/app">Dashboard</Link>
-          <Link to="/app/jobs">Jobs</Link>
-          <Link to="/app/subscription">Subscription</Link>
-          {isAdmin ? (
-            <>
-              <div className="nav-label">Admin</div>
-              <Link to="/app/admin/users">Users</Link>
-              <Link to="/app/admin/packages">Packages</Link>
-              <Link to="/app/admin/billing">Billing</Link>
-              <Link to="/app/admin/proxies">Proxy pools</Link>
-              <Link to="/app/admin/workers">Workers</Link>
-              <Link to="/app/admin/scrape">Scrape settings</Link>
-              <Link to="/app/admin/security">Security</Link>
-              <Link to="/app/admin/bot">Bot builder</Link>
-            </>
-          ) : null}
-        </nav>
-        <button
-          className="btn secondary"
-          type="button"
-          onClick={() => {
-            setToken(null);
-            nav("/login");
-          }}
-        >
-          Sign out ({user.username})
-        </button>
+      <aside className="shell-aside">
+        <SidebarBody user={user} pathname={pathname} onSignOut={signOut} />
       </aside>
-      <main>
-        <Outlet context={{ user }} />
-      </main>
-      <style>{`
-        .shell { display:grid; grid-template-columns: 240px 1fr; min-height:100vh; }
-        aside { border-right:1px solid var(--line); padding:1.25rem; display:flex; flex-direction:column; gap:1rem; background: color-mix(in srgb, var(--bg2) 80%, transparent); }
-        .brand { font-weight:700; letter-spacing:0.08em; text-transform:uppercase; color:var(--accent); font-size:0.8rem; }
-        nav { display:flex; flex-direction:column; gap:0.35rem; flex:1; }
-        nav a { color:var(--text); padding:0.45rem 0.55rem; border-radius:8px; }
-        nav a:hover { background:#24313a; }
-        .nav-label { margin-top:0.8rem; font-size:0.7rem; text-transform:uppercase; letter-spacing:0.08em; color:var(--muted); }
-        main { padding:1.5rem; }
-        @media (max-width: 800px) { .shell { grid-template-columns: 1fr; } aside { border-right:0; border-bottom:1px solid var(--line); } }
-      `}</style>
+
+      {mobileOpen ? (
+        <>
+          <div className="drawer-backdrop" onClick={() => setMobileOpen(false)} aria-hidden />
+          <aside className="drawer" role="dialog" aria-label="Navigation">
+            <SidebarBody
+              user={user}
+              pathname={pathname}
+              onNavigate={() => setMobileOpen(false)}
+              onSignOut={signOut}
+            />
+          </aside>
+        </>
+      ) : null}
+
+      <div className="shell-main-col">
+        <header className="shell-topbar">
+          <button
+            className="btn secondary icon"
+            type="button"
+            aria-label="Open menu"
+            onClick={() => setMobileOpen(true)}
+          >
+            ☰
+          </button>
+          <span className="title">{pageTitle}</span>
+        </header>
+        <main className="shell-content">
+          <Outlet context={{ user }} />
+        </main>
+      </div>
     </div>
   );
 }

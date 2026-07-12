@@ -35,14 +35,18 @@ export function DashboardPage() {
 
   return (
     <div className="stack">
-      <h1>Dashboard</h1>
-      <p className="muted">
-        Signed in as <strong>{user.username}</strong> ({user.role}). Stats below are{" "}
-        {user.role === "admin" ? "global" : "only yours"}.
-      </p>
-      <div className="grid">
+      <div className="page-header">
+        <div>
+          <h1>Dashboard</h1>
+          <p className="subtitle">
+            Signed in as <strong>{user.username}</strong> ({user.role}). Stats below are{" "}
+            {user.role === "admin" ? "global" : "only yours"}.
+          </p>
+        </div>
+      </div>
+      <div className="grid-cards">
         <div className="card">
-          <h3>Subscription</h3>
+          <h3 style={{ margin: 0 }}>Subscription</h3>
           {sub ? (
             <p>
               {sub.package_name} · {sub.threads} threads · {sub.days_left.toFixed(1)} days left
@@ -52,11 +56,12 @@ export function DashboardPage() {
           )}
         </div>
         <div className="card">
-          <h3>Jobs</h3>
-          <p>{jobs.length} total · {jobs.filter((j) => j.status === "running").length} running</p>
+          <h3 style={{ margin: 0 }}>Jobs</h3>
+          <p>
+            {jobs.length} total · {jobs.filter((j) => j.status === "running").length} running
+          </p>
         </div>
       </div>
-      <style>{`.stack{display:grid;gap:1rem}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:1rem}h1,h3{margin:0}`}</style>
     </div>
   );
 }
@@ -99,20 +104,24 @@ export function JobsPage() {
 
   return (
     <div className="stack">
-      <h1>Jobs</h1>
-      <p className="muted">You only see jobs you own (admins see all).</p>
-      <form className="card" onSubmit={onCreate} style={{ display: "grid", gap: "0.75rem" }}>
-        <h3>New job</h3>
-        <label>
-          Keywords file
-          <input className="input" type="file" name="keywords" accept=".txt,.csv" required />
-        </label>
-        <label>
-          Locations file
-          <input className="input" type="file" name="locations" accept=".txt,.csv" required />
-        </label>
-        <div style={{ display: "flex", gap: "0.75rem", flexWrap: "wrap" }}>
-          <label>
+      <div className="page-header">
+        <div>
+          <h1>Jobs</h1>
+          <p className="subtitle">You only see jobs you own (admins see all).</p>
+        </div>
+      </div>
+      <form className="card stack" onSubmit={onCreate}>
+        <h3 style={{ margin: 0 }}>New job</h3>
+        <div className="form-grid two">
+          <label className="field">
+            Keywords file
+            <input className="input" type="file" name="keywords" accept=".txt,.csv" required />
+          </label>
+          <label className="field">
+            Locations file
+            <input className="input" type="file" name="locations" accept=".txt,.csv" required />
+          </label>
+          <label className="field">
             Engine
             <select className="input" value={engine} onChange={(e) => setEngine(e.target.value)}>
               <option value="chrome">chrome</option>
@@ -122,9 +131,15 @@ export function JobsPage() {
               <option value="edge">edge</option>
             </select>
           </label>
-          <label>
+          <label className="field">
             Threads
-            <input className="input" type="number" min={1} value={threads} onChange={(e) => setThreads(Number(e.target.value))} />
+            <input
+              className="input"
+              type="number"
+              min={1}
+              value={threads}
+              onChange={(e) => setThreads(Number(e.target.value))}
+            />
           </label>
         </div>
         {error ? <p className="error">{error}</p> : null}
@@ -132,7 +147,7 @@ export function JobsPage() {
           Queue job
         </button>
       </form>
-      <div className="card">
+      <div className="card table-wrap">
         <table className="table">
           <thead>
             <tr>

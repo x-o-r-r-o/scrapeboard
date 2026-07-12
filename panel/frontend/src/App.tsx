@@ -4,8 +4,8 @@ import LoginPage from "./pages/LoginPage";
 import { PasswordSetupPage, TotpSetupPage } from "./pages/SetupPages";
 import { DashboardPage, JobsPage, SubscriptionPage } from "./pages/UserPages";
 import { BillingAdminPage } from "./pages/BillingAdminPage";
+import BotBuilderPage from "./pages/BotBuilderPage";
 import {
-  BotBuilderPage,
   PackagesAdminPage,
   ProxiesAdminPage,
   ScrapeAdminPage,
