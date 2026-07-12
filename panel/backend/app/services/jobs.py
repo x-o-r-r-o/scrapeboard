@@ -27,6 +27,27 @@ def utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
+JOB_NAME_MAX_LEN = 128
+
+
+def normalize_job_name(raw: str | None, *, max_len: int = JOB_NAME_MAX_LEN) -> str | None:
+    """Optional display name: strip, collapse whitespace; empty → None."""
+    if raw is None:
+        return None
+    s = " ".join(str(raw).split()).strip()
+    if not s:
+        return None
+    return s[:max_len]
+
+
+def job_display_label(job: Job) -> str:
+    """Human label for Telegram/logs: name (public_id) when set, else public_id."""
+    n = (getattr(job, "name", None) or "").strip()
+    if n:
+        return f"{n} ({job.public_id})"
+    return job.public_id
+
+
 async def recomputed_done_searches(db: AsyncSession, job: Job) -> int:
     """Sum searches from chunks in state=done (source of truth for completed progress)."""
     raw = (
@@ -333,6 +354,7 @@ async def create_job_from_bytes(
     loc_bytes: bytes,
     overrides: dict | None = None,
     *,
+    name: str | None = None,
     keywords_name: str | None = None,
     locations_name: str | None = None,
     check_ext: bool = False,
@@ -425,9 +447,16 @@ async def create_job_from_bytes(
     chunk_size = effective_chunk_size(total, pkg_chunk, parallel_workers)
     settings["chunk_size"] = chunk_size
     settings["chunk_parallel_workers"] = parallel_workers
+    # Prefer explicit name=; Telegram may also pass name/title in overrides.
+    display_name = normalize_job_name(name)
+    if display_name is None and overrides:
+        display_name = normalize_job_name(
+            overrides.get("name") if overrides.get("name") is not None else overrides.get("title")
+        )
     job = Job(
         public_id=public_id,
         owner_id=user.id,
+        name=display_name,
         status="queued",
         settings=settings,
         keywords_path=str(kw_path),
@@ -461,26 +490,41 @@ async def update_queued_job_settings(
     *,
     threads: int | None = None,
     engine: str | None = None,
+    name: str | None = None,
+    set_name: bool = False,
 ) -> Job:
-    """Edit settings on a queued job (e.g. lower threads to fit free quota)."""
-    if job.status != "queued":
-        raise ValueError("Only queued jobs can be edited")
-    owner = await db.get(User, job.owner_id)
-    if not owner:
-        raise ValueError("Owner not found")
-    settings = dict(job.settings or {})
-    if threads is not None:
-        threads = max(1, int(threads))
-        cap = await user_thread_allowance(db, owner)
-        if threads > cap:
-            raise ValueError(f"Threads ({threads}) exceed allowance ({cap})")
-        settings["threads"] = threads
-    if engine is not None:
-        settings["engine"] = str(engine).strip() or settings.get("engine") or "chrome"
-    need = max(1, int(settings.get("threads") or 1))
-    free = await free_thread_slots(db, owner)
-    settings["queued_for_threads"] = need > free
-    job.settings = settings
+    """Edit settings on a queued job (threads/engine) and/or optional display name.
+
+    Name may be changed while queued or running. Threads/engine remain queued-only.
+    Pass set_name=True to apply name (including clearing with empty string).
+    """
+    if set_name:
+        if job.status not in ("queued", "running"):
+            raise ValueError("Name can only be edited on queued or running jobs")
+        job.name = normalize_job_name(name)
+
+    if threads is not None or engine is not None:
+        if job.status != "queued":
+            raise ValueError("Only queued jobs can edit threads/engine")
+        owner = await db.get(User, job.owner_id)
+        if not owner:
+            raise ValueError("Owner not found")
+        settings = dict(job.settings or {})
+        if threads is not None:
+            threads = max(1, int(threads))
+            cap = await user_thread_allowance(db, owner)
+            if threads > cap:
+                raise ValueError(f"Threads ({threads}) exceed allowance ({cap})")
+            settings["threads"] = threads
+        if engine is not None:
+            settings["engine"] = str(engine).strip() or settings.get("engine") or "chrome"
+        need = max(1, int(settings.get("threads") or 1))
+        free = await free_thread_slots(db, owner)
+        settings["queued_for_threads"] = need > free
+        job.settings = settings
+
+    if not set_name and threads is None and engine is None:
+        raise ValueError("No changes")
     await db.commit()
     await db.refresh(job)
     return job

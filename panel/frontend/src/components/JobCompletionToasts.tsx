@@ -5,6 +5,7 @@ import { api, type User } from "../api";
 type JobRow = {
   id: number;
   public_id: string;
+  name?: string | null;
   status: string;
   rows_saved: number;
   owner_username?: string | null;
@@ -62,7 +63,7 @@ export function JobCompletionToasts({ user }: { user: User }) {
             fresh.push({
               id: `${j.id}-${j.status}-${Date.now()}`,
               title: `${labelFor(j.status)}${who}`,
-              detail: `${j.public_id} · ${j.rows_saved} businesses`,
+              detail: `${j.name ? `${j.name} · ` : ""}${j.public_id} · ${j.rows_saved} businesses`,
               kind: kindFor(j.status),
               jobId: j.id,
             });

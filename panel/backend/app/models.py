@@ -291,6 +291,8 @@ class Job(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     public_id: Mapped[str] = mapped_column(String(64), unique=True, index=True)
     owner_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    # Optional human label; empty/null → UI/Telegram fall back to public_id
+    name: Mapped[str | None] = mapped_column(String(128), nullable=True, default=None)
     status: Mapped[str] = mapped_column(String(32), default="queued")  # queued|running|completed|stopped|failed
     settings: Mapped[dict] = mapped_column(JSON, default=dict)
     keywords_path: Mapped[str | None] = mapped_column(String(512), nullable=True)

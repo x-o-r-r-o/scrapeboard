@@ -1272,7 +1272,7 @@ async def worker_ack(
                 await notify_user_telegram(
                     db,
                     owner,
-                    f"✅ Job {job.public_id} complete. Businesses: {job.rows_saved}.",
+                    f"✅ Job {jobs_svc.job_display_label(job)} complete. Businesses: {job.rows_saved}.",
                     Path(zip_path) if zip_path else None,
                 )
         else:
@@ -1315,7 +1315,7 @@ async def worker_ack(
             await notify_user_telegram(
                 db,
                 owner,
-                f"✅ Job {job.public_id} complete. Businesses: {job.rows_saved}.",
+                f"✅ Job {jobs_svc.job_display_label(job)} complete. Businesses: {job.rows_saved}.",
                 Path(zip_path) if zip_path else None,
             )
     else:

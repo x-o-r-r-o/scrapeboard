@@ -3,7 +3,7 @@ from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import require_admin, require_ready_user
@@ -119,6 +119,7 @@ async def _job_out(db: AsyncSession, j: Job, *, viewer: User | None = None) -> J
     return JobOut(
         id=j.id,
         public_id=j.public_id,
+        name=j.name,
         owner_id=j.owner_id,
         owner_username=owner.username if owner else None,
         owner_telegram_id=owner.telegram_id if owner else None,
@@ -179,7 +180,11 @@ async def list_jobs(
     if status_filter:
         query = query.where(Job.status == status_filter)
     if q:
-        query = query.where(Job.public_id.contains(q))
+        needle = q.strip()
+        if needle:
+            query = query.where(
+                or_(Job.public_id.contains(needle), Job.name.contains(needle))
+            )
     rows = (await db.execute(query)).scalars().all()
     return [await _job_out(db, j, viewer=user) for j in rows]
 
@@ -243,6 +248,7 @@ async def create_job(
     threads: int | None = Form(default=None),
     scrape_websites: str | None = Form(default=None),
     max_results: int | None = Form(default=None),
+    name: str | None = Form(default=None),
     keywords: UploadFile = File(...),
     locations: UploadFile = File(...),
     user: User = Depends(require_ready_user),
@@ -264,6 +270,7 @@ async def create_job(
             await keywords.read(),
             await locations.read(),
             overrides,
+            name=name,
             keywords_name=keywords.filename,
             locations_name=locations.filename,
             check_ext=True,
@@ -287,9 +294,15 @@ async def update_job(
         raise HTTPException(404, "Not found")
     if user.role != "admin" and j.owner_id != user.id:
         raise HTTPException(403, "Forbidden")
+    fields = body.model_dump(exclude_unset=True)
     try:
         j = await jobs_svc.update_queued_job_settings(
-            db, j, threads=body.threads, engine=body.engine
+            db,
+            j,
+            threads=fields.get("threads"),
+            engine=fields.get("engine"),
+            name=fields.get("name"),
+            set_name="name" in fields,
         )
     except ValueError as e:
         raise HTTPException(400, str(e)) from e
@@ -314,7 +327,7 @@ async def stop_job(
     if owner:
         by_admin = j.owner_id != user.id
         who = " by admin" if by_admin else ""
-        msg = f"⏹ Job {j.public_id} stopped{who}. Rows so far: {j.rows_saved}."
+        msg = f"⏹ Job {jobs_svc.job_display_label(j)} stopped{who}. Rows so far: {j.rows_saved}."
         await notify_user_telegram(db, owner, msg, Path(zip_path) if zip_path else None)
     await db.refresh(j)
     return await _job_out(db, j, viewer=user)

@@ -74,6 +74,7 @@ MENU_BUTTON_TO_CMD: dict[str, str] = {
     "Support": "/support",
     "Run": "/run",
     "Status": "/status",
+    # Legacy reply-keyboard labels (no longer shown; keep for stale keyboards).
     "Jobs": "/jobs",
     "Formats": "/formats",
     "Admin": "/admin",
@@ -910,23 +911,25 @@ def user_reply_keyboard(
     has_sub: bool = False,
     support_enabled: bool = True,
 ) -> dict:
-    """Persistent Telegram reply keyboard (always-on chrome)."""
+    """Persistent Telegram reply keyboard (always-on chrome).
+
+    Status covers job progress (typed /jobs still works). Help includes upload
+    formats (typed /formats still works). Jobs/Formats are not shown as buttons.
+    """
     if is_admin:
         rows: list[list[dict]] = [
-            [{"text": "Run"}, {"text": "Status"}, {"text": "Jobs"}],
-            [{"text": "Formats"}, {"text": "Buy"}, {"text": "Packages"}],
+            [{"text": "Run"}, {"text": "Status"}, {"text": "Buy"}, {"text": "Packages"}],
             [{"text": "Admin"}, {"text": "Help"}],
         ]
         if support_enabled:
-            rows[2].insert(1, {"text": "Support"})
+            rows[1].insert(1, {"text": "Support"})
     elif has_sub:
         rows = [
-            [{"text": "Run"}, {"text": "Status"}, {"text": "Jobs"}],
-            [{"text": "Formats"}, {"text": "Buy"}],
+            [{"text": "Run"}, {"text": "Status"}, {"text": "Buy"}],
             [{"text": "Help"}],
         ]
         if support_enabled:
-            rows[1].append({"text": "Support"})
+            rows[1].insert(0, {"text": "Support"})
     else:
         rows = [
             [{"text": "Buy"}, {"text": "Packages"}],

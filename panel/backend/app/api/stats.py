@@ -338,6 +338,7 @@ async def live_stats(user: User = Depends(require_ready_user), db: AsyncSession 
             {
                 "id": j.id,
                 "public_id": j.public_id,
+                "name": j.name,
                 "owner_id": j.owner_id,
                 "owner_username": owner_names.get(j.owner_id),
                 "status": j.status,

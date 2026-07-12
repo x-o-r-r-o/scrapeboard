@@ -439,7 +439,8 @@ class TelegramBotRuntime:
             await self._send(
                 token,
                 chat_id,
-                f"{help_body}\n\nUse the menu buttons below, or type a command.\n\n{formats}",
+                f"{help_body}\n\nUse the menu buttons below, or type a command.\n\n"
+                f"— Upload formats —\n{formats}",
                 reply_markup=menu,
             )
             return
@@ -460,7 +461,8 @@ class TelegramBotRuntime:
                 formats_help_text(
                     max_upload_mb=cap,
                     extensions=b.allowed_extensions,
-                ),
+                )
+                + "\n\n(Also included under /help.)",
             )
             return
 
@@ -598,14 +600,14 @@ class TelegramBotRuntime:
 
         if user.role == "admin":
             msg += "\nAdmin — no subscription required."
-            msg += "\nUpload keywords + locations (.txt/.csv), then Run. See Formats."
+            msg += "\nUpload keywords + locations (.txt/.csv), then Run. See Help for formats."
             msg += "\nTap Admin for the admin command menu."
             await self._send(token, chat_id, msg, reply_markup=menu)
             return
 
         if sub:
             msg += f"\nPlan: {sub.package_name} until {sub.expires_at.date()}."
-            msg += "\nUpload keywords + locations (.txt/.csv), then Run. See Formats."
+            msg += "\nUpload keywords + locations (.txt/.csv), then Run. See Help for formats."
             await self._send(token, chat_id, msg, reply_markup=menu)
             return
 
@@ -1028,6 +1030,10 @@ class TelegramBotRuntime:
             if "=" in tok:
                 k, v = tok.split("=", 1)
                 overrides[k.strip().replace("-", "_")] = v
+        # Pull optional display name out of scrape overrides (name= / title=).
+        display_name = overrides.pop("name", None)
+        if display_name is None:
+            display_name = overrides.pop("title", None)
         try:
             job = await jobs_svc.create_job_from_bytes(
                 db,
@@ -1035,6 +1041,7 @@ class TelegramBotRuntime:
                 kw.read_bytes(),
                 loc.read_bytes(),
                 overrides,
+                name=display_name,
                 keywords_name=kw.name,
                 locations_name=loc.name,
                 check_ext=False,
@@ -1045,7 +1052,7 @@ class TelegramBotRuntime:
         await self._send(
             token,
             chat_id,
-            f"✅ Job queued: {job.public_id}\n"
+            f"✅ Job queued: {jobs_svc.job_display_label(job)}\n"
             f"{job.total_searches:,} searches · {jobs_svc.job_thread_count(job)} threads.\n"
             f"Threads are shared across your running jobs — this job starts when enough "
             f"capacity is free (or lower threads with panel Edit). /status for progress.",
@@ -1097,7 +1104,7 @@ class TelegramBotRuntime:
             lines.append("▶ Currently running")
             for j in active:
                 done, rows, pct = await _progress(j)
-                lines.append(f"• {j.public_id}")
+                lines.append(f"• {jobs_svc.job_display_label(j)}")
                 lines.append(f"  [{j.status}] {_bar(pct)} {pct:.1f}%")
                 lines.append(
                     f"  searches {done:,}/{j.total_searches:,} · "
@@ -1116,11 +1123,11 @@ class TelegramBotRuntime:
             done, rows, pct = await _progress(j)
             mark = "▶" if j.status in ("queued", "running") else "•"
             lines.append(
-                f"{mark} {j.public_id} [{j.status}] {pct:.1f}% · "
+                f"{mark} {jobs_svc.job_display_label(j)} [{j.status}] {pct:.1f}% · "
                 f"{done}/{j.total_searches} · rows {rows}"
             )
         lines.append("")
-        lines.append("Tips: /status or /jobs · /stop to cancel · panel Jobs for download")
+        lines.append("Tips: Status (/status) · /stop to cancel · panel Jobs for download")
         await self._send(token, chat_id, "\n".join(lines))
 
     async def _stop_job(self, db, token, chat_id, user) -> None:
@@ -1144,10 +1151,10 @@ class TelegramBotRuntime:
             await self._send(
                 token,
                 chat_id,
-                f"Could not stop {job.public_id} (status is now {job.status}).",
+                f"Could not stop {jobs_svc.job_display_label(job)} (status is now {job.status}).",
             )
             return
-        msg = f"⏹ Stopped {job.public_id}. Rows saved: {job.rows_saved}."
+        msg = f"⏹ Stopped {jobs_svc.job_display_label(job)}. Rows saved: {job.rows_saved}."
         if zip_path:
             msg += " Partial results ready."
         await self._send(token, chat_id, msg)

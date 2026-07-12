@@ -1030,7 +1030,7 @@ async def handle_admin(
                 done, rows = await jobs_svc.live_job_progress(db, j)
             pct = 100.0 * done / j.total_searches if j.total_searches else 0.0
             lines.append(
-                f"• {j.public_id} [{j.status}] {pct:.0f}% "
+                f"• {jobs_svc.job_display_label(j)} [{j.status}] {pct:.0f}% "
                 f"owner={owner.username if owner else j.owner_id} rows={rows}"
             )
         if page * PAGE < int(total):
@@ -1064,7 +1064,7 @@ async def handle_admin(
                 wnames.append(ww.name if ww else str(ch.worker_id))
         s = j.settings or {}
         lines = [
-            f"Job {j.public_id} (#{j.id})",
+            f"Job {jobs_svc.job_display_label(j)} (#{j.id})",
             f"status={j.status} {pct:.1f}%",
             f"owner={owner.username if owner else j.owner_id} tg={owner.telegram_id if owner else '-'}",
             f"searches {done:,}/{j.total_searches:,} · rows {rows:,}",
@@ -1088,13 +1088,17 @@ async def handle_admin(
             return
         zip_path = await jobs_svc.finalize_job(db, j, cancelled=True)
         await db.refresh(j)
-        msg = f"⏹ Stopped {j.public_id} (status={j.status}). Rows: {j.rows_saved}."
+        msg = f"⏹ Stopped {jobs_svc.job_display_label(j)} (status={j.status}). Rows: {j.rows_saved}."
         if zip_path:
             msg += " Partial results ready."
         await send(token, chat_id, msg)
         owner = await db.get(User, j.owner_id)
         if owner and owner.telegram_id:
-            await send(token, int(owner.telegram_id), f"⚠️ Admin stopped your job {j.public_id}.")
+            await send(
+                token,
+                int(owner.telegram_id),
+                f"⚠️ Admin stopped your job {jobs_svc.job_display_label(j)}.",
+            )
         return
 
     # --- proxies / captcha / bot ---

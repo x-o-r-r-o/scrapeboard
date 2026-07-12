@@ -6,6 +6,7 @@ import { api, type User } from "../api";
 type Job = {
   id: number;
   public_id: string;
+  name?: string | null;
   owner_id: number;
   owner_username: string | null;
   owner_telegram_id: string | null;
@@ -69,12 +70,19 @@ export function JobsPage() {
   const [msg, setMsg] = useState("");
   const [engine, setEngine] = useState("chrome");
   const [threads, setThreads] = useState(2);
+  const [jobName, setJobName] = useState("");
   const [filterOwner, setFilterOwner] = useState("");
   const [filterStatus, setFilterStatus] = useState("");
   const [filterQ, setFilterQ] = useState("");
   const [filesFor, setFilesFor] = useState<JobFiles | null>(null);
   const [showStorage, setShowStorage] = useState(false);
-  const [editJob, setEditJob] = useState<{ id: number; threads: number; engine: string } | null>(null);
+  const [editJob, setEditJob] = useState<{
+    id: number;
+    threads: number;
+    engine: string;
+    name: string;
+    status: string;
+  } | null>(null);
   const [detailJob, setDetailJob] = useState<Job | null>(null);
 
   async function refresh() {
@@ -118,16 +126,19 @@ export function JobsPage() {
     const fd = new FormData(form);
     fd.set("engine", engine);
     fd.set("threads", String(threads));
+    const trimmedName = jobName.trim();
+    if (trimmedName) fd.set("name", trimmedName);
     try {
       const created = await api<Job>("/api/jobs", { method: "POST", body: fd });
       form.reset();
+      setJobName("");
       if (created.waiting_for_threads) {
         setMsg(
           `Job queued — waiting for free threads (${created.threads} needed). ` +
             `It starts when capacity frees, or edit threads on the queued job.`,
         );
       } else {
-        setMsg("Job queued.");
+        setMsg(created.name ? `Job queued — ${created.name}.` : "Job queued.");
       }
       await refresh();
     } catch (err) {
@@ -140,11 +151,18 @@ export function JobsPage() {
     if (!editJob) return;
     setError("");
     try {
+      const body: { name: string; threads?: number; engine?: string } = {
+        name: editJob.name.trim(),
+      };
+      if (editJob.status === "queued") {
+        body.threads = editJob.threads;
+        body.engine = editJob.engine;
+      }
       await api(`/api/jobs/${editJob.id}`, {
         method: "PATCH",
-        body: JSON.stringify({ threads: editJob.threads, engine: editJob.engine }),
+        body: JSON.stringify(body),
       });
-      setMsg("Queued job updated.");
+      setMsg("Job updated.");
       setEditJob(null);
       await refresh();
     } catch (err) {
@@ -294,6 +312,17 @@ export function JobsPage() {
           </p>
         ) : null}
         <div className="form-grid two">
+          <label className="field" style={{ gridColumn: "1 / -1" }}>
+            Name <span className="muted">(optional)</span>
+            <input
+              className="input"
+              type="text"
+              maxLength={128}
+              value={jobName}
+              onChange={(e) => setJobName(e.target.value)}
+              placeholder="e.g. NYC dentists — March"
+            />
+          </label>
           <label className="field">
             Keywords file
             <input className="input" type="file" name="keywords" accept=".txt,.csv" required />
@@ -363,8 +392,13 @@ export function JobsPage() {
             </select>
           </label>
           <label className="field" style={{ minWidth: 180, flex: 1 }}>
-            Job ID search
-            <input className="input" value={filterQ} onChange={(e) => setFilterQ(e.target.value)} placeholder="public id…" />
+            Search
+            <input
+              className="input"
+              value={filterQ}
+              onChange={(e) => setFilterQ(e.target.value)}
+              placeholder="name or public id…"
+            />
           </label>
           <button
             className="btn secondary"
@@ -384,7 +418,7 @@ export function JobsPage() {
         <table className="table">
           <thead>
             <tr>
-              <th>Job ID</th>
+              <th>Job</th>
               {isAdmin ? <th>Owner</th> : null}
               <th>Status</th>
               <th>Threads</th>
@@ -399,7 +433,16 @@ export function JobsPage() {
             {jobs.map((j) => (
               <tr key={j.id}>
                 <td>
-                  <code title={`#${j.id}`}>{j.public_id}</code>
+                  {j.name ? (
+                    <>
+                      <strong>{j.name}</strong>
+                      <div className="muted" style={{ fontSize: "0.75rem" }}>
+                        <code title={`#${j.id}`}>{j.public_id}</code>
+                      </div>
+                    </>
+                  ) : (
+                    <code title={`#${j.id}`}>{j.public_id}</code>
+                  )}
                 </td>
                 {isAdmin ? (
                   <td>
@@ -445,7 +488,7 @@ export function JobsPage() {
                       Details
                     </button>
                   ) : null}
-                  {j.status === "queued" ? (
+                  {j.status === "queued" || j.status === "running" ? (
                     <button
                       className="btn secondary sm"
                       type="button"
@@ -454,6 +497,8 @@ export function JobsPage() {
                           id: j.id,
                           threads: j.threads || 1,
                           engine: j.settings?.engine || "chrome",
+                          name: j.name || "",
+                          status: j.status,
                         })
                       }
                     >
@@ -493,12 +538,20 @@ export function JobsPage() {
       {detailJob && isAdmin ? (
         <div className="card">
           <div className="page-header" style={{ marginBottom: "0.5rem" }}>
-            <h3 style={{ margin: 0 }}>Job details — {detailJob.public_id}</h3>
+            <h3 style={{ margin: 0 }}>
+              Job details — {detailJob.name ? detailJob.name : detailJob.public_id}
+            </h3>
             <button className="btn secondary sm" type="button" onClick={() => setDetailJob(null)}>
               Close
             </button>
           </div>
           <div className="form-grid two" style={{ gap: "0.75rem" }}>
+            {detailJob.name ? (
+              <div>
+                <div className="muted">Name</div>
+                <strong>{detailJob.name}</strong>
+              </div>
+            ) : null}
             <div>
               <div className="muted">Unique job ID</div>
               <code>{detailJob.public_id}</code>
@@ -553,32 +606,59 @@ export function JobsPage() {
 
       {editJob ? (
         <form className="card" onSubmit={saveEditJob} style={{ display: "grid", gap: "0.65rem", maxWidth: 420 }}>
-          <h3 style={{ margin: 0 }}>Edit queued job</h3>
-          <p className="muted" style={{ margin: 0 }}>
-            Lower threads to fit free capacity ({quota?.threads_free ?? "—"} free of {quota?.thread_allowance ?? "—"}).
-            The job starts automatically when enough threads are available.
-          </p>
+          <h3 style={{ margin: 0 }}>
+            {editJob.status === "queued" ? "Edit queued job" : "Edit job name"}
+          </h3>
+          {editJob.status === "queued" ? (
+            <p className="muted" style={{ margin: 0 }}>
+              Lower threads to fit free capacity ({quota?.threads_free ?? "—"} free of {quota?.thread_allowance ?? "—"}).
+              The job starts automatically when enough threads are available.
+            </p>
+          ) : (
+            <p className="muted" style={{ margin: 0 }}>
+              Running jobs can rename only — threads and engine stay locked.
+            </p>
+          )}
           <label className="field">
-            Threads
+            Name <span className="muted">(optional)</span>
             <input
               className="input"
-              type="number"
-              min={1}
-              max={quota?.thread_allowance || 64}
-              value={editJob.threads}
-              onChange={(e) => setEditJob({ ...editJob, threads: Number(e.target.value) })}
+              type="text"
+              maxLength={128}
+              value={editJob.name}
+              onChange={(e) => setEditJob({ ...editJob, name: e.target.value })}
+              placeholder="Leave blank to clear"
             />
           </label>
-          <label className="field">
-            Engine
-            <select className="input" value={editJob.engine} onChange={(e) => setEditJob({ ...editJob, engine: e.target.value })}>
-              <option value="chrome">chrome</option>
-              <option value="brave">brave</option>
-              <option value="camoufox">camoufox</option>
-              <option value="google-chrome">google-chrome</option>
-              <option value="edge">edge</option>
-            </select>
-          </label>
+          {editJob.status === "queued" ? (
+            <>
+              <label className="field">
+                Threads
+                <input
+                  className="input"
+                  type="number"
+                  min={1}
+                  max={quota?.thread_allowance || 64}
+                  value={editJob.threads}
+                  onChange={(e) => setEditJob({ ...editJob, threads: Number(e.target.value) })}
+                />
+              </label>
+              <label className="field">
+                Engine
+                <select
+                  className="input"
+                  value={editJob.engine}
+                  onChange={(e) => setEditJob({ ...editJob, engine: e.target.value })}
+                >
+                  <option value="chrome">chrome</option>
+                  <option value="brave">brave</option>
+                  <option value="camoufox">camoufox</option>
+                  <option value="google-chrome">google-chrome</option>
+                  <option value="edge">edge</option>
+                </select>
+              </label>
+            </>
+          ) : null}
           <div style={{ display: "flex", gap: "0.5rem" }}>
             <button className="btn" type="submit">
               Save
@@ -707,6 +787,7 @@ type LiveUser = {
 type LiveRecentJob = {
   id: number;
   public_id: string;
+  name?: string | null;
   owner_id: number;
   owner_username: string | null;
   status: string;
@@ -1244,6 +1325,7 @@ export function DashboardPage() {
                       </td>
                     ) : null}
                     <td>
+                      {j.name ? <strong style={{ display: "block" }}>{j.name}</strong> : null}
                       <code style={{ fontSize: "0.8rem" }}>{j.public_id}</code>
                       {j.error ? (
                         <div className="muted" style={{ fontSize: "0.75rem", maxWidth: 280 }}>

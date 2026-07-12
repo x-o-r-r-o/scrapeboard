@@ -607,6 +607,7 @@ class JobWorkerLeaseOut(BaseModel):
 class JobOut(BaseModel):
     id: int
     public_id: str
+    name: str | None = None
     owner_id: int
     owner_username: str | None = None
     owner_telegram_id: str | None = None
@@ -635,10 +636,11 @@ class JobOut(BaseModel):
 
 
 class JobUpdate(BaseModel):
-    """Edit a queued job (threads / engine) so it can fit free quota."""
+    """Edit a queued job (threads / engine / optional name). Name may also be set while running."""
 
     threads: int | None = Field(default=None, ge=1, le=64)
     engine: str | None = None
+    name: str | None = None
 
 
 class ThreadQuotaOut(BaseModel):
@@ -671,6 +673,7 @@ class StorageOwnerOut(BaseModel):
 
 
 class JobCreate(BaseModel):
+    name: str | None = None
     engine: str | None = None
     threads: int | None = None
     scrape_websites: str | None = None
