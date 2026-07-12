@@ -68,7 +68,12 @@ type BotRuntimeStatus = {
   hint: string;
 };
 
-const AUDIENCES = ["everyone", "users", "subscribers", "admins"] as const;
+const AUDIENCES = [
+  { value: "everyone", label: "Everyone (including guests)" },
+  { value: "users", label: "Linked users" },
+  { value: "subscribers", label: "Active subscribers" },
+  { value: "admins", label: "Admins only" },
+] as const;
 const PROTECTED_COMMAND_KEYS = new Set(["start", "stop", "help"]);
 
 const EMPTY_DRAFT: WorkflowDraft = {
@@ -323,15 +328,15 @@ function CommandFormFields({
         />
       </label>
       <label className="field">
-        Audience
+        Permission (who can use)
         <select
           className="input"
           value={draft.audience}
           onChange={(e) => onChange({ ...draft, audience: e.target.value })}
         >
           {AUDIENCES.map((a) => (
-            <option key={a} value={a}>
-              {a}
+            <option key={a.value} value={a.value}>
+              {a.label}
             </option>
           ))}
         </select>
@@ -441,6 +446,7 @@ export default function BotBuilderPage() {
       const body: Record<string, unknown> = {
         enabled: Boolean(settings.enabled),
         username: settings.username,
+        mode: settings.mode || "polling",
         welcome_text: settings.welcome_text,
         notify_interval_sec: Number(settings.notify_interval_sec || 300),
         support_enabled: Boolean(settings.support_enabled),
@@ -449,13 +455,44 @@ export default function BotBuilderPage() {
         deliver_results_telegram: Boolean(settings.deliver_results_telegram),
         admin_commands_enabled: Boolean(settings.admin_commands_enabled),
       };
-      if (token) body.token = token;
-      await api("/api/bot/settings", { method: "PUT", body: JSON.stringify(body) });
+      if (token.trim()) body.token = token.trim();
+      const saved = await api<BotSettings>("/api/bot/settings", {
+        method: "PUT",
+        body: JSON.stringify(body),
+      });
       setToken("");
-      setMsg("Bot settings saved; runtime restarted.");
-      await refresh();
+      setSettings(saved);
+      const uname = String(saved.username || "").replace(/^@/, "");
+      const tokenPart = token.trim()
+        ? uname
+          ? ` Token validated via getMe — @${uname}.`
+          : " Token validated via getMe."
+        : "";
+      setMsg(`Bot settings saved; runtime restarted.${tokenPart}`);
+      await refreshRuntime();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Save failed");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function clearBotToken() {
+    if (!confirm("Clear the Telegram bot token? The bot will stop until you paste a new one.")) return;
+    setSaving(true);
+    setError("");
+    setMsg("");
+    try {
+      const saved = await api<BotSettings>("/api/bot/settings", {
+        method: "PUT",
+        body: JSON.stringify({ clear_token: true }),
+      });
+      setToken("");
+      setSettings(saved);
+      setMsg("Bot token cleared; runtime restarted.");
+      await refreshRuntime();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Clear failed");
     } finally {
       setSaving(false);
     }
@@ -584,8 +621,8 @@ export default function BotBuilderPage() {
         <div>
           <h1>Bot builder</h1>
           <p className="subtitle">
-            Connect your Telegram bot (BotFather token), manage commands, and edit workflows — same control surface
-            style as Omnidesk bots.
+            Admin control for your Telegram bot: token, Live on/off, settings &amp; permissions, commands, and
+            workflows.
           </p>
         </div>
         <div className="page-actions">
@@ -636,7 +673,7 @@ export default function BotBuilderPage() {
             <span className="badge">Telegram</span>
           </div>
           <p className="muted" style={{ margin: "0.45rem 0 0", fontSize: "0.9rem" }}>
-            {String(settings.welcome_text || "No welcome text yet — set one in Connection.")}
+            {String(settings.welcome_text || "No welcome text yet — set one under Token & settings.")}
           </p>
           {runtimeHint ? (
             <p className="muted" style={{ margin: "0.35rem 0 0", fontSize: "0.85rem" }}>
@@ -680,7 +717,7 @@ export default function BotBuilderPage() {
       <div className="tabs" role="tablist">
         {(
           [
-            ["connection", "Connection"],
+            ["connection", "Token & settings"],
             ["commands", "Commands"],
             ["workflows", "Workflows"],
           ] as const
@@ -703,27 +740,82 @@ export default function BotBuilderPage() {
 
       {tab === "connection" ? (
         <form className="card stack" onSubmit={saveSettings}>
+          <div>
+            <h3 style={{ margin: "0 0 0.35rem" }}>Telegram bot token</h3>
+            <p className="muted" style={{ margin: 0, fontSize: "0.88rem" }}>
+              Paste a token from{" "}
+              <a href="https://t.me/BotFather" target="_blank" rel="noreferrer">
+                @BotFather
+              </a>
+              . Saving validates with Telegram <code>getMe</code> and fills the bot username. The full token is
+              never shown again — only a masked hint.
+            </p>
+          </div>
           <div className="form-grid two">
             <label className="field full">
-              BotFather token {tokenOk ? <span className="badge ok">configured</span> : null}
+              Current token{" "}
+              {tokenOk ? <span className="badge ok">configured</span> : <span className="badge warn">missing</span>}
+              <input
+                className="input"
+                type="text"
+                readOnly
+                value={
+                  tokenOk
+                    ? String(settings.token_hint || "••••••••••••••••")
+                    : "No token saved yet"
+                }
+                aria-label="Masked bot token"
+              />
+            </label>
+            <label className="field full">
+              Set or change token
               <input
                 className="input"
                 type="password"
-                placeholder="Paste new token to update"
+                placeholder={tokenOk ? "Paste a new BotFather token to replace" : "Paste BotFather token"}
                 value={token}
                 onChange={(e) => setToken(e.target.value)}
                 autoComplete="off"
+                spellCheck={false}
               />
             </label>
             <label className="field">
-              Username
+              Bot username
               <input
                 className="input"
                 value={String(settings.username || "")}
                 onChange={(e) => setSettings({ ...settings, username: e.target.value })}
-                placeholder="my_scrapeboard_bot"
+                placeholder="Filled from getMe when you save a token"
               />
             </label>
+            <label className="field">
+              Mode
+              <select
+                className="input"
+                value={String(settings.mode || "polling")}
+                onChange={(e) => setSettings({ ...settings, mode: e.target.value })}
+              >
+                <option value="polling">polling (recommended)</option>
+                <option value="webhook">webhook (not used by default runtime)</option>
+              </select>
+            </label>
+          </div>
+          <div className="page-actions">
+            <button className="btn secondary" type="button" disabled={saving || !tokenOk} onClick={clearBotToken}>
+              Clear token
+            </button>
+          </div>
+
+          <hr style={{ border: 0, borderTop: "1px solid var(--border, #e5e7eb)", margin: "0.25rem 0" }} />
+
+          <div>
+            <h3 style={{ margin: "0 0 0.35rem" }}>Settings &amp; permissions</h3>
+            <p className="muted" style={{ margin: 0, fontSize: "0.88rem" }}>
+              Live on/off is also on the header switch. Admin Telegram commands (/admin) require both the toggle
+              below and an admin account linked by Telegram ID.
+            </p>
+          </div>
+          <div className="form-grid two">
             <label className="field">
               Notify interval (sec)
               <input
@@ -732,15 +824,6 @@ export default function BotBuilderPage() {
                 min={30}
                 value={Number(settings.notify_interval_sec || 300)}
                 onChange={(e) => setSettings({ ...settings, notify_interval_sec: Number(e.target.value) || 300 })}
-              />
-            </label>
-            <label className="field full">
-              Welcome text
-              <textarea
-                className="input"
-                rows={3}
-                value={String(settings.welcome_text || "")}
-                onChange={(e) => setSettings({ ...settings, welcome_text: e.target.value })}
               />
             </label>
             <label className="field">
@@ -752,15 +835,24 @@ export default function BotBuilderPage() {
                 placeholder="-100…"
               />
             </label>
-            <div className="field" style={{ gap: "0.55rem" }}>
-              <span>Options</span>
+            <label className="field full">
+              Welcome text
+              <textarea
+                className="input"
+                rows={3}
+                value={String(settings.welcome_text || "")}
+                onChange={(e) => setSettings({ ...settings, welcome_text: e.target.value })}
+              />
+            </label>
+            <div className="field full" style={{ gap: "0.55rem" }}>
+              <span>Options &amp; permissions</span>
               <label className="check-row">
                 <input
                   type="checkbox"
-                  checked={Boolean(settings.support_enabled)}
-                  onChange={(e) => setSettings({ ...settings, support_enabled: e.target.checked })}
+                  checked={Boolean(settings.enabled)}
+                  onChange={(e) => setSettings({ ...settings, enabled: e.target.checked })}
                 />
-                Support via Telegram
+                Live (enabled — start polling when a token is set)
               </label>
               <label className="check-row">
                 <input
@@ -768,7 +860,15 @@ export default function BotBuilderPage() {
                   checked={Boolean(settings.admin_commands_enabled)}
                   onChange={(e) => setSettings({ ...settings, admin_commands_enabled: e.target.checked })}
                 />
-                Admin Telegram commands
+                Admin Telegram commands (/admin control)
+              </label>
+              <label className="check-row">
+                <input
+                  type="checkbox"
+                  checked={Boolean(settings.support_enabled)}
+                  onChange={(e) => setSettings({ ...settings, support_enabled: e.target.checked })}
+                />
+                Support via Telegram
               </label>
               <label className="check-row">
                 <input
@@ -790,7 +890,7 @@ export default function BotBuilderPage() {
           </div>
           <div className="page-actions">
             <button className="btn" type="submit" disabled={saving}>
-              {saving ? "Saving…" : "Save connection"}
+              {saving ? "Saving…" : "Save token & settings"}
             </button>
           </div>
         </form>
@@ -798,22 +898,31 @@ export default function BotBuilderPage() {
 
       {tab === "commands" ? (
         <div className="stack">
-          <div className="page-actions">
-            <button
-              className="btn"
-              type="button"
-              onClick={() => {
-                setCmdCreating(true);
-                setCmdCreateDraft({
-                  ...EMPTY_CMD_DRAFT,
-                  sort_order: (commands.reduce((m, c) => Math.max(m, c.sort_order || 0), 0) || 0) + 10,
-                });
-                setCmdEditId(null);
-                setCmdEditDraft(null);
-              }}
-            >
-              Add command
-            </button>
+          <div className="page-header" style={{ marginBottom: 0 }}>
+            <div>
+              <h3 style={{ margin: 0 }}>Commands</h3>
+              <p className="muted" style={{ margin: "0.35rem 0 0", fontSize: "0.88rem" }}>
+                Add, edit, enable/disable, or delete bot commands. Set <strong>Permission</strong> on each command
+                (everyone / users / subscribers / admins). Critical /start, /stop, /help cannot be deleted.
+              </p>
+            </div>
+            <div className="page-actions">
+              <button
+                className="btn"
+                type="button"
+                onClick={() => {
+                  setCmdCreating(true);
+                  setCmdCreateDraft({
+                    ...EMPTY_CMD_DRAFT,
+                    sort_order: (commands.reduce((m, c) => Math.max(m, c.sort_order || 0), 0) || 0) + 10,
+                  });
+                  setCmdEditId(null);
+                  setCmdEditDraft(null);
+                }}
+              >
+                Add command
+              </button>
+            </div>
           </div>
 
           {cmdCreating ? (
@@ -904,7 +1013,9 @@ export default function BotBuilderPage() {
                       </label>
                     </div>
                     <div className="item-card-meta">
-                      <span className="chip">{c.audience}</span>
+                      <span className="chip" title="Who can use this command">
+                        {c.audience}
+                      </span>
                       <span className="chip">order {c.sort_order ?? 0}</span>
                       {c.is_builtin ? <span className="chip">built-in</span> : <span className="chip">custom</span>}
                       <span className="chip">{c.handler === "builtin" ? "code handler" : "static reply"}</span>
@@ -964,22 +1075,30 @@ export default function BotBuilderPage() {
 
       {tab === "workflows" ? (
         <div className="stack">
-          <div className="page-actions">
-            <button
-              className="btn"
-              type="button"
-              onClick={() => {
-                setCreating(true);
-                setCreateDraft({
-                  ...EMPTY_DRAFT,
-                  sort_order: (workflows.reduce((m, w) => Math.max(m, w.sort_order || 0), 0) || 0) + 10,
-                });
-                setEditId(null);
-                setEditDraft(null);
-              }}
-            >
-              Add workflow
-            </button>
+          <div className="page-header" style={{ marginBottom: 0 }}>
+            <div>
+              <h3 style={{ margin: 0 }}>Workflows</h3>
+              <p className="muted" style={{ margin: "0.35rem 0 0", fontSize: "0.88rem" }}>
+                Add, edit, enable/disable, or delete multi-step bot workflows (triggers, actions, say, if, wait).
+              </p>
+            </div>
+            <div className="page-actions">
+              <button
+                className="btn"
+                type="button"
+                onClick={() => {
+                  setCreating(true);
+                  setCreateDraft({
+                    ...EMPTY_DRAFT,
+                    sort_order: (workflows.reduce((m, w) => Math.max(m, w.sort_order || 0), 0) || 0) + 10,
+                  });
+                  setEditId(null);
+                  setEditDraft(null);
+                }}
+              >
+                Add workflow
+              </button>
+            </div>
           </div>
 
           {creating ? (

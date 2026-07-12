@@ -590,6 +590,7 @@ class JobCreate(BaseModel):
 class BotSettingsOut(BaseModel):
     enabled: bool
     token_configured: bool
+    token_hint: str = ""
     username: str
     mode: str
     welcome_text: str
@@ -609,6 +610,7 @@ class BotSettingsOut(BaseModel):
 class BotSettingsUpdate(BaseModel):
     enabled: bool | None = None
     token: str | None = None
+    clear_token: bool | None = None
     username: str | None = None
     mode: str | None = None
     welcome_text: str | None = None

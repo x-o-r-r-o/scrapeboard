@@ -97,11 +97,28 @@ def _captcha_out(row) -> CaptchaSettingsOut:
     )
 
 
+def _token_hint(token: str) -> str:
+    """Masked BotFather token for admin UI — never return the full secret."""
+    raw = (token or "").strip()
+    if not raw:
+        return ""
+    if ":" in raw:
+        bot_id, secret = raw.split(":", 1)
+        bot_id = bot_id.strip()
+        secret = secret.strip()
+        tail = secret[-4:] if len(secret) >= 4 else ""
+        return f"{bot_id}:{'•' * 8}{tail}"
+    if len(raw) <= 8:
+        return "••••••••"
+    return f"{raw[:4]}{'•' * 8}{raw[-4:]}"
+
+
 def _settings_out(b: BotSettings) -> BotSettingsOut:
     snap = bot_runtime.snapshot()
     return BotSettingsOut(
         enabled=b.enabled,
         token_configured=bool(b.token),
+        token_hint=_token_hint(b.token or ""),
         username=b.username,
         mode=b.mode,
         welcome_text=b.welcome_text,
@@ -249,7 +266,11 @@ async def update_bot_settings(
     if not await db.get(BotSettings, 1):
         db.add(b)
     data = body.model_dump(exclude_unset=True)
-    if "token" in data:
+    clear_token = bool(data.pop("clear_token", None))
+    if clear_token:
+        data.pop("token", None)
+        data["token"] = ""
+    elif "token" in data:
         raw = data["token"]
         if raw is None or str(raw).strip() == "":
             data.pop("token")
