@@ -12,6 +12,30 @@ Production install — see [`../deploy/hestiacp/README.md`](../deploy/hestiacp/R
 | API bind | `127.0.0.1:3010` |
 | systemd | `scrapeboard.service` |
 | Local UI | `http://127.0.0.1:5173` (proxies `/api` → `:3010`) |
+| Local API helper | `bash panel/run.sh` / `bash panel/run.sh --reload` |
+
+---
+
+## Run by default
+
+Full stack path (panel + worker + Telegram ops): **[root README → Run by default](../README.md#run-by-default)**.
+
+| Mode | How |
+|------|-----|
+| **Production** | `bash deploy/hestiacp/install.sh` → systemd `scrapeboard` |
+| **Local API** | `bash panel/run.sh --reload` (or manual venv + uvicorn `:3010`) |
+| **Local UI** | `cd panel/frontend && npm install && npm run dev` |
+| **Telegram** | Starts with the API process once Bot Builder has a token + enabled |
+
+Day-to-day (production):
+
+```bash
+systemctl status scrapeboard
+journalctl -u scrapeboard -f
+systemctl restart scrapeboard
+```
+
+DB schema + bootstrap admin are applied on API startup (no separate migrate command).
 
 ---
 
@@ -19,6 +43,7 @@ Production install — see [`../deploy/hestiacp/README.md`](../deploy/hestiacp/R
 
 ```
 panel/
+├── run.sh                   # local API start (venv + uvicorn :3010)
 ├── backend/                 # FastAPI
 │   ├── app/
 │   │   ├── api/             # auth, users, billing, jobs, infra, bot, …
@@ -114,6 +139,10 @@ panel/
 ### 1. Backend
 
 ```bash
+# from repo root:
+bash panel/run.sh --reload
+
+# or manually:
 cd panel/backend
 python3 -m venv .venv
 source .venv/bin/activate          # Windows: .venv\Scripts\activate
@@ -131,6 +160,8 @@ curl -s http://127.0.0.1:3010/api/health
 ```
 
 OpenAPI: `http://127.0.0.1:3010/docs`
+
+The Telegram bot runtime starts with this process (configure token in Admin → Bot Builder).
 
 ### 2. Frontend
 
@@ -210,7 +241,7 @@ systemctl restart scrapeboard
 4. **Proxy pools** — paste proxies  
 5. **Workers** — create → copy token → **Settings** (engine, threads, headless, pool, …)  
 6. **Scrape settings** — global defaults (new workers inherit these)  
-7. **Bot Builder** (optional) — token + demos  
+7. **Bot Builder** (optional) — token → enable → **Install / refresh demos**  
 8. **Users** — create accounts (optional Telegram ID)  
 
 Worker install hint when creating a worker:
@@ -219,7 +250,13 @@ Worker install hint when creating a worker:
 python agent.py --setup
 # or:
 python agent.py --panel-url https://scrape.cvmso.com --token <TOKEN>
+
+# Default after config: install as background service
+#   macOS/Linux:  bash install_service.sh
+#   Windows:      install_service.bat
 ```
+
+**Default ops loop:** admin creates package/user/worker token → operator installs worker as service → user runs jobs in Telegram or panel → admin monitors panel → user `/stop` or panel Stop.
 
 ---
 

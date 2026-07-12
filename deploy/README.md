@@ -2,7 +2,8 @@
 
 HestiaCP production packaging (OpsBoard-style).
 
-**Full guide (all commands):** [hestiacp/README.md](hestiacp/README.md)
+**Full guide (all commands):** [hestiacp/README.md](hestiacp/README.md)  
+**End-to-end run path (panel + workers):** [../README.md#run-by-default](../README.md#run-by-default)
 
 | | |
 |--|--|

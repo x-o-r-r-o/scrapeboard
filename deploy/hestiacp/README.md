@@ -283,9 +283,15 @@ pip install -r requirements.txt
 python agent.py --setup
 # Panel URL: https://scrape.cvmso.com
 # Token:     (from panel)
+
+# Default: install as background service (starts at login, keeps leasing jobs)
+#   macOS/Linux:  bash install_service.sh
+#   Windows:      install_service.bat
+# Linux linger (after logout / at boot):  sudo loginctl enable-linger "$USER"
 ```
 
-Workers only process jobs created by **panel users** or **linked Telegram** accounts.
+Workers only process jobs created by **panel users** or **linked Telegram** accounts.  
+Day-to-day status/logs/uninstall: [`../../worker/README.md`](../../worker/README.md).
 
 ---
 
@@ -349,5 +355,8 @@ grep '^BOOTSTRAP_ADMIN_PASSWORD=' /home/cvmso/apps/scrapeboard/panel/backend/.en
 | `deploy/lib/common.sh` | Shared helpers (`env_quote`, systemd, nginx, …) |
 | `deploy/config.env.example` | Template → copy to `config.env` |
 | `deploy/hestiacp/nginx.ssl.conf_scrapeboard` | `/api/` proxy snippet |
+| `panel/run.sh` | Local API start (`uvicorn` :3010) |
+| `worker/setup_and_run.*` | Worker first-run wizard |
+| `worker/install_service.*` | Worker background service (default) |
 
 Project overview: [`../../README.md`](../../README.md)

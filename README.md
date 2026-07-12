@@ -10,6 +10,7 @@ Deploy the panel once on **HestiaCP** (OpsBoard / OmniDesk style). It runs as **
 
 | Doc | Path |
 |-----|------|
+| **Run by default** | [below](#run-by-default) |
 | Panel | [`panel/README.md`](panel/README.md) |
 | Worker | [`worker/README.md`](worker/README.md) |
 | HestiaCP deploy | [`deploy/hestiacp/README.md`](deploy/hestiacp/README.md) |
@@ -24,7 +25,7 @@ Deploy the panel once on **HestiaCP** (OpsBoard / OmniDesk style). It runs as **
 2. [Repository layout](#repository-layout)
 3. [Features](#features)
 4. [Security](#security)
-5. [Quick start (local development)](#quick-start-local-development)
+5. [Run by default](#run-by-default)
 6. [Production deploy (HestiaCP)](#production-deploy-hestiacp)
 7. [Panel setup guide](#panel-setup-guide)
 8. [Worker setup](#worker-setup)
@@ -96,15 +97,15 @@ scrapeboard/
 │       ├── update.sh
 │       └── nginx.ssl.conf_scrapeboard
 ├── panel/                    ← control panel (see panel/README.md)
+│   ├── run.sh                ← local API start helper
 │   ├── backend/              ← FastAPI (port 3010)
 │   ├── frontend/             ← React (Vite)
 │   └── data/                 ← DB, uploads, results (runtime; not in git)
 └── worker/                   ← scrape agent (see worker/README.md)
     ├── agent.py              ← wizard + panel client
     ├── gmaps_scraper.py      ← browser scrape engine
-    ├── setup_and_run.bat     ← Windows first-run
-    ├── setup_and_run.sh      ← Linux / macOS first-run
-    ├── setup_and_run.command ← macOS Finder launcher
+    ├── setup_and_run.*       ← first-run wizard (+ optional service install)
+    ├── install_service.*     ← **default** background service (login/boot)
     ├── requirements.txt
     ├── SCRAPER.md
     └── worker_config.json    ← created on first run (gitignored)
@@ -167,25 +168,73 @@ scrapeboard/
 
 ---
 
-## Quick start (local development)
+## Run by default
 
-Use this only for development. Production uses HestiaCP + systemd (below).
+Operator path for a **fresh machine** and day-to-day use. Production panel = HestiaCP + systemd. Workers = **background service** (`install_service.*`) after the first-run wizard.
 
 ### Prerequisites
 
-- Python 3.10+  
-- Node.js 18+ or Bun (frontend)  
-- For workers: first run auto-installs Playwright / browsers as needed  
+| Need | Notes |
+|------|--------|
+| Python **3.10+** | Panel API + worker (`python3` / Windows `py -3`) |
+| Node.js **18+** or Bun | Panel frontend (local) or Bun on VPS via installer |
+| Outbound HTTPS | Workers → panel; no inbound ports on workers |
+| Browsers | Auto-installed on first worker engine use (Playwright / Brave / …) |
 
-### 1. Panel API
+### Default operational workflow
+
+1. **Deploy or start panel** (Hestia prod, or local API + UI below).  
+2. Admin: password + 2FA → packages / billing → proxy pools → **Workers → Create** → **copy token once**.  
+3. Optional: **Bot Builder** → BotFather token → **Install / refresh demos**.  
+4. On each scrape machine: `setup_and_run.*` → wizard (panel URL + token) → **`install_service.*`** (recommended).  
+5. Admin creates users (optional Telegram ID); grant package / user buys via Telegram.  
+6. User runs jobs in **Telegram** (`/run`) or **panel Jobs**; admin monitors workers/jobs in the panel.  
+7. User **`/stop`** (or panel Stop) to cancel; results ZIP via panel / optional Telegram delivery.
+
+### A. Production panel (HestiaCP) — default for scrape.cvmso.com
 
 ```bash
+# as root on the VPS
+mkdir -p /home/cvmso/apps && cd /home/cvmso/apps
+git clone https://github.com/x-o-r-r-o/scrapeboard.git scrapeboard
+chown -R cvmso:cvmso scrapeboard
+git config --global --add safe.directory /home/cvmso/apps/scrapeboard
+
+cd scrapeboard
+cp deploy/config.env.example deploy/config.env
+nano deploy/config.env   # BOOTSTRAP_ADMIN_PASSWORD='…' (single-quoted)
+
+bash deploy/hestiacp/install.sh
+```
+
+Then open **https://scrape.cvmso.com** → sign in → change password → enable 2FA.
+
+| Day-to-day | Command |
+|------------|---------|
+| Status | `systemctl status scrapeboard` |
+| Logs | `journalctl -u scrapeboard -f` |
+| Restart | `systemctl restart scrapeboard` |
+| Stop | `systemctl stop scrapeboard` |
+| Update | `sudo -u cvmso git pull --ff-only` then `bash deploy/hestiacp/update.sh` |
+
+Telegram bot runs **inside the panel API process** (no separate bot service). Full steps: [`deploy/hestiacp/README.md`](deploy/hestiacp/README.md).
+
+### B. Local panel (development)
+
+DB tables + bootstrap admin are created automatically on API start (no separate migrate step).
+
+**1. Backend** (port **3010**):
+
+```bash
+# helper (creates venv, installs deps, starts uvicorn):
+bash panel/run.sh --reload
+
+# or manually:
 cd panel/backend
 python3 -m venv .venv
 source .venv/bin/activate          # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
-cp .env.example .env
-# edit SECRET_KEY and bootstrap password
+cp .env.example .env               # edit SECRET_KEY + BOOTSTRAP_ADMIN_PASSWORD
 uvicorn app.main:app --reload --host 127.0.0.1 --port 3010
 ```
 
@@ -194,13 +243,13 @@ curl -s http://127.0.0.1:3010/api/health
 # {"ok":true}
 ```
 
-| Field | Default (see `.env`) |
-|-------|----------------------|
+| Field | Default |
+|-------|---------|
 | Username | `admin` |
-| Password | from `BOOTSTRAP_ADMIN_PASSWORD` |
-| After login | Must change password + enable 2FA |
+| Password | `BOOTSTRAP_ADMIN_PASSWORD` in `.env` |
+| After login | Change password + enable 2FA |
 
-### 2. Panel UI
+**2. Frontend:**
 
 ```bash
 cd panel/frontend
@@ -208,21 +257,53 @@ npm install          # or: bun install
 npm run dev          # http://127.0.0.1:5173  (proxies /api → :3010)
 ```
 
-### 3. Local worker (optional)
+Production UI is a static build into Hestia `public_html` (not `npm run dev`).
 
-In the panel: **Admin → Workers → Create** → copy token.
+### C. Worker (default: background service)
+
+1. Panel → **Admin → Workers → Create** → set max browsers / proxy pool → **copy token once**.  
+2. First run on the scrape machine:
+
+| OS | First run |
+|----|-----------|
+| **Windows** | Double-click `worker/setup_and_run.bat` |
+| **macOS** | Double-click `worker/setup_and_run.command` or `bash worker/setup_and_run.sh` |
+| **Linux** | `bash worker/setup_and_run.sh` |
+
+Wizard: panel URL (`https://scrape.cvmso.com` or `http://127.0.0.1:3010`), token, name, engine. Saves `worker_config.json`.
+
+3. **Install background service** (recommended default — scripts offer this after setup):
 
 ```bash
-cd worker
-# easiest: setup_and_run.sh / .bat / .command
-# or:
-python3 -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
-python agent.py --panel-url http://127.0.0.1:3010 --token YOUR_TOKEN
-# first run without flags opens the wizard (use panel URL http://127.0.0.1:3010)
+# macOS / Linux
+cd worker && bash install_service.sh
+
+# Windows
+cd worker && install_service.bat
 ```
 
-More: [`worker/README.md`](worker/README.md) · [`panel/README.md`](panel/README.md)
+| OS | Status | Logs | Stop / uninstall |
+|----|--------|------|------------------|
+| **macOS** | `launchctl print gui/$(id -u)/com.scrapeboard.worker \| head` | `worker/logs/worker.log` | `bash install_service.sh --uninstall` |
+| **Linux** | `systemctl --user status scrapeboard-worker` | `logs/worker.log` or `journalctl --user -u scrapeboard-worker -f` | `bash install_service.sh --uninstall` |
+| **Windows** | `schtasks /Query /TN ScrapeboardWorker` | `logs\worker.log` | `install_service.bat --uninstall` |
+
+Linux after logout / at boot without a session: `sudo loginctl enable-linger "$USER"` (installer tries once).
+
+Foreground only (dev): `python agent.py` after config exists.
+
+### D. User & admin day-to-day
+
+| Who | Where | Actions |
+|-----|-------|---------|
+| **Admin** | Panel | Users, packages, billing, proxies, workers, scrape defaults, Bot Builder, monitor jobs |
+| **User** | Telegram | `/packages` `/buy` `/paid` `/subscription` `/run` `/status` `/stop` `/support` |
+| **User** | Panel | Jobs → New / Stop / Download; Subscription |
+| **Worker** | Machine | Service waits for leases; no UI |
+
+Link Telegram: user `/whoami` → admin sets **Telegram ID** on the user.
+
+More: [`panel/README.md`](panel/README.md) · [`worker/README.md`](worker/README.md)
 
 ---
 
@@ -347,12 +428,15 @@ Assign a pool to each worker.
 5. Threads are capped by **max browsers**  
 6. Optional: drain / disable / rotate token  
 
-Install hint:
+Install hint (panel shows this when creating a worker):
 
 ```bash
 python agent.py --setup
 # or:
 python agent.py --panel-url https://scrape.cvmso.com --token TOKEN
+# then (default):
+#   macOS/Linux: bash install_service.sh
+#   Windows:     install_service.bat
 ```
 
 ### 6. Scrape settings (Admin → Scrape settings)
@@ -377,15 +461,15 @@ UI route map and API notes: [`panel/README.md`](panel/README.md).
 
 ## Worker setup
 
-Workers are **scrape-only** and run on **Windows, macOS, or Linux**.
+Workers are **scrape-only** on **Windows, macOS, or Linux**. **Default run mode:** background service after the wizard (see [Run by default → C](#c-worker-default-background-service)).
 
-### First run (interactive setup + auto browser install)
+### First run → service
 
-| OS | Command |
-|----|---------|
-| **Windows** | Double-click `worker/setup_and_run.bat` |
-| **macOS** | Double-click `worker/setup_and_run.command` (or `bash setup_and_run.sh`) |
-| **Linux** | `bash worker/setup_and_run.sh` |
+| OS | First run | Then (default) |
+|----|-----------|----------------|
+| **Windows** | `worker/setup_and_run.bat` | `install_service.bat` |
+| **macOS** | `setup_and_run.command` / `bash setup_and_run.sh` | `bash install_service.sh` |
+| **Linux** | `bash setup_and_run.sh` | `bash install_service.sh` (+ linger if needed) |
 
 Or manually:
 
@@ -393,20 +477,19 @@ Or manually:
 cd worker
 python3 -m venv .venv && source .venv/bin/activate   # Win: py -3 -m venv .venv && .venv\Scripts\activate
 pip install -r requirements.txt
-python agent.py                # wizard → saves worker_config.json
-python agent.py --selftest     # optional: verify browser stack
+python agent.py                # wizard → worker_config.json
+python agent.py --selftest     # optional
+bash install_service.sh        # Windows: install_service.bat
 ```
 
-Wizard asks for panel URL (`https://scrape.cvmso.com`), worker token, name, default engine.  
-Browsers/packages auto-install per engine on first use (same as the original scraper).
+Wizard: panel URL (`https://scrape.cvmso.com`), worker token (Admin → Workers), name, engine.  
+Browsers/packages auto-install per engine on first use.
 
 ```bash
 python agent.py --setup          # re-run wizard
 python agent.py --force-setup    # re-install browsers
 python agent.py --skip-setup     # never auto-install
 ```
-
-Keep it running under `tmux`, `screen`, systemd, LaunchAgent, or a Windows service.
 
 ### What the agent does
 
@@ -428,7 +511,7 @@ python gmaps_scraper.py --check-proxies --proxies proxies.txt
 python gmaps_scraper.py --diagnose --proxy-index 0 --engine chrome
 ```
 
-In production, prefer **`agent.py`** against the panel.
+In production, prefer **`agent.py`** against the panel (as a service).
 
 ---
 
@@ -625,13 +708,25 @@ OpenAPI docs when API is running: `http://127.0.0.1:3010/docs` (localhost only i
 ## Updating
 
 ```bash
-# sync new code into APP_DIR, then as root:
+# Panel VPS — sync code, then as root:
 bash /home/cvmso/apps/scrapeboard/deploy/hestiacp/update.sh
 ```
 
 Update **keeps** existing `panel/backend/.env` (secrets preserved), rebuilds frontend, restarts systemd, refreshes nginx snippet.
 
-Workers: pull/sync the `worker/` folder on each machine, then restart `agent.py` (config file stays).
+**Workers** (each scrape machine):
+
+```bash
+cd worker
+git pull --ff-only                 # or sync the worker/ folder
+source .venv/bin/activate          # Win: .venv\Scripts\activate
+pip install -r requirements.txt
+# restart service (config + token stay in worker_config.json):
+bash install_service.sh            # re-install/restart LaunchAgent / systemd user unit
+# Windows: install_service.bat
+```
+
+Or uninstall → pull → reinstall: `bash install_service.sh --uninstall` then `bash install_service.sh`.
 
 ---
 

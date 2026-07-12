@@ -8,6 +8,6 @@
 
 **Production:** deploy Scrapeboard once on HestiaCP (`scrape.cvmso.com`, systemd, port **3010**).
 
-**Workers:** first-run wizard / `setup_and_run.*` → `--panel-url https://scrape.cvmso.com`.
+**Workers:** `setup_and_run.*` → wizard → **`install_service.*`** (default background service) → panel URL `https://scrape.cvmso.com`.
 
-Full docs: [README.md](README.md).
+**Run everything:** [README.md → Run by default](README.md#run-by-default).

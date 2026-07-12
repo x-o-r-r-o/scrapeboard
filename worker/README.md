@@ -8,6 +8,17 @@ Production panel URL: **`https://scrape.cvmso.com`**
 
 ---
 
+## Run by default
+
+1. Panel → **Admin → Workers → Create** → **copy token once**.  
+2. First run: `setup_and_run.bat` / `.sh` / `.command` (wizard → `worker_config.json`).  
+3. **Install background service** (recommended): `install_service.bat` / `bash install_service.sh`.  
+4. Leave it running; it heartbeats and leases jobs from the panel.
+
+Full stack (panel + ops): **[root README → Run by default](../README.md#run-by-default)**.
+
+---
+
 ## Requirements
 
 | | |
@@ -77,6 +88,8 @@ python agent.py --skip-setup                 # never auto-install
 
 ## Day-to-day run
 
+**Default:** background service (below). Foreground only when debugging:
+
 ```bash
 # After wizard / config exists:
 python agent.py
@@ -90,13 +103,11 @@ python agent.py --panel-url http://127.0.0.1:3010 --token YOUR_TOKEN
 
 On start the agent calls `/api/worker-api/hello` to verify the token, then heartbeats and leases work only for **jobs created by panel users or linked Telegram accounts**. Keep the token secret; rotate it in Admin → Workers if leaked.
 
-Keep it running as a **background service** (recommended — see below), or leave a terminal open / use `tmux`.
-
 ---
 
 ## Install as background service
 
-Installs a login/boot job that runs `python agent.py --service`: logs to `logs/worker.log`, uses a stable `work/` directory, keeps leasing panel jobs, and restarts if the process exits. Requires `worker_config.json` (run the wizard first).
+**This is the default recommended run mode.** Installs a login/boot job that runs `python agent.py --service`: logs to `logs/worker.log`, uses a stable `work/` directory, keeps leasing panel jobs, and restarts if the process exits. Requires `worker_config.json` (run the wizard first). `setup_and_run.*` offers to install this after the wizard.
 
 ### macOS (LaunchAgent)
 
@@ -161,6 +172,27 @@ python agent.py --service --work-dir PATH # override work dir
 ```
 
 Foreground runs (no `--service`) still use a temp work directory unless you set `--work-dir` or `work_dir` in config.
+
+---
+
+## Update / uninstall after `git pull`
+
+```bash
+cd worker
+git pull --ff-only                 # or sync this folder
+source .venv/bin/activate          # Windows: .venv\Scripts\activate
+pip install -r requirements.txt
+# re-apply service (keeps worker_config.json):
+bash install_service.sh            # Windows: install_service.bat
+```
+
+Uninstall service only (config stays):
+
+```bash
+bash install_service.sh --uninstall    # Windows: install_service.bat --uninstall
+```
+
+Clean reinstall: delete `.venv` + `worker_config.json`, re-run `setup_and_run.*`, then `install_service.*`.
 
 ---
 
