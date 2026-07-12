@@ -1,3 +1,6 @@
+import logging
+
+import httpx
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -11,6 +14,7 @@ from app.schemas import (
     BotCommandCreate,
     BotCommandOut,
     BotCommandUpdate,
+    BotRuntimeStatusOut,
     BotSettingsOut,
     BotSettingsUpdate,
     BotWorkflowCreate,
@@ -23,6 +27,8 @@ from app.schemas import (
     SecuritySettingsUpdate,
 )
 from app.services.captcha_settings import get_captcha_settings
+
+log = logging.getLogger("api.settings_bot")
 
 router = APIRouter(tags=["settings-bot"])
 
@@ -89,6 +95,72 @@ def _captcha_out(row) -> CaptchaSettingsOut:
         captcha_backup_key_configured=bool((row.captcha_backup_key or "").strip()),
         captcha_backup_host=row.captcha_backup_host or "",
     )
+
+
+def _settings_out(b: BotSettings) -> BotSettingsOut:
+    snap = bot_runtime.snapshot()
+    return BotSettingsOut(
+        enabled=b.enabled,
+        token_configured=bool(b.token),
+        username=b.username,
+        mode=b.mode,
+        welcome_text=b.welcome_text,
+        notify_interval_sec=b.notify_interval_sec,
+        support_enabled=b.support_enabled,
+        support_chat_id=b.support_chat_id,
+        public_packages=b.public_packages,
+        deliver_results_telegram=b.deliver_results_telegram,
+        admin_commands_enabled=b.admin_commands_enabled,
+        runtime_status=str(snap.get("status") or "stopped"),
+        runtime_task_running=bool(snap.get("task_running")),
+        runtime_error=str(snap.get("last_error") or ""),
+        runtime_last_ok_at=snap.get("last_ok_at"),  # type: ignore[arg-type]
+        runtime_updates_handled=int(snap.get("updates_handled") or 0),
+    )
+
+
+async def _validate_telegram_token(token: str) -> dict:
+    """Call getMe; never log the token. Raises HTTPException on failure."""
+    token = (token or "").strip()
+    if not token or ":" not in token:
+        raise HTTPException(400, "Invalid bot token format (expected digits:secret from BotFather)")
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            r = await client.get(f"https://api.telegram.org/bot{token}/getMe")
+            data = r.json()
+    except Exception as exc:
+        log.warning("getMe network error while validating token")
+        raise HTTPException(400, f"Could not reach Telegram to validate token: {exc}") from exc
+    if not data.get("ok"):
+        desc = str(data.get("description") or "Telegram rejected the token")
+        code = data.get("error_code")
+        raise HTTPException(400, f"Telegram rejected token{f' ({code})' if code else ''}: {desc}")
+    result = data.get("result") or {}
+    if not result.get("is_bot"):
+        raise HTTPException(400, "Token is valid but getMe did not return a bot account")
+    return result
+
+
+def _runtime_hint(b: BotSettings, snap: dict) -> str:
+    if not b.token:
+        return "Paste a BotFather token and Save, then turn Live on."
+    if not b.enabled:
+        return "Token is set but Live is off — enable Live so the API process starts polling."
+    if not snap.get("task_running"):
+        return "Runtime task is not running. Click Restart runtime or restart systemd scrapeboard."
+    status = str(snap.get("status") or "")
+    err = str(snap.get("last_error") or "")
+    if status == "error" or err:
+        if "Unauthorized" in err or "401" in err:
+            return "Token invalid or revoked. Paste a new token from BotFather and Save."
+        if "conflict" in err.lower() or "webhook" in err.lower():
+            return "getUpdates conflict (webhook or another poller). Restart runtime; scrapeboard clears webhooks automatically."
+        return f"Polling error — check journalctl -u scrapeboard. ({err[:120]})"
+    if status == "polling":
+        return "Polling Telegram. Send /start in a DM to the bot; unlinked users still get a reply."
+    if status == "idle":
+        return "Waiting for enabled+token (should not idle while Live is on)."
+    return "Runtime starting…"
 
 
 @router.get("/settings/security", response_model=SecuritySettingsOut)
@@ -163,19 +235,7 @@ async def get_bot_settings(_: User = Depends(require_admin), __: User = Depends(
         db.add(b)
         await db.commit()
         await db.refresh(b)
-    return BotSettingsOut(
-        enabled=b.enabled,
-        token_configured=bool(b.token),
-        username=b.username,
-        mode=b.mode,
-        welcome_text=b.welcome_text,
-        notify_interval_sec=b.notify_interval_sec,
-        support_enabled=b.support_enabled,
-        support_chat_id=b.support_chat_id,
-        public_packages=b.public_packages,
-        deliver_results_telegram=b.deliver_results_telegram,
-        admin_commands_enabled=b.admin_commands_enabled,
-    )
+    return _settings_out(b)
 
 
 @router.put("/bot/settings", response_model=BotSettingsOut)
@@ -188,11 +248,51 @@ async def update_bot_settings(
     b = await db.get(BotSettings, 1) or BotSettings(id=1)
     if not await db.get(BotSettings, 1):
         db.add(b)
-    for k, v in body.model_dump(exclude_unset=True).items():
+    data = body.model_dump(exclude_unset=True)
+    if "token" in data:
+        raw = data["token"]
+        if raw is None or str(raw).strip() == "":
+            data.pop("token")
+        else:
+            me = await _validate_telegram_token(str(raw))
+            data["token"] = str(raw).strip()
+            tg_user = str(me.get("username") or "").strip()
+            # Prefer Telegram's username when saving a new token (unless caller sent one).
+            if tg_user and not (data.get("username") or "").strip():
+                data["username"] = tg_user
+    for k, v in data.items():
         setattr(b, k, v)
     await db.commit()
     await bot_runtime.restart()
-    return await get_bot_settings(_, __, db)
+    await db.refresh(b)
+    return _settings_out(b)
+
+
+@router.get("/bot/status", response_model=BotRuntimeStatusOut)
+async def bot_runtime_status(
+    _: User = Depends(require_admin),
+    __: User = Depends(require_ready_user),
+    db: AsyncSession = Depends(get_db),
+):
+    b = await db.get(BotSettings, 1)
+    if not b:
+        b = BotSettings(id=1)
+        db.add(b)
+        await db.commit()
+        await db.refresh(b)
+    snap = bot_runtime.snapshot()
+    return BotRuntimeStatusOut(
+        status=str(snap.get("status") or "stopped"),
+        task_running=bool(snap.get("task_running")),
+        last_error=str(snap.get("last_error") or ""),
+        last_ok_at=snap.get("last_ok_at"),  # type: ignore[arg-type]
+        updates_handled=int(snap.get("updates_handled") or 0),
+        offset=snap.get("offset"),  # type: ignore[arg-type]
+        enabled=bool(b.enabled),
+        token_configured=bool(b.token),
+        username=b.username or "",
+        hint=_runtime_hint(b, snap),
+    )
 
 
 @router.get("/bot/commands", response_model=list[BotCommandOut])
@@ -457,4 +557,10 @@ async def install_demos(_: User = Depends(require_admin), __: User = Depends(req
 @router.post("/bot/restart", response_model=MessageOut)
 async def restart_bot(_: User = Depends(require_admin), __: User = Depends(require_ready_user)):
     await bot_runtime.restart()
-    return MessageOut(detail="Bot runtime restarted")
+    snap = bot_runtime.snapshot()
+    detail = "Bot runtime restarted"
+    if snap.get("task_running"):
+        detail += f" (status={snap.get('status')})"
+    else:
+        detail += " — warning: task not running after restart"
+    return MessageOut(detail=detail)

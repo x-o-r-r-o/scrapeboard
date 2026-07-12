@@ -599,6 +599,11 @@ class BotSettingsOut(BaseModel):
     public_packages: bool
     deliver_results_telegram: bool
     admin_commands_enabled: bool
+    runtime_status: str = "stopped"
+    runtime_task_running: bool = False
+    runtime_error: str = ""
+    runtime_last_ok_at: float | None = None
+    runtime_updates_handled: int = 0
 
 
 class BotSettingsUpdate(BaseModel):
@@ -613,6 +618,19 @@ class BotSettingsUpdate(BaseModel):
     public_packages: bool | None = None
     deliver_results_telegram: bool | None = None
     admin_commands_enabled: bool | None = None
+
+
+class BotRuntimeStatusOut(BaseModel):
+    status: str
+    task_running: bool
+    last_error: str
+    last_ok_at: float | None
+    updates_handled: int
+    offset: int | None
+    enabled: bool
+    token_configured: bool
+    username: str
+    hint: str = ""
 
 
 class BotCommandOut(BaseModel):

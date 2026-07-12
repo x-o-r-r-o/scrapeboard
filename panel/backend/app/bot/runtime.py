@@ -82,6 +82,16 @@ class RateLimiter:
         return True
 
 
+def _tg_error_text(data: dict | None, fallback: str = "unknown Telegram error") -> str:
+    if not data:
+        return fallback
+    desc = str(data.get("description") or "").strip()
+    code = data.get("error_code")
+    if desc and code is not None:
+        return f"{code}: {desc}"
+    return desc or fallback
+
+
 class TelegramBotRuntime:
     def __init__(self) -> None:
         self._task: asyncio.Task | None = None
@@ -90,51 +100,139 @@ class TelegramBotRuntime:
         self._cmd_limiter = RateLimiter(30, 60)
         self._pay_limiter = RateLimiter(5, 600)
         self._inputs: dict[int, dict[str, Path]] = {}  # user.id -> keywords/locations paths
+        self._webhook_cleared_for: str | None = None
+        self.status: str = "stopped"  # stopped|idle|polling|error
+        self.last_error: str = ""
+        self.last_ok_at: float | None = None
+        self.updates_handled: int = 0
+
+    def snapshot(self) -> dict[str, Any]:
+        task_running = bool(self._task and not self._task.done())
+        return {
+            "status": self.status,
+            "task_running": task_running,
+            "last_error": self.last_error,
+            "last_ok_at": self.last_ok_at,
+            "updates_handled": self.updates_handled,
+            "offset": self.offset,
+        }
 
     def start(self) -> None:
         if self._task and not self._task.done():
             return
         self._stop.clear()
+        self.status = "starting"
         self._task = asyncio.create_task(self._loop(), name="telegram-bot-runtime")
 
     async def stop(self) -> None:
+        """Stop the polling task. Must cancel — long-poll can block for ~25s."""
         self._stop.set()
-        if self._task:
-            await asyncio.wait([self._task], timeout=5)
+        task = self._task
+        self._task = None
+        if task and not task.done():
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                log.exception("bot task stop error")
+        self.status = "stopped"
 
     async def restart(self) -> None:
         await self.stop()
         self.start()
 
     async def _loop(self) -> None:
-        while not self._stop.is_set():
-            try:
-                async with SessionLocal() as db:
-                    settings = await db.get(BotSettings, 1)
-                    if not settings or not settings.enabled or not settings.token:
-                        await asyncio.sleep(5)
-                        continue
-                    token = settings.token
-                updates = await self._get_updates(token)
-                for u in updates:
+        try:
+            while not self._stop.is_set():
+                try:
                     async with SessionLocal() as db:
-                        await self._handle_update(db, token, u)
-            except Exception:
-                log.exception("bot loop error")
-                await asyncio.sleep(3)
+                        settings = await db.get(BotSettings, 1)
+                        if not settings or not settings.enabled or not settings.token:
+                            self.status = "idle"
+                            self.last_error = (
+                                "Bot disabled or token missing — set token and enable Live in Bot Builder."
+                                if not settings or not settings.token
+                                else "Bot is disabled (Live toggle off)."
+                            )
+                            await asyncio.sleep(5)
+                            continue
+                        token = settings.token
+                    await self._ensure_polling_mode(token)
+                    updates = await self._get_updates(token)
+                    for u in updates:
+                        async with SessionLocal() as db:
+                            await self._handle_update(db, token, u)
+                        self.updates_handled += 1
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    self.status = "error"
+                    self.last_error = f"bot loop error: {exc}"
+                    log.exception("bot loop error")
+                    await asyncio.sleep(3)
+        except asyncio.CancelledError:
+            self.status = "stopped"
+            raise
+
+    async def _ensure_polling_mode(self, token: str) -> None:
+        """Drop any webhook so getUpdates works (Conflict: terminated by other getUpdates / webhook)."""
+        if self._webhook_cleared_for == token:
+            return
+        try:
+            async with httpx.AsyncClient(timeout=15) as client:
+                r = await client.get(
+                    f"https://api.telegram.org/bot{token}/deleteWebhook",
+                    params={"drop_pending_updates": "false"},
+                )
+                data = r.json()
+            if data.get("ok"):
+                self._webhook_cleared_for = token
+                log.info("Telegram webhook cleared; using long-poll getUpdates")
+            else:
+                err = _tg_error_text(data, "deleteWebhook failed")
+                self.last_error = err
+                log.warning("deleteWebhook failed: %s", err)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            self.last_error = f"deleteWebhook network error: {exc}"
+            log.warning("deleteWebhook error: %s", exc)
 
     async def _get_updates(self, token: str) -> list[dict]:
         params: dict[str, Any] = {"timeout": 25}
         if self.offset is not None:
             params["offset"] = self.offset
         try:
+            self.status = "polling"
             async with httpx.AsyncClient(timeout=40) as client:
                 r = await client.get(f"https://api.telegram.org/bot{token}/getUpdates", params=params)
                 data = r.json()
-        except Exception:
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            self.status = "error"
+            self.last_error = f"getUpdates network error: {exc}"
+            log.warning("getUpdates network error: %s", exc)
+            await asyncio.sleep(3)
             return []
         if not data.get("ok"):
+            err = _tg_error_text(data, "getUpdates failed")
+            self.status = "error"
+            self.last_error = err
+            # Webhook / concurrent poller conflict — force clear and retry next loop.
+            if "conflict" in err.lower() or "webhook" in err.lower():
+                self._webhook_cleared_for = None
+                log.warning("getUpdates conflict: %s — will re-clear webhook", err)
+            else:
+                log.warning("getUpdates rejected: %s", err)
+            await asyncio.sleep(5)
             return []
+        import time
+
+        self.last_ok_at = time.time()
+        self.last_error = ""
         updates = data.get("result") or []
         if updates:
             self.offset = updates[-1]["update_id"] + 1

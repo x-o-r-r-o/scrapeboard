@@ -35,10 +35,15 @@ async def send_text(
                 import json
 
                 payload["reply_markup"] = json.dumps(reply_markup)
-            await client.post(
+            r = await client.post(
                 f"https://api.telegram.org/bot{token}/sendMessage",
                 data=payload,
             )
+            data = r.json()
+            if not data.get("ok"):
+                desc = str(data.get("description") or "sendMessage failed")
+                code = data.get("error_code")
+                log.warning("sendMessage rejected chat_id=%s: %s%s", chat_id, f"{code}: " if code else "", desc)
     except Exception:
         log.exception("send_text failed")
 

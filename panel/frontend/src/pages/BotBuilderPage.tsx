@@ -55,6 +55,19 @@ type CommandDraft = {
 
 type Tab = "connection" | "commands" | "workflows";
 
+type BotRuntimeStatus = {
+  status: string;
+  task_running: boolean;
+  last_error: string;
+  last_ok_at: number | null;
+  updates_handled: number;
+  offset: number | null;
+  enabled: boolean;
+  token_configured: boolean;
+  username: string;
+  hint: string;
+};
+
 const AUDIENCES = ["everyone", "users", "subscribers", "admins"] as const;
 const PROTECTED_COMMAND_KEYS = new Set(["start", "stop", "help"]);
 
@@ -373,6 +386,7 @@ export default function BotBuilderPage() {
   const [token, setToken] = useState("");
   const [commands, setCommands] = useState<Command[]>([]);
   const [workflows, setWorkflows] = useState<Workflow[]>([]);
+  const [runtime, setRuntime] = useState<BotRuntimeStatus | null>(null);
   const [msg, setMsg] = useState("");
   const [error, setError] = useState("");
   const [tab, setTab] = useState<Tab>("connection");
@@ -386,6 +400,15 @@ export default function BotBuilderPage() {
   const [cmdEditId, setCmdEditId] = useState<number | null>(null);
   const [cmdEditDraft, setCmdEditDraft] = useState<CommandDraft | null>(null);
 
+  async function refreshRuntime() {
+    try {
+      const st = await api<BotRuntimeStatus>("/api/bot/status");
+      setRuntime(st);
+    } catch {
+      /* status is best-effort */
+    }
+  }
+
   async function refresh() {
     const [s, c, w] = await Promise.all([
       api<BotSettings>("/api/bot/settings"),
@@ -395,10 +418,18 @@ export default function BotBuilderPage() {
     setSettings(s);
     setCommands(c);
     setWorkflows(w);
+    await refreshRuntime();
   }
 
   useEffect(() => {
     refresh().catch((e) => setError(e instanceof Error ? e.message : "Failed to load"));
+  }, []);
+
+  useEffect(() => {
+    const id = window.setInterval(() => {
+      refreshRuntime().catch(() => {});
+    }, 8000);
+    return () => window.clearInterval(id);
   }, []);
 
   async function saveSettings(e: FormEvent) {
@@ -541,6 +572,11 @@ export default function BotBuilderPage() {
   const enabled = Boolean(settings.enabled);
   const tokenOk = Boolean(settings.token_configured);
   const username = String(settings.username || "");
+  const runtimeStatus = runtime?.status || String(settings.runtime_status || "unknown");
+  const runtimeError = runtime?.last_error || String(settings.runtime_error || "");
+  const runtimeHint = runtime?.hint || "";
+  const taskRunning = runtime ? runtime.task_running : Boolean(settings.runtime_task_running);
+  const runtimeOk = taskRunning && (runtimeStatus === "polling" || runtimeStatus === "starting") && !runtimeError;
 
   return (
     <div className="stack">
@@ -570,8 +606,14 @@ export default function BotBuilderPage() {
             type="button"
             onClick={async () => {
               setMsg("");
-              await api("/api/bot/restart", { method: "POST" });
-              setMsg("Bot runtime restarted.");
+              setError("");
+              try {
+                const res = await api<{ detail: string }>("/api/bot/restart", { method: "POST" });
+                setMsg(res.detail || "Bot runtime restarted.");
+                await refresh();
+              } catch (err) {
+                setError(err instanceof Error ? err.message : "Restart failed");
+              }
             }}
           >
             Restart runtime
@@ -588,15 +630,25 @@ export default function BotBuilderPage() {
             <strong style={{ fontSize: "1.05rem" }}>{username ? `@${username.replace(/^@/, "")}` : "Telegram bot"}</strong>
             <span className={`badge ${enabled ? "ok" : ""}`}>{enabled ? "Enabled" : "Disabled"}</span>
             <span className={`badge ${tokenOk ? "ok" : "warn"}`}>{tokenOk ? "Token set" : "Token missing"}</span>
+            <span className={`badge ${runtimeOk ? "ok" : enabled && tokenOk ? "warn" : ""}`}>
+              {taskRunning ? `Runtime: ${runtimeStatus}` : "Runtime: stopped"}
+            </span>
             <span className="badge">Telegram</span>
           </div>
           <p className="muted" style={{ margin: "0.45rem 0 0", fontSize: "0.9rem" }}>
             {String(settings.welcome_text || "No welcome text yet — set one in Connection.")}
           </p>
+          {runtimeHint ? (
+            <p className="muted" style={{ margin: "0.35rem 0 0", fontSize: "0.85rem" }}>
+              {runtimeHint}
+            </p>
+          ) : null}
+          {runtimeError ? <p className="error" style={{ margin: "0.35rem 0 0" }}>{runtimeError}</p> : null}
           <div className="item-card-meta" style={{ marginTop: "0.55rem" }}>
             <span className="chip">{commands.filter((c) => c.enabled).length}/{commands.length} commands on</span>
             <span className="chip">{workflows.filter((w) => w.enabled).length}/{workflows.length} workflows on</span>
             <span className="chip">notify {String(settings.notify_interval_sec || 300)}s</span>
+            {runtime ? <span className="chip">{runtime.updates_handled} updates handled</span> : null}
           </div>
         </div>
         <label className="check-row" style={{ justifyContent: "flex-end" }}>
