@@ -7,7 +7,7 @@ Production install for a HestiaCP VPS (same model as OpsBoard / OmniDesk):
 | Frontend | Static React build in Hestia `public_html` |
 | Backend | **systemd** `scrapeboard` → FastAPI on `127.0.0.1:3010` |
 | Nginx | Hestia snippet proxies `/api/` → the API |
-| Workers | Separate machines; HTTPS to this panel only |
+| Workers | Separate machines; HTTPS to this panel only (`worker/` is **not** installed on the panel host) |
 
 ```
 Browser / Telegram / Workers
@@ -78,7 +78,8 @@ ssh root@YOUR_SERVER_IP
 mkdir -p /home/cvmso/apps
 cd /home/cvmso/apps
 
-# If the folder does not exist yet:
+# If the folder does not exist yet (full clone is fine — install.sh will
+# sparse-checkout and drop worker/ so the panel never keeps scrape runtime):
 git clone https://github.com/x-o-r-r-o/scrapeboard.git scrapeboard
 
 # Fix ownership (avoids "dubious ownership" when root installs)
@@ -87,6 +88,8 @@ git config --global --add safe.directory /home/cvmso/apps/scrapeboard
 
 cd /home/cvmso/apps/scrapeboard
 ```
+
+**Panel vs worker:** the control panel only needs `panel/`, `deploy/`, and top-level docs. Install/update configure **git sparse-checkout** to exclude `worker/` and remove it if present. Scrape agents are installed separately from the repo’s `worker/` folder on worker hosts — never required on the Hestia panel VPS. Local development clones may keep the full repo including `worker/`.
 
 ### 2b. Create `deploy/config.env`
 
@@ -128,7 +131,7 @@ What it does:
 
 1. Installs system packages (Python, git, rsync, …)
 2. Installs **Bun** (frontend build only)
-3. Syncs repo (`git pull` as `cvmso` when `REPO_URL` is set)
+3. Syncs repo (`git pull` as `cvmso` when `REPO_URL` is set) with **sparse-checkout excluding `worker/`**, then removes `worker/` if still present
 4. Writes quoted `panel/backend/.env` (`ENVIRONMENT=production`)
 5. Creates Python venv + installs API requirements
 6. Builds React → rsync into `public_html`
@@ -142,9 +145,11 @@ What it does:
 # On your Mac, from the project root:
 ssh root@YOUR_SERVER_IP 'mkdir -p /home/cvmso/apps'
 
+# Exclude worker/ — scrape agents belong on separate hosts
 rsync -az --delete \
   --exclude node_modules --exclude .venv --exclude panel/data \
   --exclude '__pycache__' --exclude .git --exclude dist \
+  --exclude worker \
   ./ root@YOUR_SERVER_IP:/home/cvmso/apps/scrapeboard/
 
 ssh root@YOUR_SERVER_IP
@@ -155,7 +160,7 @@ cp deploy/config.env.example deploy/config.env
 bash deploy/hestiacp/install.sh
 ```
 
-If you rsync (no `.git`), leave `REPO_URL=` empty in `config.env` or the installer will try to clone/pull.
+If you rsync (no `.git`), leave `REPO_URL=` empty in `config.env` or the installer will try to clone/pull. Even with a full rsync, `install.sh` / `update.sh` delete `worker/` from `APP_DIR` if it appears.
 
 ---
 
@@ -221,7 +226,8 @@ v-rebuild-web-domain cvmso scrape.cvmso.com
 ssh root@YOUR_SERVER_IP
 cd /home/cvmso/apps/scrapeboard
 chown -R cvmso:cvmso /home/cvmso/apps/scrapeboard
-sudo -u cvmso git pull --ff-only
+# Prefer update.sh (re-applies sparse-checkout, drops worker/, rebuilds, restarts).
+# A bare git pull is OK after the first install/update has enabled sparse-checkout.
 bash deploy/hestiacp/update.sh
 ```
 
@@ -231,6 +237,7 @@ Or from Mac after local commits:
 rsync -az --delete \
   --exclude node_modules --exclude .venv --exclude panel/data \
   --exclude '__pycache__' --exclude .git --exclude dist \
+  --exclude worker \
   ./ root@YOUR_SERVER_IP:/home/cvmso/apps/scrapeboard/
 
 ssh root@YOUR_SERVER_IP 'bash /home/cvmso/apps/scrapeboard/deploy/hestiacp/update.sh'
@@ -268,10 +275,14 @@ v-rebuild-web-domain cvmso scrape.cvmso.com
 
 ## 8. After panel is up — workers
 
+Panel servers **never need** `worker/` in `APP_DIR`. On each scrape host, clone/copy the repo’s `worker/` folder (or the full repo for development) and run setup there.
+
 1. Panel → **Admin → Workers → Create** → copy token once.
 2. On the worker machine (Windows / macOS / Linux):
 
 ```bash
+# Copy or clone only what you need on the scrape host, e.g.:
+#   git clone https://github.com/x-o-r-r-o/scrapeboard.git && cd scrapeboard/worker
 cd worker
 # Windows: setup_and_run.bat
 # macOS:   open setup_and_run.command   or  bash setup_and_run.sh
@@ -283,6 +294,7 @@ pip install -r requirements.txt
 python agent.py --setup
 # Panel URL: https://scrape.cvmso.com
 # Token:     (from panel)
+# Optional Tailscale: see worker/README.md (default off)
 
 # Default: install as background service (starts at login, keeps leasing jobs)
 #   macOS/Linux:  bash install_service.sh

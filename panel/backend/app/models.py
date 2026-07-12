@@ -83,6 +83,22 @@ class SecuritySettings(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 
 
+class CaptchaSettings(Base):
+    """Global scrape captcha solvers (primary + backup). Used for all workers/jobs."""
+
+    __tablename__ = "captcha_settings"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
+    captcha_provider: Mapped[str] = mapped_column(String(32), default="none")
+    captcha_key: Mapped[str] = mapped_column(String(255), default="")
+    captcha_host: Mapped[str] = mapped_column(String(255), default="")
+    captcha_retries: Mapped[int] = mapped_column(Integer, default=2)
+    captcha_backup_provider: Mapped[str] = mapped_column(String(32), default="none")
+    captcha_backup_key: Mapped[str] = mapped_column(String(255), default="")
+    captcha_backup_host: Mapped[str] = mapped_column(String(255), default="")
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+
 class Package(Base):
     __tablename__ = "packages"
 
@@ -231,6 +247,7 @@ class ScrapeSettings(Base):
     cooldown_every: Mapped[int] = mapped_column(Integer, default=25)
     cooldown_min: Mapped[float] = mapped_column(Float, default=25.0)
     cooldown_max: Mapped[float] = mapped_column(Float, default=60.0)
+    # Legacy columns — leases use global CaptchaSettings; kept for one-time migrate/fallback
     captcha_provider: Mapped[str] = mapped_column(String(32), default="none")
     captcha_key: Mapped[str] = mapped_column(String(255), default="")
     captcha_host: Mapped[str] = mapped_column(String(255), default="")

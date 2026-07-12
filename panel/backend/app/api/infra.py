@@ -39,6 +39,7 @@ from app.services.scrape_profiles import (
     get_default_profile,
     resolve_scrape_for_worker,
 )
+from app.services.captcha_settings import get_captcha_settings
 from app.services.worker_config import (
     apply_worker_config_update,
     merge_lease_settings,
@@ -78,13 +79,6 @@ def _scrape_out(
         cooldown_every=s.cooldown_every,
         cooldown_min=s.cooldown_min,
         cooldown_max=s.cooldown_max,
-        captcha_provider=s.captcha_provider,
-        captcha_key_configured=bool(s.captcha_key),
-        captcha_host=s.captcha_host or "",
-        captcha_retries=s.captcha_retries,
-        captcha_backup_provider=getattr(s, "captcha_backup_provider", None) or "none",
-        captcha_backup_key_configured=bool(getattr(s, "captcha_backup_key", "") or ""),
-        captcha_backup_host=getattr(s, "captcha_backup_host", None) or "",
         nav_timeout=s.nav_timeout,
         proxy_attempts=s.proxy_attempts,
         headless=bool(getattr(s, "headless", True)),
@@ -167,11 +161,11 @@ def _redact_worker_config(cfg: dict) -> dict:
     if out.get("captcha_key"):
         out["captcha_key_configured"] = True
     else:
-        out["captcha_key_configured"] = False
+        out["captcha_key_configured"] = bool(out.get("captcha_key_configured"))
     if out.get("captcha_backup_key"):
         out["captcha_backup_key_configured"] = True
     else:
-        out["captcha_backup_key_configured"] = False
+        out["captcha_backup_key_configured"] = bool(out.get("captcha_backup_key_configured"))
     out.pop("captcha_key", None)
     out.pop("captcha_backup_key", None)
     return out
@@ -478,9 +472,6 @@ async def update_scrape_profile(
         raise HTTPException(404, "Not found")
     data = body.model_dump(exclude_unset=True)
     apply_workers = data.pop("apply_to_workers", False)
-    for secret in ("captcha_key", "captcha_backup_key"):
-        if secret in data and (data[secret] is None or data[secret] == ""):
-            data.pop(secret)
     if data.get("is_default"):
         others = (
             await db.execute(select(ScrapeSettings).where(ScrapeSettings.id != s.id))
@@ -649,11 +640,13 @@ async def worker_heartbeat(
     w.version = str(body.get("version") or w.version)
     await db.commit()
     scrape = await resolve_scrape_for_worker(db, w)
+    captcha = await get_captcha_settings(db)
     effective = merge_lease_settings(
         scrape=scrape,
         worker_config=w.worker_config or {},
         job_settings={},
         max_browsers=w.max_browsers,
+        captcha=captcha,
     )
     return {
         "ok": True,
@@ -877,11 +870,13 @@ async def worker_lease(
         if pool and pool.is_active:
             proxies_text = pool.proxies_text
 
+    captcha = await get_captcha_settings(db)
     settings = merge_lease_settings(
         scrape=scrape,
         worker_config=w.worker_config or {},
         job_settings=dict(job.settings or {}),
         max_browsers=w.max_browsers,
+        captcha=captcha,
     )
 
     keywords, locations = [], []

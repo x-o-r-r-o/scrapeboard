@@ -744,13 +744,6 @@ const WORKER_FLAG_FIELDS: Array<{ key: string; label: string; type: "text" | "nu
   { key: "cooldown_every", label: "Cooldown every N", type: "number" },
   { key: "cooldown_min", label: "Cooldown min", type: "number" },
   { key: "cooldown_max", label: "Cooldown max", type: "number" },
-  { key: "captcha_provider", label: "Captcha primary", type: "select", options: ["none", "2captcha", "captchaai"] },
-  { key: "captcha_key", label: "Captcha key (blank=keep)", type: "text" },
-  { key: "captcha_host", label: "Captcha host", type: "text" },
-  { key: "captcha_retries", label: "Captcha retries", type: "number" },
-  { key: "captcha_backup_provider", label: "Captcha backup", type: "select", options: ["none", "2captcha", "captchaai"] },
-  { key: "captcha_backup_key", label: "Backup key (blank=keep)", type: "text" },
-  { key: "captcha_backup_host", label: "Backup host", type: "text" },
   { key: "nav_timeout", label: "Nav timeout (s)", type: "number" },
   { key: "proxy_attempts", label: "Proxy attempts", type: "number" },
   { key: "browser_path", label: "Browser path (optional)", type: "text" },
@@ -819,8 +812,13 @@ export function WorkersAdminPage() {
     const cfg = { ...(w.worker_config || {}) };
     delete cfg.captcha_key_configured;
     delete cfg.captcha_backup_key_configured;
-    cfg.captcha_key = "";
-    cfg.captcha_backup_key = "";
+    delete cfg.captcha_key;
+    delete cfg.captcha_backup_key;
+    delete cfg.captcha_provider;
+    delete cfg.captcha_host;
+    delete cfg.captcha_retries;
+    delete cfg.captcha_backup_provider;
+    delete cfg.captcha_backup_host;
     setEdit({
       name: w.name,
       is_enabled: w.is_enabled,
@@ -867,9 +865,6 @@ export function WorkersAdminPage() {
         scrape_settings_id: edit.scrape_settings_id,
         worker_config: { ...edit.worker_config },
       };
-      const wc = body.worker_config as WorkerConfig;
-      if (!wc.captcha_key) delete wc.captcha_key;
-      if (!wc.captcha_backup_key) delete wc.captcha_backup_key;
       await api(`/api/workers/${selectedId}`, { method: "PATCH", body: JSON.stringify(body) });
       setMsg("Worker settings saved. Online workers pick them up on the next heartbeat/lease.");
       await refresh();
@@ -912,7 +907,8 @@ export function WorkersAdminPage() {
         <div>
           <h1>Workers</h1>
           <p className="subtitle">
-            Assign a proxy pool and scrape profile per worker. Fine-tune overrides merge on top of the profile for each lease.
+            Assign a proxy pool and scrape profile per worker. Fine-tune overrides merge on top of the profile for each
+            lease. Captcha solvers are global under Admin → Captcha.
           </p>
         </div>
       </div>
@@ -1201,15 +1197,25 @@ export function WorkersAdminPage() {
 export function ScrapeAdminPage() {
   const [form, setForm] = useState<Record<string, string | number | boolean>>({});
   const [saved, setSaved] = useState(false);
-  const [captchaKey, setCaptchaKey] = useState("");
 
   const boolKeys = new Set(["headless", "no_stealth", "geoip", "no_preflight", "fresh", "debug"]);
+  const skipKeys = new Set([
+    "captcha_provider",
+    "captcha_key",
+    "captcha_host",
+    "captcha_retries",
+    "captcha_backup_provider",
+    "captcha_backup_key",
+    "captcha_backup_host",
+    "captcha_key_configured",
+    "captcha_backup_key_configured",
+  ]);
 
   useEffect(() => {
     api<Record<string, unknown>>("/api/settings/scrape").then((s) => {
       const next: Record<string, string | number | boolean> = {};
       Object.entries(s).forEach(([k, v]) => {
-        if (k === "captcha_key_configured") return;
+        if (skipKeys.has(k)) return;
         next[k] = v as string | number | boolean;
       });
       setForm(next);
@@ -1218,17 +1224,16 @@ export function ScrapeAdminPage() {
 
   async function save(e: FormEvent) {
     e.preventDefault();
-    const body: Record<string, unknown> = { ...form };
-    if (captchaKey.trim()) body.captcha_key = captchaKey.trim();
-    await api("/api/settings/scrape", { method: "PUT", body: JSON.stringify(body) });
+    await api("/api/settings/scrape", { method: "PUT", body: JSON.stringify({ ...form }) });
     setSaved(true);
-    setCaptchaKey("");
   }
 
   return (
     <div className="stack">
       <h1>Scrape settings</h1>
-      <p className="muted">Global defaults. New workers copy these into their worker config; per-worker Settings can override.</p>
+      <p className="muted">
+        Legacy default-profile editor. Prefer Scrape profiles. Captcha solvers are under Admin → Captcha.
+      </p>
       <form className="card" onSubmit={save} style={{ display: "grid", gap: "0.65rem", gridTemplateColumns: "repeat(auto-fit,minmax(200px,1fr))" }}>
         {Object.keys(form).map((k) =>
           boolKeys.has(k) ? (
@@ -1246,10 +1251,6 @@ export function ScrapeAdminPage() {
             </label>
           ),
         )}
-        <label>
-          captcha_key (blank = keep)
-          <input className="input" type="password" value={captchaKey} onChange={(e) => setCaptchaKey(e.target.value)} placeholder="••••••" />
-        </label>
         <button className="btn" type="submit">
           Save
         </button>

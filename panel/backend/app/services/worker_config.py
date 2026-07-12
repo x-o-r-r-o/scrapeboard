@@ -1,9 +1,10 @@
 """Default worker scrape flags and merge helpers.
 
 Precedence when a worker leases a job chunk:
-  1. Assigned scrape profile (or global default profile)
+  1. Assigned scrape profile (or global default profile) — engine, delays, etc.
   2. Per-worker worker_config (Admin → Workers fine-tuning)
   3. Per-job settings (engine/threads/websites/max_results overrides)
+  4. Global captcha settings (Admin → Captcha) always win for captcha_* keys
 
 WorkerNode.max_browsers caps concurrent job *instances* (leases), not threads
 inside a single user instance.
@@ -13,7 +14,14 @@ from __future__ import annotations
 
 from typing import Any
 
+from app.services.captcha_settings import (
+    CAPTCHA_KEYS,
+    apply_captcha_to_settings,
+    resolve_captcha_for_lease,
+)
+
 # Flags that map onto gmaps_scraper argparse / build_args_from_settings
+# (captcha_* are global — see CAPTCHA_KEYS / merge_lease_settings)
 WORKER_SCRAPE_KEYS: tuple[str, ...] = (
     "engine",
     "threads",
@@ -25,13 +33,6 @@ WORKER_SCRAPE_KEYS: tuple[str, ...] = (
     "cooldown_every",
     "cooldown_min",
     "cooldown_max",
-    "captcha_provider",
-    "captcha_key",
-    "captcha_host",
-    "captcha_retries",
-    "captcha_backup_provider",
-    "captcha_backup_key",
-    "captcha_backup_host",
     "nav_timeout",
     "proxy_attempts",
     "headless",
@@ -57,13 +58,6 @@ DEFAULT_WORKER_CONFIG: dict[str, Any] = {
     "cooldown_every": 25,
     "cooldown_min": 25.0,
     "cooldown_max": 60.0,
-    "captcha_provider": "none",
-    "captcha_key": "",
-    "captcha_host": "",
-    "captcha_retries": 2,
-    "captcha_backup_provider": "none",
-    "captcha_backup_key": "",
-    "captcha_backup_host": "",
     "nav_timeout": 45,
     "proxy_attempts": 3,
     "headless": True,
@@ -78,7 +72,7 @@ DEFAULT_WORKER_CONFIG: dict[str, Any] = {
 
 
 def scrape_settings_to_config(scrape: Any | None) -> dict[str, Any]:
-    """Build a worker_config dict from a ScrapeSettings profile row."""
+    """Build a worker_config dict from a ScrapeSettings profile row (no captcha)."""
     out = dict(DEFAULT_WORKER_CONFIG)
     if scrape is None:
         return out
@@ -91,7 +85,7 @@ def scrape_settings_to_config(scrape: Any | None) -> dict[str, Any]:
 
 
 def normalize_worker_config(raw: dict | None) -> dict[str, Any]:
-    """Fill defaults for missing keys; keep only known scrape keys."""
+    """Fill defaults for missing keys; keep only known scrape keys (drops legacy captcha)."""
     base = dict(DEFAULT_WORKER_CONFIG)
     if not raw:
         return base
@@ -99,7 +93,7 @@ def normalize_worker_config(raw: dict | None) -> dict[str, Any]:
         if k not in raw or raw[k] is None:
             continue
         v = raw[k]
-        if k in ("browser_path", "captcha_host", "captcha_backup_host"):
+        if k == "browser_path":
             base[k] = str(v or "")
         else:
             base[k] = v
@@ -112,8 +106,9 @@ def merge_lease_settings(
     worker_config: dict | None,
     job_settings: dict | None,
     max_browsers: int | None = None,
+    captcha: Any | None = None,
 ) -> dict[str, Any]:
-    """Merge profile → worker → job. max_browsers is unused for thread caps."""
+    """Merge profile → worker → job, then inject global captcha."""
     _ = max_browsers  # concurrent instance slots — enforced at lease time
     settings = scrape_settings_to_config(scrape)
     for k, v in (worker_config or {}).items():
@@ -130,33 +125,29 @@ def merge_lease_settings(
     # Empty browser_path → omit so scraper uses engine default
     if not str(settings.get("browser_path") or "").strip():
         settings["browser_path"] = None
+    resolved = resolve_captcha_for_lease(
+        captcha,
+        scrape_fallback=scrape,
+        worker_config_fallback=worker_config,
+    )
+    apply_captcha_to_settings(settings, resolved)
     return settings
 
 
 def public_worker_config(cfg: dict | None) -> dict[str, Any]:
-    """API-safe view: hide captcha keys, expose configured flags."""
-    data = normalize_worker_config(cfg)
-    key = str(data.pop("captcha_key", "") or "")
-    backup = str(data.pop("captcha_backup_key", "") or "")
-    data["captcha_key_configured"] = bool(key.strip())
-    data["captcha_backup_key_configured"] = bool(backup.strip())
-    return data
+    """API-safe view of worker scrape flags (captcha is global, not per-worker)."""
+    return normalize_worker_config(cfg)
 
 
 def apply_worker_config_update(existing: dict | None, patch: dict | None) -> dict[str, Any]:
-    """Merge PATCH into existing worker_config; blank secret keys mean keep."""
+    """Merge PATCH into existing worker_config; ignore captcha / unknown keys."""
     out = normalize_worker_config(existing)
     if not patch:
         return out
     for k, v in patch.items():
-        if k in ("captcha_key_configured", "captcha_backup_key_configured"):
+        if k in CAPTCHA_KEYS or k in SECRET_KEYS or k.endswith("_configured"):
             continue
         if k not in WORKER_SCRAPE_KEYS:
-            continue
-        if k in SECRET_KEYS:
-            if v is None or str(v) == "":
-                continue
-            out[k] = str(v)
             continue
         if v is None:
             continue
@@ -165,7 +156,7 @@ def apply_worker_config_update(existing: dict | None, patch: dict | None) -> dic
 
 
 def copy_profile_fields(src: Any, dest: Any) -> None:
-    """Copy scrape flag fields from one ScrapeSettings-like object to another."""
+    """Copy scrape flag fields from one ScrapeSettings-like object to another (no captcha)."""
     for k in WORKER_SCRAPE_KEYS:
         if hasattr(src, k) and hasattr(dest, k):
             setattr(dest, k, getattr(src, k))

@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import type { FormEvent } from "react";
+import { Link } from "react-router-dom";
 import { api } from "../api";
 
 type Profile = {
@@ -20,13 +21,6 @@ type Profile = {
   cooldown_every: number;
   cooldown_min: number;
   cooldown_max: number;
-  captcha_provider: string;
-  captcha_key_configured: boolean;
-  captcha_host: string;
-  captcha_retries: number;
-  captcha_backup_provider: string;
-  captcha_backup_key_configured: boolean;
-  captcha_backup_host: string;
   nav_timeout: number;
   proxy_attempts: number;
   headless: boolean;
@@ -42,13 +36,8 @@ type Profile = {
 };
 
 const ENGINES = ["chrome", "google-chrome", "edge", "brave", "camoufox"];
-const CAPTCHA = ["none", "2captcha", "captchaai"];
 
-const emptyForm = (): Partial<Profile> & {
-  captcha_key: string;
-  captcha_backup_key: string;
-  apply_to_workers: boolean;
-} => ({
+const emptyForm = (): Partial<Profile> & { apply_to_workers: boolean } => ({
   name: "",
   slug: "",
   description: "",
@@ -65,13 +54,6 @@ const emptyForm = (): Partial<Profile> & {
   cooldown_every: 25,
   cooldown_min: 25,
   cooldown_max: 60,
-  captcha_provider: "none",
-  captcha_key: "",
-  captcha_host: "",
-  captcha_retries: 2,
-  captcha_backup_provider: "none",
-  captcha_backup_key: "",
-  captcha_backup_host: "",
   nav_timeout: 45,
   proxy_attempts: 3,
   headless: true,
@@ -109,8 +91,6 @@ export function ScrapeAdminPage() {
     setSelectedId(p.id);
     setForm({
       ...p,
-      captcha_key: "",
-      captcha_backup_key: "",
       apply_to_workers: false,
     });
     setMsg("");
@@ -133,7 +113,6 @@ export function ScrapeAdminPage() {
             is_active: form.is_active,
           }),
         });
-        // immediately patch flags
         await api(`/api/scrape-profiles/${created.id}`, {
           method: "PATCH",
           body: JSON.stringify(buildPatch(form)),
@@ -163,7 +142,8 @@ export function ScrapeAdminPage() {
         <div>
           <h1>Scrape profiles</h1>
           <p className="subtitle">
-            Multiple scrape settings with primary + backup captcha. Assign profiles to workers and subscription packages.
+            Browser, pacing, and scrape flags per package or worker. Captcha solvers are configured once under{" "}
+            <Link to="/app/admin/captcha">Captcha</Link>.
           </p>
         </div>
         <div className="page-actions">
@@ -202,8 +182,7 @@ export function ScrapeAdminPage() {
                   <span className={`badge ${p.is_active ? "ok" : "danger"}`}>{p.is_active ? "on" : "off"}</span>
                 </div>
                 <div className="muted" style={{ fontSize: "0.8rem" }}>
-                  {p.engine} · {p.threads} threads · captcha {p.captcha_provider}
-                  {p.captcha_backup_provider !== "none" ? ` / ${p.captcha_backup_provider}` : ""}
+                  {p.engine} · {p.threads} threads
                   <br />
                   {p.worker_count} workers · {p.package_count} packages
                 </div>
@@ -320,73 +299,6 @@ export function ScrapeAdminPage() {
                 </label>
               </div>
 
-              <h4 style={{ margin: "0.25rem 0 0" }}>Captcha — primary & backup</h4>
-              <p className="muted" style={{ margin: 0 }}>
-                If both are configured, backup is used when primary fails. A single configured provider is used alone.
-              </p>
-              <div className="form-grid two">
-                <label className="field">
-                  Primary provider
-                  <select className="input" value={form.captcha_provider} onChange={(e) => setForm({ ...form, captcha_provider: e.target.value })}>
-                    {CAPTCHA.map((x) => (
-                      <option key={x} value={x}>
-                        {x}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-                <label className="field">
-                  Primary API key {form.captcha_key_configured ? <span className="badge ok">set</span> : null}
-                  <input
-                    className="input"
-                    type="password"
-                    value={form.captcha_key || ""}
-                    onChange={(e) => setForm({ ...form, captcha_key: e.target.value })}
-                    placeholder="blank = keep"
-                  />
-                </label>
-                <label className="field">
-                  Primary host override
-                  <input className="input" value={form.captcha_host || ""} onChange={(e) => setForm({ ...form, captcha_host: e.target.value })} />
-                </label>
-                <label className="field">
-                  Captcha retries
-                  <input className="input" type="number" value={form.captcha_retries} onChange={(e) => setForm({ ...form, captcha_retries: Number(e.target.value) })} />
-                </label>
-                <label className="field">
-                  Backup provider
-                  <select
-                    className="input"
-                    value={form.captcha_backup_provider}
-                    onChange={(e) => setForm({ ...form, captcha_backup_provider: e.target.value })}
-                  >
-                    {CAPTCHA.map((x) => (
-                      <option key={x} value={x}>
-                        {x}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-                <label className="field">
-                  Backup API key {form.captcha_backup_key_configured ? <span className="badge ok">set</span> : null}
-                  <input
-                    className="input"
-                    type="password"
-                    value={form.captcha_backup_key || ""}
-                    onChange={(e) => setForm({ ...form, captcha_backup_key: e.target.value })}
-                    placeholder="blank = keep"
-                  />
-                </label>
-                <label className="field">
-                  Backup host override
-                  <input
-                    className="input"
-                    value={form.captcha_backup_host || ""}
-                    onChange={(e) => setForm({ ...form, captcha_backup_host: e.target.value })}
-                  />
-                </label>
-              </div>
-
               <h4 style={{ margin: "0.25rem 0 0" }}>Flags</h4>
               <div style={{ display: "flex", flexWrap: "wrap", gap: "0.85rem" }}>
                 {(
@@ -437,7 +349,7 @@ export function ScrapeAdminPage() {
           ) : (
             <div className="empty-state">
               <h3>Select a profile</h3>
-              <p className="muted">Manage engines, delays, and captcha providers per package or worker.</p>
+              <p className="muted">Manage engines, delays, and scrape flags per package or worker.</p>
             </div>
           )}
         </div>
@@ -447,7 +359,7 @@ export function ScrapeAdminPage() {
 }
 
 function buildPatch(form: ReturnType<typeof emptyForm>) {
-  const body: Record<string, unknown> = {
+  return {
     name: form.name,
     slug: form.slug || undefined,
     description: form.description,
@@ -464,11 +376,6 @@ function buildPatch(form: ReturnType<typeof emptyForm>) {
     cooldown_every: form.cooldown_every,
     cooldown_min: form.cooldown_min,
     cooldown_max: form.cooldown_max,
-    captcha_provider: form.captcha_provider,
-    captcha_host: form.captcha_host,
-    captcha_retries: form.captcha_retries,
-    captcha_backup_provider: form.captcha_backup_provider,
-    captcha_backup_host: form.captcha_backup_host,
     nav_timeout: form.nav_timeout,
     proxy_attempts: form.proxy_attempts,
     headless: form.headless,
@@ -481,7 +388,4 @@ function buildPatch(form: ReturnType<typeof emptyForm>) {
     debug: form.debug,
     apply_to_workers: form.apply_to_workers,
   };
-  if (form.captcha_key) body.captcha_key = form.captcha_key;
-  if (form.captcha_backup_key) body.captcha_backup_key = form.captcha_backup_key;
-  return body;
 }

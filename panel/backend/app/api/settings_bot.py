@@ -15,10 +15,13 @@ from app.schemas import (
     BotWorkflowCreate,
     BotWorkflowOut,
     BotWorkflowUpdate,
+    CaptchaSettingsOut,
+    CaptchaSettingsUpdate,
     MessageOut,
     SecuritySettingsOut,
     SecuritySettingsUpdate,
 )
+from app.services.captcha_settings import get_captcha_settings
 
 router = APIRouter(tags=["settings-bot"])
 
@@ -27,6 +30,18 @@ def _slugify_key(raw: str) -> str:
     key = "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in (raw or "").strip().lower())
     key = key.strip("_-")[:64]
     return key or "workflow"
+
+
+def _captcha_out(row) -> CaptchaSettingsOut:
+    return CaptchaSettingsOut(
+        captcha_provider=row.captcha_provider or "none",
+        captcha_key_configured=bool((row.captcha_key or "").strip()),
+        captcha_host=row.captcha_host or "",
+        captcha_retries=int(row.captcha_retries or 2),
+        captcha_backup_provider=row.captcha_backup_provider or "none",
+        captcha_backup_key_configured=bool((row.captcha_backup_key or "").strip()),
+        captcha_backup_host=row.captcha_backup_host or "",
+    )
 
 
 @router.get("/settings/security", response_model=SecuritySettingsOut)
@@ -58,6 +73,39 @@ async def update_security(
         setattr(sec, k, v)
     await db.commit()
     return await get_security(_, __, db)
+
+
+@router.get("/settings/captcha", response_model=CaptchaSettingsOut)
+async def get_captcha(_: User = Depends(require_admin), __: User = Depends(require_ready_user), db: AsyncSession = Depends(get_db)):
+    row = await get_captcha_settings(db)
+    return _captcha_out(row)
+
+
+@router.put("/settings/captcha", response_model=CaptchaSettingsOut)
+async def update_captcha(
+    body: CaptchaSettingsUpdate,
+    _: User = Depends(require_admin),
+    __: User = Depends(require_ready_user),
+    db: AsyncSession = Depends(get_db),
+):
+    row = await get_captcha_settings(db)
+    data = body.model_dump(exclude_unset=True)
+    for secret in ("captcha_key", "captcha_backup_key"):
+        if secret in data and (data[secret] is None or str(data[secret]) == ""):
+            data.pop(secret)
+    allowed = {
+        "none",
+        "2captcha",
+        "captchaai",
+    }
+    for provider_key in ("captcha_provider", "captcha_backup_provider"):
+        if provider_key in data and data[provider_key] not in allowed:
+            data[provider_key] = "none"
+    for k, v in data.items():
+        setattr(row, k, v)
+    await db.commit()
+    await db.refresh(row)
+    return _captcha_out(row)
 
 
 @router.get("/bot/settings", response_model=BotSettingsOut)

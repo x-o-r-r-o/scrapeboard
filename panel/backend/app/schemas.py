@@ -96,6 +96,26 @@ class SecuritySettingsUpdate(BaseModel):
     lockout_minutes: int | None = None
 
 
+class CaptchaSettingsOut(BaseModel):
+    captcha_provider: str
+    captcha_key_configured: bool
+    captcha_host: str
+    captcha_retries: int
+    captcha_backup_provider: str = "none"
+    captcha_backup_key_configured: bool = False
+    captcha_backup_host: str = ""
+
+
+class CaptchaSettingsUpdate(BaseModel):
+    captcha_provider: str | None = None
+    captcha_key: str | None = None
+    captcha_host: str | None = None
+    captcha_retries: int | None = None
+    captcha_backup_provider: str | None = None
+    captcha_backup_key: str | None = None
+    captcha_backup_host: str | None = None
+
+
 class PackageOut(BaseModel):
     id: int
     slug: str
@@ -299,7 +319,10 @@ class ProxyPoolAssign(BaseModel):
 
 
 class WorkerConfigUpdate(BaseModel):
-    """Per-worker scrape flags. Omitted/null fields are left unchanged on PATCH."""
+    """Per-worker scrape flags. Omitted/null fields are left unchanged on PATCH.
+
+    Captcha is global (Admin → Captcha); not accepted per worker.
+    """
 
     engine: str | None = None
     threads: int | None = None
@@ -311,13 +334,6 @@ class WorkerConfigUpdate(BaseModel):
     cooldown_every: int | None = None
     cooldown_min: float | None = None
     cooldown_max: float | None = None
-    captcha_provider: str | None = None
-    captcha_key: str | None = None
-    captcha_host: str | None = None
-    captcha_retries: int | None = None
-    captcha_backup_provider: str | None = None
-    captcha_backup_key: str | None = None
-    captcha_backup_host: str | None = None
     nav_timeout: int | None = None
     proxy_attempts: int | None = None
     headless: bool | None = None
@@ -408,13 +424,6 @@ class ScrapeSettingsOut(BaseModel):
     cooldown_every: int
     cooldown_min: float
     cooldown_max: float
-    captcha_provider: str
-    captcha_key_configured: bool
-    captcha_host: str
-    captcha_retries: int
-    captcha_backup_provider: str = "none"
-    captcha_backup_key_configured: bool = False
-    captcha_backup_host: str = ""
     nav_timeout: int
     proxy_attempts: int
     headless: bool = True
@@ -439,6 +448,8 @@ class ScrapeSettingsCreate(BaseModel):
 
 
 class ScrapeSettingsUpdate(BaseModel):
+    """Profile scrape flags. Captcha is global (Admin → Captcha); not accepted here."""
+
     name: str | None = None
     slug: str | None = None
     description: str | None = None
@@ -455,13 +466,6 @@ class ScrapeSettingsUpdate(BaseModel):
     cooldown_every: int | None = None
     cooldown_min: float | None = None
     cooldown_max: float | None = None
-    captcha_provider: str | None = None
-    captcha_key: str | None = None
-    captcha_host: str | None = None
-    captcha_retries: int | None = None
-    captcha_backup_provider: str | None = None
-    captcha_backup_key: str | None = None
-    captcha_backup_host: str | None = None
     nav_timeout: int | None = None
     proxy_attempts: int | None = None
     headless: bool | None = None

@@ -63,6 +63,38 @@ ensure_bun() {
   install -m 755 /root/.bun/bin/bun /usr/local/bin/bun
 }
 
+# Panel servers never need the scrape worker runtime (separate hosts).
+# Sparse-checkout keeps worker/ out of the tree on every pull; rm is a safety net
+# for rsync uploads or older full clones.
+
+enable_panel_sparse_checkout() {
+  # Durable: exclude worker/ from the panel checkout (safe on re-update).
+  [[ -d "$APP_DIR/.git" ]] || return 0
+  echo "==> Panel sparse-checkout (exclude worker/)..."
+  if ! sudo -u "${SITE_USER}" git -C "$APP_DIR" sparse-checkout init --no-cone 2>/dev/null; then
+    echo "    (warn) sparse-checkout unavailable; will remove worker/ after sync"
+    return 0
+  fi
+  if sudo -u "${SITE_USER}" git -C "$APP_DIR" sparse-checkout set --no-cone '/*' '!/worker/' 2>/dev/null; then
+    return 0
+  fi
+  # Fallback for older git: write patterns file then reapply
+  {
+    echo '/*'
+    echo '!/worker/'
+  } | sudo -u "${SITE_USER}" tee "${APP_DIR}/.git/info/sparse-checkout" >/dev/null
+  sudo -u "${SITE_USER}" git -C "$APP_DIR" sparse-checkout reapply 2>/dev/null \
+    || sudo -u "${SITE_USER}" git -C "$APP_DIR" read-tree -mu HEAD 2>/dev/null \
+    || true
+}
+
+ensure_no_worker_on_panel() {
+  if [[ -e "${APP_DIR}/worker" ]]; then
+    echo "==> Removing ${APP_DIR}/worker (panel deploy is panel-only; install workers on scrape hosts)"
+    rm -rf "${APP_DIR}/worker"
+  fi
+}
+
 sync_repo() {
   echo "==> App directory: $APP_DIR"
   mkdir -p "$(dirname "$APP_DIR")"
@@ -74,8 +106,12 @@ sync_repo() {
 
   if [[ -n "$REPO_URL" ]]; then
     if [[ ! -d "$APP_DIR/.git" ]]; then
-      sudo -u "${SITE_USER}" git clone "$REPO_URL" "$APP_DIR"
+      # Clone without checking out, then sparse-checkout so worker/ never lands on the panel host
+      sudo -u "${SITE_USER}" git clone --no-checkout "$REPO_URL" "$APP_DIR"
+      enable_panel_sparse_checkout
+      sudo -u "${SITE_USER}" git -C "$APP_DIR" checkout
     else
+      enable_panel_sparse_checkout
       sudo -u "${SITE_USER}" git -C "$APP_DIR" pull --ff-only
     fi
   else
@@ -85,6 +121,7 @@ sync_repo() {
       exit 1
     fi
   fi
+  ensure_no_worker_on_panel
   chown -R "${SITE_USER}:${SITE_USER}" "$(dirname "$APP_DIR")"
 }
 
@@ -289,7 +326,7 @@ print_done() {
  URL:      https://${DOMAIN}
  API:      127.0.0.1:${API_PORT}  (systemd: ${SERVICE_NAME})
  App dir:  ${APP_DIR}
- Workers:  python agent.py --panel-url https://${DOMAIN} --token TOKEN
+ Workers:  install from repo worker/ on scrape hosts (not on this panel server)
 
  Manage:
    systemctl status ${SERVICE_NAME}

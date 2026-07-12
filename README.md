@@ -136,7 +136,8 @@ scrapeboard/
 - Worker enrollment tokens, online CPU/RAM, drain/disable  
 - Jobs: upload keywords/locations, queue, progress, stop, download ZIP  
 - Users only see **their own** jobs and stats  
-- Scrape defaults + captcha keys (admin)  
+- Scrape defaults (admin)  
+- Global captcha solvers primary + backup (admin)  
 - Telegram Bot Builder + demo workflows  
 
 ### Telegram
@@ -215,7 +216,7 @@ Then open **https://scrape.cvmso.com** → sign in → change password → enabl
 | Logs | `journalctl -u scrapeboard -f` |
 | Restart | `systemctl restart scrapeboard` |
 | Stop | `systemctl stop scrapeboard` |
-| Update | `sudo -u cvmso git pull --ff-only` then `bash deploy/hestiacp/update.sh` |
+| Update | `bash deploy/hestiacp/update.sh` (pulls with sparse-checkout; excludes `worker/`) |
 
 Telegram bot runs **inside the panel API process** (no separate bot service). Full steps: [`deploy/hestiacp/README.md`](deploy/hestiacp/README.md).
 
@@ -422,10 +423,10 @@ Assign a pool to each worker.
 ### 5. Workers (Admin → Workers)
 
 1. Create worker → set max browsers + optional proxy pool → **copy token once**  
-2. Click **Settings** to edit per-worker scrape flags (engine, threads, delays, headless, captcha, …)  
-3. New workers copy **global Scrape settings** into their `worker_config`; you can override per machine  
+2. Click **Settings** to edit per-worker scrape flags (engine, threads, delays, headless, …)  
+3. New workers copy **scrape profile** flags into their `worker_config`; you can override per machine  
 4. Flags are sent in every lease and synced into the agent’s local `worker_config.json` (`scrape` key) on heartbeat  
-5. Threads are capped by **max browsers**  
+5. Captcha solvers come from **Admin → Captcha** (global), not per worker/profile  
 6. Optional: drain / disable / rotate token  
 
 Install hint (panel shows this when creating a worker):
@@ -439,9 +440,10 @@ python agent.py --panel-url https://scrape.cvmso.com --token TOKEN
 #   Windows:     install_service.bat
 ```
 
-### 6. Scrape settings (Admin → Scrape settings)
+### 6. Scrape profiles & Captcha (Admin)
 
-Global defaults sent inside job leases: engine, threads, delays, captcha provider/key, chunk size, etc.
+- **Scrape profiles** — engine, threads, delays, chunk size, headless, etc. Assign to workers and packages.  
+- **Captcha** — global primary + backup solvers (2captcha / CaptchaAI). Applied to all job leases.  
 
 ### 7. Bot Builder (Admin → Bot builder)
 
@@ -665,7 +667,9 @@ GET  /api/health
 /api/billing/*
 /api/proxy-pools
 /api/workers
+/api/scrape-profiles
 /api/settings/scrape
+/api/settings/captcha
 /api/settings/security
 /api/bot/settings
 /api/bot/commands

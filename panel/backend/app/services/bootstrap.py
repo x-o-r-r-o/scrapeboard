@@ -13,6 +13,7 @@ from app.models import (
     User,
 )
 from app.bot.demos import DEMO_COMMANDS, DEMO_WORKFLOWS
+from app.services.captcha_settings import ensure_captcha_settings
 from app.services.scrape_profiles import clone_profile, ensure_default_profile, ensure_workers_have_default_profile
 
 
@@ -25,6 +26,7 @@ async def bootstrap(db: AsyncSession) -> None:
         db.add(BillingSettings(id=1))
     await db.flush()
     default_profile = await ensure_default_profile(db)
+    await ensure_captcha_settings(db)
     if not await db.get(BotSettings, 1):
         db.add(BotSettings(id=1))
 

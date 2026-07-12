@@ -100,6 +100,14 @@ def save_config(cfg: dict) -> None:
     print(f"[setup] saved {p}", flush=True)
 
 
+def _prompt_yes_no(prompt_fn, question: str, default: bool = False) -> bool:
+    hint = "Y/n" if default else "y/N"
+    raw = (prompt_fn(f"{question} [{hint}]: ") or "").strip().lower()
+    if not raw:
+        return default
+    return raw in ("y", "yes", "1", "true")
+
+
 def run_setup_wizard(prompt=input) -> dict:
     print("=" * 62, flush=True)
     print(" Scrapeboard Worker — first-run setup", flush=True)
@@ -122,6 +130,17 @@ def run_setup_wizard(prompt=input) -> dict:
 
     work = (prompt("Work directory [auto temp]: ") or "").strip()
 
+    # Optional Tailscale (default off). Detect existing install for operator awareness.
+    ts_present = bool(tailscale_cli_path())
+    print(flush=True)
+    print("Optional Tailscale (mesh VPN — useful for private reachability; not required).", flush=True)
+    if ts_present:
+        print(f"  Detected Tailscale CLI: {tailscale_cli_path()}", flush=True)
+        ts_q = "Enable Tailscale for this worker? (already installed)"
+    else:
+        ts_q = "Install/enable Tailscale on this machine?"
+    tailscale_enabled = _prompt_yes_no(prompt, ts_q, default=False)
+
     cfg = {
         "panel_url": panel_url,
         "token": token,
@@ -130,9 +149,13 @@ def run_setup_wizard(prompt=input) -> dict:
         "work_dir": work,
         "skip_setup": False,
         "max_browsers": 2,
+        "tailscale_enabled": bool(tailscale_enabled),
         "scrape": {},  # filled from panel worker settings on heartbeat
     }
     save_config(cfg)
+
+    if cfg["tailscale_enabled"]:
+        ensure_tailscale(interactive=True)
 
     print(flush=True)
     print("Next: dependencies + browser will auto-install on first job / --selftest.", flush=True)
@@ -141,8 +164,220 @@ def run_setup_wizard(prompt=input) -> dict:
         print("Background service:   install_service.bat", flush=True)
     else:
         print("Background service:   bash install_service.sh", flush=True)
+    print("Toggle Tailscale later: set \"tailscale_enabled\": true|false in worker_config.json", flush=True)
     print("=" * 62, flush=True)
     return cfg
+
+
+# ---------------------------------------------------------------------------
+# Optional Tailscale (best-effort; never required for the lease loop)
+# ---------------------------------------------------------------------------
+
+def tailscale_cli_path() -> str | None:
+    """Return path to tailscale CLI if found on PATH or common install locations."""
+    import shutil
+
+    found = shutil.which("tailscale")
+    if found:
+        return found
+    candidates = []
+    if HOST_OS == "Darwin":
+        candidates = [
+            "/Applications/Tailscale.app/Contents/MacOS/Tailscale",
+            "/usr/local/bin/tailscale",
+            "/opt/homebrew/bin/tailscale",
+        ]
+    elif HOST_OS == "Windows":
+        candidates = [
+            r"C:\Program Files\Tailscale\tailscale.exe",
+            r"C:\Program Files (x86)\Tailscale\tailscale.exe",
+        ]
+    else:
+        candidates = ["/usr/bin/tailscale", "/usr/local/bin/tailscale"]
+    for p in candidates:
+        if os.path.isfile(p):
+            return p
+    return None
+
+
+def _run_cmd(cmd: list[str], *, check: bool = False, timeout: int = 120) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        cmd,
+        check=check,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+    )
+
+
+def tailscale_status_summary(cli: str | None = None) -> tuple[bool, str]:
+    """
+    Return (ok, message). ok means Tailscale appears logged-in / connected.
+    Non-fatal helper — callers must not abort the worker on False.
+    """
+    cli = cli or tailscale_cli_path()
+    if not cli:
+        return False, "Tailscale CLI not found"
+    try:
+        # Prefer JSON when available
+        r = _run_cmd([cli, "status", "--json"], timeout=15)
+        if r.returncode == 0 and r.stdout.strip().startswith("{"):
+            try:
+                data = json.loads(r.stdout)
+                backend = (data.get("BackendState") or "").strip()
+                self_info = data.get("Self") or {}
+                dns = self_info.get("DNSName") or self_info.get("HostName") or ""
+                ips = self_info.get("TailscaleIPs") or []
+                ip0 = ips[0] if ips else ""
+                if backend.lower() in ("running",):
+                    detail = " ".join(x for x in (backend, ip0, dns) if x).strip()
+                    return True, detail or "running"
+                return False, backend or "not running"
+            except json.JSONDecodeError:
+                pass
+        r2 = _run_cmd([cli, "status"], timeout=15)
+        out = (r2.stdout or r2.stderr or "").strip()
+        if r2.returncode == 0 and out and "Logged out" not in out:
+            first = out.splitlines()[0][:120]
+            return True, first
+        if "Logged out" in out or "needs login" in out.lower():
+            return False, "logged out — run: tailscale up"
+        return False, (out.splitlines()[0] if out else f"exit {r2.returncode}")[:120]
+    except Exception as e:
+        return False, f"status check failed: {e}"
+
+
+def _print_tailscale_manual_hints() -> None:
+    print("[tailscale] Manual install / login (admin/sudo may be required):", flush=True)
+    if HOST_OS == "Linux":
+        print("  curl -fsSL https://tailscale.com/install.sh | sh", flush=True)
+        print("  sudo systemctl enable --now tailscaled", flush=True)
+        print("  sudo tailscale up", flush=True)
+    elif HOST_OS == "Darwin":
+        print("  brew install --cask tailscale   # or install from https://tailscale.com/download", flush=True)
+        print("  open -a Tailscale               # then Sign in from the menu bar", flush=True)
+        print("  # or:  /Applications/Tailscale.app/Contents/MacOS/Tailscale up", flush=True)
+    elif HOST_OS == "Windows":
+        print("  winget install Tailscale.Tailscale", flush=True)
+        print("  # or: https://tailscale.com/download/windows", flush=True)
+        print("  tailscale up", flush=True)
+    else:
+        print("  See https://tailscale.com/download", flush=True)
+    print("  Interactive browser login is usually required once.", flush=True)
+
+
+def ensure_tailscale(*, interactive: bool = False, allow_install: bool | None = None) -> None:
+    """
+    Best-effort: detect or install Tailscale and remind about `tailscale up`.
+    Never raises — worker must keep working without Tailscale.
+
+    allow_install: defaults to True only when interactive (wizard). Service start
+    should check/remind only so every restart does not re-run package managers.
+    """
+    if allow_install is None:
+        allow_install = bool(interactive)
+
+    cli = tailscale_cli_path()
+    if cli:
+        ok, msg = tailscale_status_summary(cli)
+        if ok:
+            print(f"[tailscale] OK — {msg}", flush=True)
+            return
+        print(f"[tailscale] installed but not ready: {msg}", flush=True)
+        print("[tailscale] Run `tailscale up` (may open a browser / need admin) then restart the worker.", flush=True)
+        if interactive:
+            _print_tailscale_manual_hints()
+        return
+
+    print("[tailscale] CLI not found.", flush=True)
+    if not allow_install:
+        print("[tailscale] Skipping auto-install (service/start check). Commands:", flush=True)
+        _print_tailscale_manual_hints()
+        return
+
+    print("[tailscale] Attempting best-effort install…", flush=True)
+    installed = False
+    try:
+        if HOST_OS == "Linux":
+            # Official install script; needs root for packages + tailscaled.
+            script = "curl -fsSL https://tailscale.com/install.sh | sh"
+            print(f"[tailscale] running: {script}", flush=True)
+            r = _run_cmd(["bash", "-lc", script], timeout=300)
+            if r.returncode != 0:
+                print((r.stderr or r.stdout or "")[:400], flush=True)
+                print("[tailscale] install failed (often needs sudo). Commands:", flush=True)
+                _print_tailscale_manual_hints()
+            else:
+                installed = True
+                _run_cmd(["bash", "-lc", "systemctl enable --now tailscaled 2>/dev/null || sudo systemctl enable --now tailscaled"], timeout=60)
+        elif HOST_OS == "Darwin":
+            brew = None
+            import shutil
+
+            brew = shutil.which("brew")
+            if brew:
+                print("[tailscale] brew install --cask tailscale …", flush=True)
+                r = _run_cmd([brew, "install", "--cask", "tailscale"], timeout=600)
+                if r.returncode == 0:
+                    installed = True
+                else:
+                    print((r.stderr or r.stdout or "")[:400], flush=True)
+            if not installed:
+                print("[tailscale] Install the macOS app (Homebrew cask or download), then Sign in.", flush=True)
+                _print_tailscale_manual_hints()
+        elif HOST_OS == "Windows":
+            import shutil
+
+            winget = shutil.which("winget")
+            if winget:
+                print("[tailscale] winget install Tailscale.Tailscale …", flush=True)
+                r = _run_cmd(
+                    [winget, "install", "-e", "--id", "Tailscale.Tailscale", "--accept-package-agreements", "--accept-source-agreements"],
+                    timeout=600,
+                )
+                if r.returncode == 0:
+                    installed = True
+                else:
+                    print((r.stderr or r.stdout or "")[:400], flush=True)
+            if not installed:
+                print("[tailscale] Install from winget or https://tailscale.com/download/windows", flush=True)
+                _print_tailscale_manual_hints()
+        else:
+            _print_tailscale_manual_hints()
+    except Exception as e:
+        print(f"[tailscale] install attempt error: {e}", flush=True)
+        _print_tailscale_manual_hints()
+
+    cli = tailscale_cli_path()
+    if cli:
+        print(f"[tailscale] CLI available: {cli}", flush=True)
+        print("[tailscale] Complete login with:  tailscale up   (interactive; admin may be required)", flush=True)
+        # Do not run `tailscale up` non-interactively — it needs browser auth.
+        ok, msg = tailscale_status_summary(cli)
+        if ok:
+            print(f"[tailscale] OK — {msg}", flush=True)
+        else:
+            print(f"[tailscale] status: {msg}", flush=True)
+    elif installed:
+        print("[tailscale] Install finished but CLI not on PATH yet — open a new shell or reboot, then `tailscale up`.", flush=True)
+    if interactive and not (cli and tailscale_status_summary(cli)[0]):
+        print("[tailscale] Worker will continue without Tailscale until you finish login.", flush=True)
+
+
+def remind_tailscale_if_enabled(cfg: dict | None) -> None:
+    """On agent start: if config asks for Tailscale, check status (non-fatal)."""
+    if not cfg:
+        return
+    enabled = cfg.get("tailscale_enabled")
+    if enabled is None:
+        enabled = cfg.get("tailscale")  # alias
+    if not enabled:
+        return
+    print("[tailscale] enabled in worker_config.json — checking…", flush=True)
+    try:
+        ensure_tailscale(interactive=False)
+    except Exception as e:
+        print(f"[tailscale] check skipped: {e}", flush=True)
 
 
 def _host_stats():
@@ -518,6 +753,16 @@ def main(argv=None) -> int:
         setup_service_logging(log_path)
     if args.service:
         print(f"[worker] service mode ({SERVICE_NAME})", flush=True)
+
+    # Optional Tailscale: remind/check only — never block the lease loop
+    try:
+        cfg_ts = load_config()
+        if cfg_ts is None and Path(rt["config_path"]).exists():
+            with open(rt["config_path"], encoding="utf-8") as f:
+                cfg_ts = json.load(f)
+        remind_tailscale_if_enabled(cfg_ts)
+    except Exception as e:
+        print(f"[tailscale] config check skipped: {e}", flush=True)
 
     import gmaps_scraper as gs
 

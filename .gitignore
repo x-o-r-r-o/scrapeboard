@@ -1,4 +1,8 @@
 # Scrapeboard — git ignore
+#
+# Local full-repo clones keep worker/ for development. Production panel
+# deploys (deploy/hestiacp) use sparse-checkout / post-sync removal so
+# worker/ is never installed on the control-panel host.
 
 .DS_Store
 .env

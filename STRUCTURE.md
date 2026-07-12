@@ -6,8 +6,8 @@
 | [`worker/`](worker/) | Worker-only scrape agent (Windows / macOS / Linux) — [README](worker/README.md) |
 | [`deploy/`](deploy/) | HestiaCP production install (OpsBoard-style) — [README](deploy/hestiacp/README.md) |
 
-**Production:** deploy Scrapeboard once on HestiaCP (`scrape.cvmso.com`, systemd, port **3010**).
+**Production:** deploy Scrapeboard once on HestiaCP (`scrape.cvmso.com`, systemd, port **3010**). Panel install/update **exclude `worker/`** (sparse-checkout); scrape agents are installed separately on worker hosts.
 
-**Workers:** `setup_and_run.*` → wizard → **`install_service.*`** (default background service) → panel URL `https://scrape.cvmso.com`.
+**Workers:** `setup_and_run.*` → wizard → **`install_service.*`** (default background service) → panel URL `https://scrape.cvmso.com`. Optional Tailscale via wizard / `tailscale_enabled` in `worker_config.json` (default off).
 
 **Run everything:** [README.md → Run by default](README.md#run-by-default).

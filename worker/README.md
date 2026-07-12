@@ -60,10 +60,43 @@ python agent.py                # first run → wizard
 2. **Worker token** — from Admin → Workers (shown once)  
 3. **Worker name** — hostname by default  
 4. **Default engine** — e.g. `chrome`, `brave`, `camoufox` (selftest + first bootstrap)  
+5. **Optional Tailscale** — default **off** (or on if Tailscale is already detected); see below  
 
 Config file: **`worker_config.json`** (gitignored — contains the token).
 
-On each heartbeat the panel pushes effective **worker settings** into this file under `scrape` (engine, threads, delays, headless, captcha, …). Job leases include the same merged settings so scrapes match **Admin → Workers**.
+On each heartbeat the panel pushes effective **worker settings** into this file under `scrape` (engine, threads, delays, headless, captcha from global Admin → Captcha, …). Job leases include the same merged settings so scrapes match the panel.
+
+---
+
+## Optional Tailscale
+
+Tailscale is **not required**. Workers only need outbound HTTPS to the panel. Enable it when you want a private mesh (admin SSH, multi-host debugging, etc.).
+
+| | |
+|--|--|
+| Config key | `"tailscale_enabled": true` (alias: `"tailscale": true`) |
+| Default | `false` |
+| Wizard | Asks during `python agent.py --setup` / `setup_and_run.*`; detects an existing CLI |
+| Toggle later | Edit `worker_config.json`, then restart the agent/service |
+| On start | If enabled, the agent **checks status** only (no package install on every restart). Missing or logged-out Tailscale is a **warning only** — the lease loop continues |
+| Wizard install | Best-effort package install when you answer yes during `--setup` |
+
+### Best-effort install / enable
+
+| OS | What the agent tries | Manual commands |
+|----|----------------------|-----------------|
+| **Linux** | Official `install.sh`; `systemctl enable --now tailscaled` | `curl -fsSL https://tailscale.com/install.sh \| sh` then `sudo tailscale up` |
+| **macOS** | `brew install --cask tailscale` when Homebrew exists | Install from [tailscale.com/download](https://tailscale.com/download) or Homebrew; open **Tailscale** app → Sign in; or `tailscale up` |
+| **Windows** | `winget install Tailscale.Tailscale` | Or installer from [tailscale.com/download/windows](https://tailscale.com/download/windows); then `tailscale up` |
+
+**Gap:** `tailscale up` normally needs an **interactive browser login** (and often sudo/admin). The agent never blocks on that — finish login yourself, then restart the worker if you want a clean status line.
+
+```bash
+# After enabling in config:
+python agent.py --setup          # re-run wizard, or edit worker_config.json
+# Confirm:
+tailscale status
+```
 
 ---
 
@@ -284,6 +317,7 @@ Full engine docs: [`SCRAPER.md`](SCRAPER.md).
 | Playwright deps (Linux) | `python -m playwright install-deps chromium` (may need sudo) |
 | Gatekeeper (macOS) | Right-click `setup_and_run.command` → Open |
 | Service not starting | Check `logs/worker.log`; confirm `worker_config.json` exists; re-run `install_service.*` |
+| Tailscale warning | Optional — set `"tailscale_enabled": false` or finish `tailscale up` / Sign in |
 | Want clean reinstall | Delete `.venv`, `worker_config.json`, re-run setup script |
 
 ---
