@@ -122,12 +122,26 @@ def _migrate_sqlite(sync_conn) -> None:
                 "usdt_bep20_contract",
                 "VARCHAR(128) DEFAULT '0x55d398326f99059fF775485246999027B3197955'",
             ),
-            ("usdt_bep20_api_base", "VARCHAR(255) DEFAULT 'https://api.bscscan.com/api'"),
+            ("usdt_bep20_api_base", "VARCHAR(255) DEFAULT 'https://api.etherscan.io/v2/api'"),
             ("usdt_bep20_api_key", "VARCHAR(255) DEFAULT ''"),
             ("usdt_bep20_rpc_url", "VARCHAR(255) DEFAULT 'https://bsc-dataseed.binance.org/'"),
         ):
             if col not in billing:
                 sync_conn.execute(text(f"ALTER TABLE billing_settings ADD COLUMN {col} {decl}"))
+        # Migrate legacy BscScan explorer base → Etherscan API V2 (BSC via chainid=56 at runtime)
+        cols_after = _sqlite_columns(sync_conn, "billing_settings")
+        if "usdt_bep20_api_base" in cols_after:
+            sync_conn.execute(
+                text(
+                    "UPDATE billing_settings SET usdt_bep20_api_base = :new "
+                    "WHERE usdt_bep20_api_base IS NULL OR TRIM(usdt_bep20_api_base) = '' "
+                    "OR LOWER(TRIM(usdt_bep20_api_base)) IN ("
+                    "'https://api.bscscan.com/api', 'http://api.bscscan.com/api', "
+                    "'https://api.bscscan.com/api/', 'http://api.bscscan.com/api/'"
+                    ")"
+                ),
+                {"new": "https://api.etherscan.io/v2/api"},
+            )
 
 
 async def init_db() -> None:

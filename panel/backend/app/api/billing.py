@@ -230,7 +230,7 @@ async def get_billing_settings(
         usdt_bep20_wallet=getattr(b, "usdt_bep20_wallet", "") or "",
         usdt_bep20_contract=getattr(b, "usdt_bep20_contract", None)
         or "0x55d398326f99059fF775485246999027B3197955",
-        usdt_bep20_api_base=getattr(b, "usdt_bep20_api_base", None) or "https://api.bscscan.com/api",
+        usdt_bep20_api_base=billing_svc.resolve_bep20_api_base(getattr(b, "usdt_bep20_api_base", None)),
         usdt_bep20_api_key_configured=bool(getattr(b, "usdt_bep20_api_key", "") or ""),
         usdt_bep20_rpc_url=getattr(b, "usdt_bep20_rpc_url", None) or "https://bsc-dataseed.binance.org/",
         manual_enabled=b.manual_enabled,
@@ -265,7 +265,10 @@ async def update_billing_settings(
     db: AsyncSession = Depends(get_db),
 ):
     b = await _billing(db)
-    for k, v in body.model_dump(exclude_unset=True).items():
+    data = body.model_dump(exclude_unset=True)
+    if "usdt_bep20_api_base" in data:
+        data["usdt_bep20_api_base"] = billing_svc.resolve_bep20_api_base(data.get("usdt_bep20_api_base"))
+    for k, v in data.items():
         setattr(b, k, v)
     await db.commit()
     return await get_billing_settings(_, __, db)

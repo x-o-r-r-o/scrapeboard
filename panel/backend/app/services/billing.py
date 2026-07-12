@@ -25,10 +25,39 @@ USDT_TRC20_CONTRACT = "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t"
 USDT_BEP20_CONTRACT = "0x55d398326f99059fF775485246999027B3197955"
 BSC_CHAIN_ID = 56
 MIN_CONFIRMATIONS = 20
-BSC_DEFAULT_API_BASE = "https://api.bscscan.com/api"
+# Etherscan API V2 (multichain) — BNB Smart Chain via chainid=56 (replaces BscScan)
+ETHERSCAN_V2_API_BASE = "https://api.etherscan.io/v2/api"
+BSC_DEFAULT_API_BASE = ETHERSCAN_V2_API_BASE  # alias for callers / settings defaults
 BSC_DEFAULT_RPC = "https://bsc-dataseed.binance.org/"
+_LEGACY_BSCSCAN_API_BASES = frozenset(
+    {
+        "https://api.bscscan.com/api",
+        "http://api.bscscan.com/api",
+        "https://api.bscscan.com/api/",
+        "http://api.bscscan.com/api/",
+    }
+)
 # ERC-20 Transfer(address,address,uint256)
 _ERC20_TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
+
+
+def resolve_bep20_api_base(api_base: str | None) -> str:
+    """Normalize BEP-20 explorer API base; migrate empty/legacy BscScan defaults to Etherscan V2."""
+    raw = (api_base or "").strip()
+    if not raw:
+        return ETHERSCAN_V2_API_BASE
+    normalized = raw.rstrip("/")
+    if raw in _LEGACY_BSCSCAN_API_BASES or normalized in {
+        b.rstrip("/") for b in _LEGACY_BSCSCAN_API_BASES
+    }:
+        return ETHERSCAN_V2_API_BASE
+    # Any remaining api.bscscan.com host → Etherscan V2 (BscScan API sunset / redirected)
+    host = normalized.lower()
+    if "://" in host:
+        host = host.split("://", 1)[1]
+    if host.startswith("api.bscscan.com"):
+        return ETHERSCAN_V2_API_BASE
+    return raw
 
 # Canonical network keys used in /buy and order.payment_method
 NETWORK_TRC20 = "trc20"
@@ -556,18 +585,32 @@ async def _bsc_rpc(rpc_url: str, method: str, params: list) -> Any:
     return data.get("result")
 
 
-async def _bscscan_proxy(api_base: str, api_key: str, action: str, extra: dict) -> Any:
-    params = {"module": "proxy", "action": action, "apikey": api_key or "YourApiKeyToken", **extra}
+async def _etherscan_proxy(
+    api_base: str,
+    api_key: str,
+    action: str,
+    extra: dict,
+    *,
+    chain_id: int = BSC_CHAIN_ID,
+) -> Any:
+    """Call Etherscan-compatible proxy module (V2 multichain uses chainid for BSC=56)."""
+    params = {
+        "module": "proxy",
+        "action": action,
+        "chainid": str(chain_id),
+        "apikey": api_key or "YourApiKeyToken",
+        **extra,
+    }
     async with httpx.AsyncClient(timeout=30) as client:
         r = await client.get(api_base, params=params)
         data = r.json()
     if not isinstance(data, dict):
-        raise RuntimeError("invalid BscScan response")
+        raise RuntimeError("invalid Etherscan response")
     # proxy endpoints return {"jsonrpc","id","result"} or {"status","result","message"}
     if "result" in data and data.get("jsonrpc"):
         return data.get("result")
     if str(data.get("status")) == "0" and data.get("message") not in ("No transactions found",):
-        msg = data.get("result") or data.get("message") or "BscScan error"
+        msg = data.get("result") or data.get("message") or "Etherscan error"
         if "api key" in str(msg).lower() or "invalid" in str(msg).lower() and "key" in str(msg).lower():
             raise RuntimeError(str(msg))
         # Some proxy errors still nest result
@@ -585,12 +628,12 @@ async def verify_bep20_payment(
     rpc_url: str = "",
     min_confirmations: int = MIN_CONFIRMATIONS,
 ) -> tuple[bool, str, float]:
-    """Verify USDT BEP-20 transfer via BscScan proxy and/or public BSC RPC (≥ N confirmations)."""
+    """Verify USDT BEP-20 transfer via Etherscan API (chain 56) and/or public BSC RPC (≥ N confirmations)."""
     hx = _normalize_evm_txid(txid)
     if not valid_txid(hx):
         return False, "invalid BEP-20 transaction hash", 0.0
 
-    base = (api_base or BSC_DEFAULT_API_BASE).strip() or BSC_DEFAULT_API_BASE
+    base = resolve_bep20_api_base(api_base)
     rpc = (rpc_url or BSC_DEFAULT_RPC).strip() or BSC_DEFAULT_RPC
     receipt: dict | None = None
     current_block = 0
@@ -598,16 +641,16 @@ async def verify_bep20_payment(
 
     if api_key:
         try:
-            raw = await _bscscan_proxy(base, api_key, "eth_getTransactionReceipt", {"txhash": hx})
+            raw = await _etherscan_proxy(base, api_key, "eth_getTransactionReceipt", {"txhash": hx})
             if isinstance(raw, dict):
                 receipt = raw
-            raw_bn = await _bscscan_proxy(base, api_key, "eth_blockNumber", {})
+            raw_bn = await _etherscan_proxy(base, api_key, "eth_blockNumber", {})
             if isinstance(raw_bn, str) and raw_bn.startswith("0x"):
                 current_block = int(raw_bn, 16)
             elif raw_bn is not None:
                 current_block = _as_int(raw_bn, 0)
         except Exception as e:
-            errors.append(f"bscscan: {e}")
+            errors.append(f"etherscan: {e}")
 
     if receipt is None or current_block <= 0:
         try:
@@ -660,7 +703,7 @@ async def verify_usdt_payment(
             (getattr(b, "usdt_bep20_wallet", "") or "").strip(),
             min_amount,
             getattr(b, "usdt_bep20_contract", None) or USDT_BEP20_CONTRACT,
-            api_base=getattr(b, "usdt_bep20_api_base", None) or BSC_DEFAULT_API_BASE,
+            api_base=resolve_bep20_api_base(getattr(b, "usdt_bep20_api_base", None)),
             api_key=getattr(b, "usdt_bep20_api_key", None) or "",
             rpc_url=getattr(b, "usdt_bep20_rpc_url", None) or BSC_DEFAULT_RPC,
         )

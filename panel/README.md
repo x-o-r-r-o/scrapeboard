@@ -90,7 +90,7 @@ Assign or change a subscription package from the Users table (**Assign package**
 ### Billing
 
 - Packages (slug, USDT price, days, threads, upload MB, tier)  
-- USDT TRC-20 / BEP-20 TxID verify (≥20 confirmations auto-grant) + QR + manual methods + admin approve/grant fallback
+- USDT TRC-20 (TronScan) / BEP-20 (Etherscan API V2, `chainid=56`, optional BSC RPC fallback) TxID verify (≥20 confirmations auto-grant) + QR + manual methods + admin approve/grant fallback
 - Persistent Telegram reply keyboard (Buy / Packages / Run / …) plus inline package & network pickers  
 - New Telegram users auto-provisioned on `/start` so they can buy without admin linking  
 - Upgrade-only while subscribed; admins bypass plan checks  

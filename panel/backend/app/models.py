@@ -177,13 +177,13 @@ class BillingSettings(Base):
     usdt_contract: Mapped[str] = mapped_column(String(128), default="TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t")
     usdt_api_base: Mapped[str] = mapped_column(String(255), default="https://apilist.tronscanapi.com")
     usdt_api_key: Mapped[str] = mapped_column(String(255), default="")
-    # USDT BEP-20 (BNB Smart Chain) — QR + /paid on-chain verify (≥20 confirmations)
+    # USDT BEP-20 (BNB Smart Chain) — Etherscan API V2 (chainid=56) + optional RPC; ≥20 confirmations
     usdt_bep20_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
     usdt_bep20_wallet: Mapped[str] = mapped_column(String(128), default="")
     usdt_bep20_contract: Mapped[str] = mapped_column(
         String(128), default="0x55d398326f99059fF775485246999027B3197955"
     )
-    usdt_bep20_api_base: Mapped[str] = mapped_column(String(255), default="https://api.bscscan.com/api")
+    usdt_bep20_api_base: Mapped[str] = mapped_column(String(255), default="https://api.etherscan.io/v2/api")
     usdt_bep20_api_key: Mapped[str] = mapped_column(String(255), default="")
     usdt_bep20_rpc_url: Mapped[str] = mapped_column(String(255), default="https://bsc-dataseed.binance.org/")
     manual_enabled: Mapped[bool] = mapped_column(Boolean, default=False)

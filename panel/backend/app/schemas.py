@@ -258,7 +258,7 @@ class BillingSettingsOut(BaseModel):
     usdt_bep20_enabled: bool = False
     usdt_bep20_wallet: str = ""
     usdt_bep20_contract: str = "0x55d398326f99059fF775485246999027B3197955"
-    usdt_bep20_api_base: str = "https://api.bscscan.com/api"
+    usdt_bep20_api_base: str = "https://api.etherscan.io/v2/api"
     usdt_bep20_api_key_configured: bool = False
     usdt_bep20_rpc_url: str = "https://bsc-dataseed.binance.org/"
     manual_enabled: bool

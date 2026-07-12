@@ -88,7 +88,7 @@ export function BillingAdminPage() {
     usdt_bep20_enabled: false,
     usdt_bep20_wallet: "",
     usdt_bep20_contract: "0x55d398326f99059fF775485246999027B3197955",
-    usdt_bep20_api_base: "https://api.bscscan.com/api",
+    usdt_bep20_api_base: "https://api.etherscan.io/v2/api",
     usdt_bep20_api_key: "",
     usdt_bep20_rpc_url: "https://bsc-dataseed.binance.org/",
     manual_enabled: false,
@@ -167,7 +167,7 @@ export function BillingAdminPage() {
       usdt_bep20_contract: String(
         settings.usdt_bep20_contract || "0x55d398326f99059fF775485246999027B3197955",
       ),
-      usdt_bep20_api_base: String(settings.usdt_bep20_api_base || "https://api.bscscan.com/api"),
+      usdt_bep20_api_base: String(settings.usdt_bep20_api_base || "https://api.etherscan.io/v2/api"),
       usdt_bep20_api_key: "",
       usdt_bep20_rpc_url: String(settings.usdt_bep20_rpc_url || "https://bsc-dataseed.binance.org/"),
       manual_enabled: Boolean(settings.manual_enabled),
@@ -999,15 +999,16 @@ export function BillingAdminPage() {
             />
           </label>
           <label className="field">
-            BscScan API base
+            Etherscan API base (BEP-20)
             <input
               className="input"
               value={form.usdt_bep20_api_base}
               onChange={(e) => setForm({ ...form, usdt_bep20_api_base: e.target.value })}
+              placeholder="https://api.etherscan.io/v2/api"
             />
           </label>
           <label className="field">
-            BscScan API key (recommended)
+            Etherscan API key (recommended)
             <input
               className="input"
               type="password"
@@ -1024,8 +1025,9 @@ export function BillingAdminPage() {
             />
           </label>
           <p className="muted" style={{ margin: 0, fontSize: "0.85rem" }}>
-            TRC-20 and BEP-20 both auto-verify via /paid after ≥20 on-chain confirmations. Admin /approve remains a
-            fallback for manual payments.
+            TRC-20 uses TronScan; BEP-20 uses the Etherscan API (V2, chainid=56) with optional BSC RPC fallback.
+            Both auto-verify via /paid after ≥20 on-chain confirmations. Admin /approve remains a fallback for
+            manual payments.
           </p>
           <label>
             <input type="checkbox" checked={form.manual_enabled} onChange={(e) => setForm({ ...form, manual_enabled: e.target.checked })} /> Manual
