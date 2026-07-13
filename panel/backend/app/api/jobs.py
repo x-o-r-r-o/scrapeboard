@@ -278,7 +278,7 @@ async def create_job(
         overrides["engine"] = engine
     if threads is not None:
         overrides["threads"] = threads
-    if scrape_websites:
+    if scrape_websites is not None and str(scrape_websites).strip() != "":
         overrides["scrape_websites"] = scrape_websites
     if max_results is not None:
         overrides["max_results"] = max_results
@@ -348,6 +348,7 @@ async def update_job(
             j,
             threads=fields.get("threads"),
             engine=fields.get("engine"),
+            scrape_websites=fields.get("scrape_websites"),
             name=fields.get("name"),
             set_name="name" in fields,
         )

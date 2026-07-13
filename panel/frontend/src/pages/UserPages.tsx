@@ -26,7 +26,7 @@ type Job = {
   waiting_for_threads?: boolean;
   blocking_job_public_id?: string | null;
   blocking_job_label?: string | null;
-  settings?: { engine?: string; threads?: number; source?: string };
+  settings?: { engine?: string; threads?: number; source?: string; scrape_websites?: string };
   chunks_pending?: number | null;
   chunks_leased?: number | null;
   chunks_done?: number | null;
@@ -100,8 +100,10 @@ export function JobsPage() {
     id: number;
     threads: number;
     engine: string;
+    scrape_websites: string;
     name: string;
     status: string;
+    source: string;
   } | null>(null);
   const [detailJob, setDetailJob] = useState<Job | null>(null);
 
@@ -208,12 +210,15 @@ export function JobsPage() {
     if (!editJob) return;
     setError("");
     try {
-      const body: { name: string; threads?: number; engine?: string } = {
+      const body: { name: string; threads?: number; engine?: string; scrape_websites?: string } = {
         name: editJob.name.trim(),
       };
       if (editJob.status === "queued") {
         body.threads = editJob.threads;
         body.engine = editJob.engine;
+        if ((editJob.source || "gmaps") === "gmaps") {
+          body.scrape_websites = editJob.scrape_websites === "no" ? "no" : "yes";
+        }
       }
       await api(`/api/jobs/${editJob.id}`, {
         method: "PATCH",
@@ -734,8 +739,10 @@ export function JobsPage() {
                           id: j.id,
                           threads: j.threads || 1,
                           engine: j.settings?.engine || "chrome",
+                          scrape_websites: j.settings?.scrape_websites === "no" ? "no" : "yes",
                           name: j.name || "",
                           status: j.status,
+                          source: j.source || j.settings?.source || "gmaps",
                         })
                       }
                     >
@@ -805,6 +812,9 @@ export function JobsPage() {
             <div>
               <div className="muted">Status</div>
               {detailJob.status} · {detailJob.threads} threads · engine {detailJob.settings?.engine || "—"}
+              {(detailJob.source || detailJob.settings?.source || "gmaps") === "gmaps"
+                ? ` · websites ${detailJob.settings?.scrape_websites === "no" ? "off" : "on"}`
+                : ""}
             </div>
             <div>
               <div className="muted">Scraper</div>
@@ -900,6 +910,21 @@ export function JobsPage() {
                   <option value="edge">edge</option>
                 </select>
               </label>
+              {(editJob.source || "gmaps") === "gmaps" ? (
+                <label style={{ display: "flex", gap: "0.45rem", alignItems: "center" }}>
+                  <input
+                    type="checkbox"
+                    checked={editJob.scrape_websites !== "no"}
+                    onChange={(e) =>
+                      setEditJob({
+                        ...editJob,
+                        scrape_websites: e.target.checked ? "yes" : "no",
+                      })
+                    }
+                  />
+                  Scrape websites (email + socials from business sites)
+                </label>
+              ) : null}
             </>
           ) : null}
           <div style={{ display: "flex", gap: "0.5rem" }}>

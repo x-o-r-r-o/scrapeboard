@@ -703,10 +703,11 @@ class JobOut(BaseModel):
 
 
 class JobUpdate(BaseModel):
-    """Edit a queued job (threads / engine / optional name). Name may also be set while running."""
+    """Edit a queued job (threads / engine / scrape_websites / optional name). Name may also be set while running."""
 
     threads: int | None = Field(default=None, ge=1, le=64)
     engine: str | None = None
+    scrape_websites: str | None = None
     name: str | None = None
 
 

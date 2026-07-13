@@ -653,12 +653,13 @@ async def update_queued_job_settings(
     *,
     threads: int | None = None,
     engine: str | None = None,
+    scrape_websites: str | None = None,
     name: str | None = None,
     set_name: bool = False,
 ) -> Job:
-    """Edit settings on a queued job (threads/engine) and/or optional display name.
+    """Edit settings on a queued job (threads/engine/scrape_websites) and/or optional display name.
 
-    Name may be changed while queued or running. Threads/engine remain queued-only.
+    Name may be changed while queued or running. Threads/engine/websites remain queued-only.
     Pass set_name=True to apply name (including clearing with empty string).
     """
     if set_name:
@@ -666,9 +667,10 @@ async def update_queued_job_settings(
             raise ValueError("Name can only be edited on queued or running jobs")
         job.name = normalize_job_name(name)
 
-    if threads is not None or engine is not None:
+    touch_settings = threads is not None or engine is not None or scrape_websites is not None
+    if touch_settings:
         if job.status != "queued":
-            raise ValueError("Only queued jobs can edit threads/engine")
+            raise ValueError("Only queued jobs can edit threads/engine/scrape_websites")
         owner = await db.get(User, job.owner_id)
         if not owner:
             raise ValueError("Owner not found")
@@ -681,12 +683,20 @@ async def update_queued_job_settings(
             settings["threads"] = threads
         if engine is not None:
             settings["engine"] = str(engine).strip() or settings.get("engine") or "chrome"
+        if scrape_websites is not None:
+            sw = str(scrape_websites).strip().lower()
+            if sw in ("1", "true", "on", "yes"):
+                settings["scrape_websites"] = "yes"
+            elif sw in ("0", "false", "off", "no"):
+                settings["scrape_websites"] = "no"
+            else:
+                raise ValueError("scrape_websites must be yes or no")
         need = max(1, int(settings.get("threads") or 1))
         free = await free_thread_slots(db, owner)
         settings["queued_for_threads"] = need > free
         job.settings = settings
 
-    if not set_name and threads is None and engine is None:
+    if not set_name and not touch_settings:
         raise ValueError("No changes")
     await db.commit()
     await db.refresh(job)
