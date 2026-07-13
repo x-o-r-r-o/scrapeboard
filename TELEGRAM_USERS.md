@@ -2,7 +2,7 @@
 
 How to buy a plan, upload inputs, pick a scraper, run jobs, and get support from Telegram.
 
-Send **`/help`** on the bot anytime for the command list and this guide as an attachment. Your plan and Admin → Scrapers settings control which sources you can use.
+Send **`/help`** on the bot anytime for the command list and this guide as an attachment. Your subscription plan controls which scrapers you can use.
 
 ---
 
@@ -13,7 +13,7 @@ Send **`/help`** on the bot anytime for the command list and this guide as an at
 3. Upload input files (see [Uploads](#uploads)).
 4. `/scrapers` — see sources allowed for you.
 5. `/run source=…` — queue the job (default `source=gmaps` if omitted).
-6. `/status` — progress · `/stop` — cancel · download ZIP from the panel (and optionally Telegram).
+6. `/status` — progress · `/stop` — cancel (results may be sent here as a ZIP when delivery is enabled).
 
 ---
 
@@ -44,7 +44,7 @@ Tips:
 | `/start` | Welcome + account |
 | `/help` | Commands + this guide (attached file) |
 | `/scrapers` | Sources you can run (`source=` values) |
-| `/whoami` | Your Telegram id (for admin linking) |
+| `/whoami` | Your Telegram id |
 | `/buy` `/packages` `/paid` `/subscription` | Billing |
 | `/run [key=value …]` | Queue a job from uploaded files |
 | `/status` `/jobs` | Your job progress |
@@ -56,7 +56,7 @@ Tips:
 | Option | Example | Notes |
 |--------|---------|--------|
 | `source=` | `source=google_search` | Scraper id (see below). Default: `gmaps` |
-| `name=` | `name=NYC dentists` | Display name in panel / status |
+| `name=` | `name=NYC dentists` | Display name in `/status` |
 | `engine=` | `engine=chrome` | `chrome`, `brave`, `camoufox`, … |
 | `threads=` | `threads=2` | Browsers for this job (≤ plan) |
 | `max_results=` | `max_results=50` | Cap per search (0 = default/unlimited where supported) |
@@ -102,7 +102,7 @@ Invalid/empty/wrong-type files are rejected **before** a job is queued.
 
 ## Available scrapers (`source=`)
 
-Availability depends on site enable flags, your package’s **allowed sources**, and a live subscription. Use `/scrapers` for *your* list.
+Availability depends on your plan and a live subscription. Use `/scrapers` for *your* list.
 
 ### Maps & places
 
@@ -149,15 +149,9 @@ CSV columns always include **`name`**, **`email`**, and **`phone`** (blank when 
 
 ---
 
-## Panel alternative
-
-Same jobs: **Jobs → New job** → pick scraper → upload files → queue. Telegram and the panel share the same account when your Telegram id is linked (`/whoami`).
-
----
-
 ## Tips
 
 - One job runs at a time per account; extras stay queued.
 - `/status` anytime for %.
-- `/stop` cancels and may deliver a partial ZIP.
+- `/stop` cancels and may deliver a partial ZIP here.
 - Full guide again? `/help` (attaches this file) · sources? `/scrapers` · stuck? `/support …`.

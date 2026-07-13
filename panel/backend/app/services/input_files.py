@@ -271,7 +271,7 @@ def formats_help_text(*, max_upload_mb: int | None = None, extensions: list[str]
     exts = ", ".join(allowed_extensions(extensions))
     size = f"\n• Size limit: {max_upload_mb} MB (plan may be lower)" if max_upload_mb else ""
     return (
-        "📁 Upload inputs (Telegram or panel)\n"
+        "📁 Upload inputs\n"
         "\n"
         "1) Send a .txt/.csv document with a caption:\n"
         "   • keywords / dork — search queries\n"
@@ -281,7 +281,7 @@ def formats_help_text(*, max_upload_mb: int | None = None, extensions: list[str]
         "3) /status · /stop\n"
         "\n"
         "Your allowed scrapers: /scrapers\n"
-        "Full written guide: TELEGRAM_USERS.md (repo / admin)\n"
+        "Full guide: /help (attaches the user guide)\n"
         "\n"
         "—— Scrapers (source=) ——\n"
         "Maps:     gmaps (default)\n"

@@ -49,7 +49,7 @@ DEMO_COMMANDS = [
         "key": "whoami",
         "command": "/whoami",
         "title": "Who am I",
-        "description": "Show your Telegram id and link status",
+        "description": "Show your Telegram id and account status",
         "response_text": "",
         "enabled": True,
         "audience": "everyone",
@@ -667,7 +667,7 @@ DEMO_WORKFLOWS = [
     {
         "key": "job_run",
         "name": "Job run & delivery",
-        "description": "Upload inputs → /run source=… (any enabled scraper) → progress → ZIP via Telegram + panel",
+        "description": "Upload inputs → /run source=… (any enabled scraper) → progress → ZIP via Telegram",
         "enabled": True,
         "is_demo": True,
         "sort_order": 40,

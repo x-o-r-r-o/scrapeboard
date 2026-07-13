@@ -434,10 +434,12 @@ class TelegramBotRuntime:
                 return
 
         if cmd in ("/whoami", "/id"):
-            link = f"linked as {user.username} (role={user.role})" if user else "not linked to a panel account"
-            status = ""
             if user:
+                link = f"account: {user.username} (role={user.role})"
                 status = " · disabled" if not user.is_active else (" · subscribed" if has_sub else " · no subscription")
+            else:
+                link = "no account yet — send /start"
+                status = ""
             admin_line = ""
             if user and user.role == "admin":
                 flag = "on" if settings.admin_commands_enabled else "OFF — enable in Bot Builder"
@@ -445,7 +447,7 @@ class TelegramBotRuntime:
             await self._send(
                 token,
                 chat_id,
-                f"Your Telegram id: {tid_disp}\nPanel: {link}{status}{admin_line}",
+                f"Your Telegram id: {tid_disp}\n{link}{status}{admin_line}",
             )
             return
 
@@ -775,7 +777,7 @@ class TelegramBotRuntime:
 
         if cmd in ("/packages", "/plans", "/buy", "/upgrade", "/renew"):
             if cmd in ("/packages", "/plans") and not settings.public_packages and not user:
-                await self._send(token, chat_id, "⛔ Packages only for linked users. Send /start first.")
+                await self._send(token, chat_id, "⛔ Send /start first to create your account.")
                 return
             if cmd in ("/buy", "/upgrade", "/renew"):
                 if not user:
@@ -927,7 +929,7 @@ class TelegramBotRuntime:
 
     async def _handle_document(self, db, token, chat_id, user, doc, caption) -> None:
         if not user:
-            await self._send(token, chat_id, "⛔ Link a panel account first.")
+            await self._send(token, chat_id, "⛔ Send /start first to create your account.")
             return
         perms = jobs_svc.effective_perms(user)
         if not perms.get("can_upload_inputs") and user.role != "admin":
@@ -1264,7 +1266,7 @@ class TelegramBotRuntime:
                 f"{done}/{j.total_searches} · rows {rows}"
             )
         lines.append("")
-        lines.append("Tips: /status · /stop · /scrapers · /help · /support · panel Jobs for download")
+        lines.append("Tips: /status · /stop · /scrapers · /help · /support")
         await self._send(token, chat_id, "\n".join(lines))
 
     async def _stop_job(self, db, token, chat_id, user) -> None:
@@ -1361,8 +1363,8 @@ class TelegramBotRuntime:
                 await self._send(
                     token,
                     chat_id,
-                    "Could not attach the user guide file. Ask an admin for TELEGRAM_USERS.md, "
-                    "or use /scrapers and /support.",
+                    "Could not attach the user guide file. Use /scrapers and /support, "
+                    "or ask an admin for help.",
                 )
         else:
             await self._send(
