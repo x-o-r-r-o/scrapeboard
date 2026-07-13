@@ -108,7 +108,7 @@ Assign or change a subscription package from the Users table (**Assign package**
 
 - Pick a **scraper source** (Maps default; Search, email, TikTok Shop, Facebook, social, …)  
 - Upload keywords + locations (or emails / dorks as required) → queued chunks leased by workers  
-- **Input validation before queue:** `.txt` / `.csv`, UTF-8, non-empty; one entry per line (`#` comments ignored). Optional CSV headers: `keyword`/`query`, `location`, `email`. Telegram: `/formats` · `/scrapers` · [`TELEGRAM_USERS.md`](../TELEGRAM_USERS.md)  
+- **Input validation before queue:** `.txt` / `.csv`, UTF-8, non-empty; one entry per line (`#` comments ignored). Optional CSV headers: `keyword`/`query`, `location`, `email`. Telegram: `/help` · `/scrapers` · [`TELEGRAM_USERS.md`](../TELEGRAM_USERS.md)  
 - **One job at a time per owner:** at most one `running` job (or job with leased chunks) per `owner_id`; extras stay `queued` until it completes/stops/fails. Thread allowance still caps threads on that single job.  
 - Edit **queued** job threads/engine (`PATCH /api/jobs/{id}`)  
 - Results stored under `results/user_{id}/{public_id}/`  
@@ -121,7 +121,7 @@ Assign or change a subscription package from the Users table (**Assign package**
 
 - Connect BotFather token, toggle commands/audiences  
 - Demo workflows, support chat, optional result delivery  
-- User commands: `/run source=…`, `/formats`, `/scrapers` — see [`TELEGRAM_USERS.md`](../TELEGRAM_USERS.md)  
+- User commands: `/run source=…`, `/help`, `/scrapers`, `/support` — see [`TELEGRAM_USERS.md`](../TELEGRAM_USERS.md)  
 - **Admin → Support**: list open/closed tickets, view thread, reply, close (user notified on Telegram)  
 
 ### Telegram admin
@@ -168,7 +168,7 @@ Worker tokens are never echoed in group chats — they are DM’d to the admin�
 - Hard-delete workers (panel has no delete API — disable via `/workeroff`)
 - Job purge/storage cleanup, dedicated-worker pin UI beyond simple fields
 
-Normal scrape flows (`/run source=…`, `/stop`, `/status`, `/formats`, `/scrapers`, …) are documented for end users in [`TELEGRAM_USERS.md`](../TELEGRAM_USERS.md).
+Normal scrape flows (`/run source=…`, `/stop`, `/status`, `/help`, `/scrapers`, `/support`, …) are documented for end users in [`TELEGRAM_USERS.md`](../TELEGRAM_USERS.md).
 
 ---
 

@@ -77,7 +77,7 @@ MENU_BUTTON_TO_CMD: dict[str, str] = {
     # Legacy reply-keyboard labels (no longer shown; keep for stale keyboards).
     "Packages": "/packages",  # alias of Buy / Upgrade list
     "Jobs": "/jobs",
-    "Formats": "/formats",
+    "Formats": "/help",  # legacy reply-keyboard label
     "Admin": "/admin",
 }
 
@@ -944,8 +944,9 @@ def user_reply_keyboard(
 ) -> dict:
     """Persistent Telegram reply keyboard (always-on chrome).
 
-    Status covers job progress (typed /jobs still works). Help includes upload
-    formats (typed /formats still works). Jobs/Formats are not shown as buttons.
+    Status covers job progress (typed /jobs still works). Help attaches the full
+    Telegram user guide (typed /formats still aliases to /help). Jobs/Formats are
+    not shown as buttons.
     Buy and Packages are one action: guests see Buy; subscribers see Upgrade
     (typed Packages still aliases to the same filtered list).
     """

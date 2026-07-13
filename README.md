@@ -6,7 +6,7 @@
 2. **Worker agents** ([`worker/`](worker/)) — scrape-only machines (Windows / macOS / Linux) that pull job chunks for Maps, Search, email, TikTok Shop, Facebook, and social sources  
 3. **Telegram bot** — optional full bot wired to the same backend (commands, payments, jobs, support)
 
-**Telegram end users:** see [`TELEGRAM_USERS.md`](TELEGRAM_USERS.md) (`/help` · `/formats` · `/scrapers` on the bot).
+**Telegram end users:** send **`/help`** on the bot (attaches [`TELEGRAM_USERS.md`](TELEGRAM_USERS.md)). Also `/scrapers` and `/support`.
 
 Deploy the panel once on **HestiaCP** (OpsBoard / OmniDesk style). It runs as **systemd** until you remove it. Workers on other machines talk only to **`https://scrape.cvmso.com`**.
 
@@ -161,7 +161,8 @@ End-user Telegram guide: [`TELEGRAM_USERS.md`](TELEGRAM_USERS.md).
 - Connect BotFather token from the panel  
 - Toggle commands, audiences, welcome text, support chat  
 - `/packages` `/buy` `/paid` `/subscription` `/run` `/status` `/stop` `/support`  
-- `/formats` `/scrapers` — upload rules + allowed scraper modules  
+- `/help` — commands + support tickets + attaches Telegram user guide  
+- `/scrapers` — allowed scraper modules  
 - Upload keyword / location / email files with captions  
 - `/run source=…` for any enabled module (Maps default)  
 - **User guide:** [`TELEGRAM_USERS.md`](TELEGRAM_USERS.md)  
@@ -536,7 +537,7 @@ See [Telegram Bot Builder](#telegram-bot-builder).
 4. **One job at a time:** only one job per owner runs; additional jobs stay **queued** until the running one finishes (completes / stops / fails). Thread allowance still caps threads on that single job.  
 5. Watch progress; **Stop** or wait for complete → **Download** ZIP  
 
-Telegram: `/scrapers` · `/formats` · `/run source=…` — [`TELEGRAM_USERS.md`](TELEGRAM_USERS.md).  
+Telegram: `/help` · `/scrapers` · `/run source=…` · `/support` — [`TELEGRAM_USERS.md`](TELEGRAM_USERS.md).  
 UI route map and API notes: [`panel/README.md`](panel/README.md).
 
 ---
@@ -619,7 +620,7 @@ Click **Install / refresh demos** to load onboarding, USDT buy, manual buy, job 
 
 | Command | Who | Purpose |
 |---------|-----|---------|
-| `/start` `/help` `/formats` `/scrapers` | everyone / gated | Welcome, help, upload rules, allowed scrapers |
+| `/start` `/help` `/scrapers` | everyone / gated | Welcome; help + user guide attachment; allowed scrapers |
 | `/whoami` | everyone | Telegram id + link status |
 | `/packages` | everyone* | List plans |
 | `/buy <slug>` | linked users | Create order + payment instructions |
@@ -666,7 +667,7 @@ Send a `.txt` / `.csv` (UTF-8) document with caption:
 - **CSV:** same line format, or a header column named `keyword`/`query`, `location`, or `email`.
 - **`email_validate`:** emails file only (no locations).
 - **`google_search` + `use_dork=yes`:** keywords = full Google queries; locations optional.
-- Invalid/empty/wrong-type files are rejected **before** a job is queued. See `/formats` (also on `/help`).
+- Invalid/empty/wrong-type files are rejected **before** a job is queued. See `/help` (user guide attached).
 
 Then queue, for example:
 

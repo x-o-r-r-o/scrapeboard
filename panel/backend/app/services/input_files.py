@@ -267,7 +267,7 @@ def validate_pair(
 
 
 def formats_help_text(*, max_upload_mb: int | None = None, extensions: list[str] | None = None) -> str:
-    """User-facing format guide for /help and /formats (keep under Telegram’s ~4k limit)."""
+    """Short upload summary (legacy helper). Prefer /help + TELEGRAM_USERS.md attachment."""
     exts = ", ".join(allowed_extensions(extensions))
     size = f"\n• Size limit: {max_upload_mb} MB (plan may be lower)" if max_upload_mb else ""
     return (

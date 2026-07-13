@@ -36,7 +36,6 @@ from app.services.input_files import (
     InputFileError,
     check_extension,
     entries_to_bytes,
-    formats_help_text,
     parse_entries,
 )
 from app.services.notify import send_document, send_photo, send_text
@@ -76,7 +75,9 @@ COMMAND_ALIASES = {
     "/me": "/subscription",
     "/renew": "/buy",
     "/servers": "/workers",
+    "/formats": "/help",  # legacy — full guide is attached on /help
 }
+
 
 
 class RateLimiter:
@@ -393,6 +394,7 @@ class TelegramBotRuntime:
             "/help",
             "/formats",
             "/scrapers",
+            "/support",
         ):
             await self._send(token, chat_id, "⛔ Your account is disabled. Contact support.")
             return
@@ -419,8 +421,17 @@ class TelegramBotRuntime:
 
         row = _row_for(cmd)
         if row is not None and not row.enabled:
-            await self._send(token, chat_id, "This command is disabled.")
-            return
+            # Legacy /formats is disabled in the menu but still aliases to /help.
+            alias_target = COMMAND_ALIASES.get(cmd)
+            help_row = commands_all.get("/help")
+            allow_as_help = (
+                alias_target == "/help"
+                and help_row is not None
+                and bool(help_row.enabled)
+            )
+            if not allow_as_help:
+                await self._send(token, chat_id, "This command is disabled.")
+                return
 
         if cmd in ("/whoami", "/id"):
             link = f"linked as {user.username} (role={user.role})" if user else "not linked to a panel account"
@@ -442,39 +453,8 @@ class TelegramBotRuntime:
             await self._flow_start(db, token, chat_id, user, settings, uid=uid, display_name=display_name)
             return
 
-        if cmd == "/help":
-            help_body = self._help_text(commands, settings, user, has_sub)
-            formats = formats_help_text()
-            menu = await self._menu_markup(db, user, settings)
-            await self._send(
-                token,
-                chat_id,
-                f"{help_body}\n\nUse the menu buttons below, or type a command.\n\n"
-                f"— Upload & scrapers —\n{formats}\n\n"
-                f"Your allowed modules: /scrapers",
-                reply_markup=menu,
-            )
-            return
-
-        if cmd == "/formats":
-            b = await billing_svc.get_billing(db)
-            sub = await billing_svc.active_subscription(db, user) if user else None
-            cap = None
-            if user and user.role == "admin":
-                cap = b.max_upload_mb
-            elif sub:
-                cap = sub.max_upload_mb
-            elif user:
-                cap = b.max_upload_mb
-            await self._send(
-                token,
-                chat_id,
-                formats_help_text(
-                    max_upload_mb=cap,
-                    extensions=b.allowed_extensions,
-                )
-                + "\n\nYour allowed modules: /scrapers\n(Also included under /help.)",
-            )
+        if cmd == "/help" or resolved == "/help":
+            await self._send_help(db, token, chat_id, user, settings, commands, has_sub)
             return
 
         if cmd == "/scrapers":
@@ -615,14 +595,14 @@ class TelegramBotRuntime:
 
         if user.role == "admin":
             msg += "\nAdmin — no subscription required."
-            msg += "\nUpload inputs (.txt/.csv), then /run source=…. See /scrapers and /formats."
+            msg += "\nUpload inputs (.txt/.csv), then /run source=…. See /help and /scrapers."
             msg += "\nTap Admin for the admin command menu."
             await self._send(token, chat_id, msg, reply_markup=menu)
             return
 
         if sub:
             msg += f"\nPlan: {sub.package_name} until {sub.expires_at.date()}."
-            msg += "\nUpload inputs (.txt/.csv), then /run source=…. See /scrapers and /formats."
+            msg += "\nUpload inputs (.txt/.csv), then /run source=…. See /help and /scrapers."
             msg += "\nTap Upgrade for a higher tier (same/lower plans are not offered)."
             await self._send(token, chat_id, msg, reply_markup=menu)
             return
@@ -992,7 +972,7 @@ class TelegramBotRuntime:
             await self._send(
                 token,
                 chat_id,
-                "Send a .txt or .csv with caption 'keywords', 'locations', or 'emails'. See /formats.",
+                "Send a .txt or .csv with caption 'keywords', 'locations', or 'emails'. See /help.",
             )
             return
 
@@ -1037,7 +1017,7 @@ class TelegramBotRuntime:
             await self._send(
                 token,
                 chat_id,
-                f"❌ {e}\nFix the file and re-upload. Job was not started. See /formats.",
+                f"❌ {e}\nFix the file and re-upload. Job was not started. See /help.",
             )
             return
 
@@ -1110,7 +1090,7 @@ class TelegramBotRuntime:
                 "/run source=youtube max_results=30",
                 "/run source=facebook_pages",
                 "",
-                "Upload rules: /formats  ·  Help: /help",
+                "Help: /help (user guide attached) · /scrapers",
             ]
         )
         await self._send(token, chat_id, "\n".join(lines))
@@ -1152,7 +1132,7 @@ class TelegramBotRuntime:
             await self._send(
                 token,
                 chat_id,
-                "Upload a keywords (or emails) file first (caption it). See /formats.",
+                "Upload a keywords (or emails) file first (caption it). See /help.",
             )
             return
 
@@ -1169,7 +1149,7 @@ class TelegramBotRuntime:
                 token,
                 chat_id,
                 "Upload keywords and locations files first (caption them). "
-                "For Google dorks use /run source=google_search use_dork=yes. See /formats.",
+                "For Google dorks use /run source=google_search use_dork=yes. See /help.",
             )
             return
 
@@ -1188,7 +1168,7 @@ class TelegramBotRuntime:
                 channels=channel_list,
             )
         except (PermissionError, ValueError) as e:
-            await self._send(token, chat_id, f"❌ {e}\nJob was not started. See /formats.")
+            await self._send(token, chat_id, f"❌ {e}\nJob was not started. See /help.")
             return
         blocker = await jobs_svc.owner_blocking_job(db, user.id, exclude_job_id=job.id)
         if blocker:
@@ -1229,7 +1209,7 @@ class TelegramBotRuntime:
                 token,
                 chat_id,
                 "No jobs yet.\nUpload inputs, then /run source=…\n"
-                "See /scrapers and /formats. Use /status anytime for progress.",
+                "See /help and /scrapers. Use /status anytime for progress.",
             )
             return
 
@@ -1284,7 +1264,7 @@ class TelegramBotRuntime:
                 f"{done}/{j.total_searches} · rows {rows}"
             )
         lines.append("")
-        lines.append("Tips: /status · /stop · /scrapers · /formats · panel Jobs for download")
+        lines.append("Tips: /status · /stop · /scrapers · /help · /support · panel Jobs for download")
         await self._send(token, chat_id, "\n".join(lines))
 
     async def _stop_job(self, db, token, chat_id, user) -> None:
@@ -1320,6 +1300,78 @@ class TelegramBotRuntime:
             if settings and settings.deliver_results_telegram:
                 await send_document(token, chat_id, zip_path, caption=zip_path.name)
 
+    def _telegram_users_guide_path(self) -> Path | None:
+        """Locate TELEGRAM_USERS.md (bundled assets, then repo root)."""
+        here = Path(__file__).resolve()
+        candidates = [
+            here.parent / "assets" / "TELEGRAM_USERS.md",
+            here.parents[4] / "TELEGRAM_USERS.md" if len(here.parents) >= 5 else None,
+            Path.cwd() / "TELEGRAM_USERS.md",
+            Path.cwd().parent / "TELEGRAM_USERS.md",
+        ]
+        for p in candidates:
+            if p is not None and p.is_file():
+                return p
+        return None
+
+    async def _send_help(
+        self,
+        db,
+        token,
+        chat_id,
+        user: User | None,
+        settings: BotSettings,
+        commands: dict,
+        has_sub: bool,
+    ) -> None:
+        help_body = self._help_text(commands, settings, user, has_sub)
+        support_on = bool(getattr(settings, "support_enabled", False))
+        if support_on:
+            support_block = (
+                "— Support tickets —\n"
+                "Send: /support <your message>\n"
+                "Example: /support Payment verified but plan not active. TxID: …\n"
+                "Opens a ticket (or adds a follow-up). Admins reply in this chat.\n"
+                "You can also tap Support on the menu."
+            )
+        else:
+            support_block = (
+                "— Support tickets —\n"
+                "Support is currently disabled on this bot. Contact the site admin directly."
+            )
+        menu = await self._menu_markup(db, user, settings)
+        text = (
+            f"{help_body}\n\n"
+            "Use the menu buttons below, or type a command.\n"
+            "Upload captions: keywords · locations · emails\n"
+            "Start a job: /run source=gmaps … · list sources: /scrapers\n\n"
+            f"{support_block}\n\n"
+            "Full Telegram user guide is attached (uploads, scrapers, /run options)."
+        )
+        await self._send(token, chat_id, text, reply_markup=menu)
+        guide = self._telegram_users_guide_path()
+        if guide is not None:
+            ok = await send_document(
+                token,
+                chat_id,
+                guide,
+                caption="Scrapeboard Telegram user guide — uploads, scrapers, support",
+            )
+            if not ok:
+                await self._send(
+                    token,
+                    chat_id,
+                    "Could not attach the user guide file. Ask an admin for TELEGRAM_USERS.md, "
+                    "or use /scrapers and /support.",
+                )
+        else:
+            await self._send(
+                token,
+                chat_id,
+                "User guide file is missing on the server. Use /scrapers for sources and "
+                "/support <message> for tickets.",
+            )
+
     def _audience_ok(self, audience: str, user: User | None, has_sub: bool = False) -> bool:
         if audience == "everyone":
             return True
@@ -1336,16 +1388,19 @@ class TelegramBotRuntime:
     def _help_text(self, commands: dict, settings: BotSettings, user: User | None, has_sub: bool = False) -> str:
         lines = ["Commands:"]
         for c in sorted(commands.values(), key=lambda x: x.sort_order):
+            if not c.enabled:
+                continue
+            if (c.command or "").lower() in ("/formats",):
+                continue  # legacy alias of /help — do not list twice
             if not self._audience_ok(c.audience, user, has_sub):
                 continue
             if c.audience == "admins" and not settings.admin_commands_enabled:
                 continue
             lines.append(f"{c.command} — {c.title or c.description}")
-        # Always surface formats even if the DB row is missing/disabled.
-        if not any(c.command == "/formats" for c in commands.values()):
-            lines.append("/formats — Accepted file types and format rules")
-        if not any(c.command == "/scrapers" for c in commands.values()):
+        if not any(c.command == "/scrapers" for c in commands.values() if c.enabled):
             lines.append("/scrapers — Available scraper sources for /run")
+        if not any(c.command == "/support" for c in commands.values() if c.enabled):
+            lines.append("/support <message> — Open a support ticket")
         return "\n".join(lines) if len(lines) > 1 else "No commands available."
 
 

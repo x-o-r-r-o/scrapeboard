@@ -122,12 +122,14 @@ async def bootstrap(db: AsyncSession) -> None:
         else:
             row = existing_cmds[cmd["key"]]
             # Keep menu titles/descriptions in sync for built-in scrapers commands.
-            if cmd["key"] in ("run", "formats", "help", "scrapers", "status", "jobs"):
+            if cmd["key"] in ("run", "formats", "help", "scrapers", "status", "jobs", "support"):
                 row.title = cmd.get("title", row.title)
                 row.description = cmd.get("description", row.description)
                 row.command = cmd.get("command", row.command)
                 row.audience = cmd.get("audience", row.audience)
                 row.sort_order = cmd.get("sort_order", row.sort_order)
+                if "enabled" in cmd:
+                    row.enabled = bool(cmd["enabled"])
                 if cmd.get("response_text"):
                     row.response_text = cmd["response_text"]
 

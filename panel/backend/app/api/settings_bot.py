@@ -592,9 +592,14 @@ async def install_demos(_: User = Depends(require_admin), __: User = Depends(req
             row.audience = cmd.get("audience", row.audience)
             row.sort_order = cmd.get("sort_order", row.sort_order)
             if cmd.get("response_text") is not None and (
-                not row.response_text or cmd["key"] in ("run", "help", "formats", "scrapers")
+                not row.response_text or cmd["key"] in ("run", "help", "formats", "scrapers", "support")
             ):
                 row.response_text = cmd["response_text"]
+            if cmd["key"] == "formats" and "enabled" in cmd:
+                row.enabled = bool(cmd["enabled"])
+            if cmd["key"] == "help":
+                row.title = cmd.get("title", row.title)
+                row.description = cmd.get("description", row.description)
     existing_wf = {w.key for w in (await db.execute(select(BotWorkflow))).scalars().all()}
     for i, wf in enumerate(DEMO_WORKFLOWS):
         payload = {**wf, "sort_order": wf.get("sort_order", (i + 1) * 10)}

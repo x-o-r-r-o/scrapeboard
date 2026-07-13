@@ -15,10 +15,11 @@ DEMO_COMMANDS = [
         "key": "help",
         "command": "/help",
         "title": "Help",
-        "description": "Commands list plus upload formats for all scrapers (same as /formats)",
+        "description": "Commands, support tickets, and Telegram user guide (attached)",
         "response_text": (
-            "Use /formats for upload rules, /scrapers for sources, /run source=… to start. "
-            "Full guide: TELEGRAM_USERS.md"
+            "Send /help for commands + support instructions. "
+            "The full Telegram user guide is attached. "
+            "Sources: /scrapers · tickets: /support <message> · run: /run source=…"
         ),
         "enabled": True,
         "audience": "everyone",
@@ -27,10 +28,10 @@ DEMO_COMMANDS = [
     {
         "key": "formats",
         "command": "/formats",
-        "title": "File formats",
-        "description": "Upload rules for all scrapers (Maps, Search/dorks, emails, Facebook, social)",
+        "title": "Help (alias)",
+        "description": "Alias of /help — kept for old menus; disabled in Bot menu",
         "response_text": "",
-        "enabled": True,
+        "enabled": False,
         "audience": "everyone",
         "sort_order": 25,
     },
@@ -115,7 +116,7 @@ DEMO_COMMANDS = [
             "[scrape_websites=yes|no] [use_dork=yes] [validate_after=yes] [max_results=50]\n"
             "Maps: scrape_websites=yes visits business sites for email/socials (default yes).\n"
             "Upload keywords (+ locations unless email_validate or Google dorks). "
-            "See /scrapers and /formats. Guide: TELEGRAM_USERS.md"
+            "See /help (user guide attached) and /scrapers."
         ),
         "enabled": True,
         "audience": "subscribers",
@@ -617,7 +618,7 @@ DEMO_WORKFLOWS = [
             "steps": [
                 {"action": "ensure_telegram_user"},
                 {"if": "no_subscription", "say": "Welcome. Use Buy on the menu or tap a package below."},
-                {"if": "subscribed", "say": "You are ready. Upload .txt/.csv (caption keywords/locations/emails), then /run source=…. See /scrapers and /formats."},
+                {"if": "subscribed", "say": "You are ready. Upload .txt/.csv (caption keywords/locations/emails), then /run source=…. See /help and /scrapers. Need help? /support <message>."},
             ],
         },
     },
