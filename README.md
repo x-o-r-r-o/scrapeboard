@@ -288,6 +288,7 @@ Then open **https://scrape.cvmso.com** → sign in → change password → enabl
 | Restart | `systemctl restart scrapeboard` |
 | Stop | `systemctl stop scrapeboard` |
 | Update | `bash deploy/hestiacp/update.sh` (role=panel sparse-checkout; excludes `worker/`) |
+| Daily auto-update | systemd `scrapeboard-auto-update.timer` (check git → full update when behind; `AUTO_UPDATE_*` in `deploy/config.env`) |
 
 
 Telegram bot runs **inside the panel API process** (no separate bot service). Full steps: [`deploy/hestiacp/README.md`](deploy/hestiacp/README.md).
@@ -857,8 +858,8 @@ Each host has a durable **machine role** in `.scrapeboard-role` (`panel` or `wor
 
 | Role | Sparse-checkout | Update command |
 |------|-----------------|----------------|
-| **panel** | Keep all except `worker/` | `bash deploy/hestiacp/update.sh` |
-| **worker** | Keep root install helpers + `worker/`; exclude `panel/` and `deploy/` | `python3 install.py --role worker --update` or `bash worker/update.sh` |
+| **panel** | Keep all except `worker/` | `bash deploy/hestiacp/update.sh` (daily: `auto_update.sh` / systemd timer) |
+| **worker** | Keep root install helpers + `worker/`; exclude `panel/` and `deploy/` | `python3 install.py --role worker --update` or `bash worker/update.sh` (daily: `--auto-update` via `install_service.*`) |
 
 ```bash
 # Panel VPS — sync code, then as root:

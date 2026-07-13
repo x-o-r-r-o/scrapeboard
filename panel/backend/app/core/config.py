@@ -48,6 +48,11 @@ class Settings(BaseSettings):
     # Max CSV members / uncompressed bytes inside a worker ZIP
     worker_zip_max_members: int = 200
     worker_zip_max_uncompressed_bytes: int = 200 * 1024 * 1024
+    # Daily fleet auto-update: queue git update for online workers (UTC hour).
+    # Host-side timers on each worker also check git daily independently.
+    worker_auto_update_enabled: bool = True
+    worker_auto_update_hour_utc: int = 4
+    worker_auto_update_ref: str = "main"
 
     @property
     def cors_origin_list(self) -> list[str]:

@@ -7,6 +7,7 @@ from app.api import auth, billing, infra, jobs, scrapers, settings_bot, stats, s
 from app.bot.runtime import bot_runtime
 from app.core.config import get_settings
 from app.core.database import SessionLocal, init_db
+from app.services.auto_update import start_auto_update_scheduler, stop_auto_update_scheduler
 from app.services.bootstrap import bootstrap
 
 
@@ -16,7 +17,9 @@ async def lifespan(_: FastAPI):
     async with SessionLocal() as db:
         await bootstrap(db)
     bot_runtime.start()
+    start_auto_update_scheduler()
     yield
+    await stop_auto_update_scheduler()
     await bot_runtime.stop()
 
 

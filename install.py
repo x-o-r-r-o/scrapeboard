@@ -566,6 +566,81 @@ def prune_forbidden_paths(role: str) -> None:
                 shutil.rmtree(victim)
 
 
+# Printed so agents/timers can detect a no-op auto-update without restarting.
+STATUS_ALREADY_UP_TO_DATE = "SCRAPEBOARD_STATUS=already_up_to_date"
+STATUS_UPDATED = "SCRAPEBOARD_STATUS=updated"
+
+
+def _git_rev_parse(rev: str) -> str | None:
+    try:
+        out = subprocess.check_output(
+            ["git", "-C", str(ROOT), "rev-parse", rev],
+            stderr=subprocess.DEVNULL,
+            text=True,
+        )
+    except (subprocess.CalledProcessError, FileNotFoundError, OSError):
+        return None
+    sha = (out or "").strip()
+    return sha or None
+
+
+def _git_current_branch() -> str | None:
+    try:
+        out = subprocess.check_output(
+            ["git", "-C", str(ROOT), "rev-parse", "--abbrev-ref", "HEAD"],
+            stderr=subprocess.DEVNULL,
+            text=True,
+        )
+    except (subprocess.CalledProcessError, FileNotFoundError, OSError):
+        return None
+    name = (out or "").strip()
+    if not name or name == "HEAD":
+        return None
+    return name
+
+
+def git_fetch_origin() -> int:
+    print("==> git fetch origin --tags --prune")
+    return subprocess.call(
+        ["git", "-C", str(ROOT), "fetch", "origin", "--tags", "--prune"]
+    )
+
+
+def git_remote_tip(ref: str | None = None) -> str | None:
+    """Resolve the remote SHA we would update to (after fetch)."""
+    wanted = (ref if ref is not None else os.environ.get("SCRAPEBOARD_UPDATE_REF", "") or "").strip()
+    if not wanted or wanted.lower() == "latest":
+        branch = _git_current_branch()
+        if branch:
+            tip = _git_rev_parse(f"origin/{branch}")
+            if tip:
+                return tip
+        # Fall back to upstream tracking ref
+        tip = _git_rev_parse("@{u}")
+        if tip:
+            return tip
+        tip = _git_rev_parse("origin/main") or _git_rev_parse("origin/master")
+        return tip
+    tip = _git_rev_parse(f"origin/{wanted}")
+    if tip:
+        return tip
+    return _git_rev_parse(wanted)
+
+
+def git_updates_available(ref: str | None = None) -> bool | None:
+    """True if remote tip differs from HEAD, False if current, None if unknown."""
+    if not (ROOT / ".git").exists() or not git_available():
+        return None
+    code = git_fetch_origin()
+    if code != 0:
+        return None
+    head = _git_rev_parse("HEAD")
+    tip = git_remote_tip(ref)
+    if not head or not tip:
+        return None
+    return head != tip
+
+
 def sync_repo_for_role(role: str, ref: str | None = None) -> int:
     """git pull/checkout with role sparse-checkout; prune forbidden trees.
 
@@ -589,6 +664,7 @@ def sync_repo_for_role(role: str, ref: str | None = None) -> int:
     apply_sparse_checkout(role_n)
     wanted = (ref if ref is not None else os.environ.get("SCRAPEBOARD_UPDATE_REF", "") or "").strip()
     if not wanted or wanted.lower() == "latest":
+        # Prefer already-fetched tip when auto-update ran fetch first
         print("==> git pull --ff-only")
         code = subprocess.call(["git", "-C", str(ROOT), "pull", "--ff-only"])
         if code != 0:
@@ -711,6 +787,40 @@ def print_worker_restart_verify_commands(kind: str) -> None:
         print("  grep -E 'scrapeboard worker v' logs/worker.log | tail -3")
     print("Panel should show agent version 0.8.1+ after the next heartbeat (~15s).")
     print("Linux: systemctl --user restart scrapeboard-worker  # required after pull if still on 0.7.0")
+
+
+def run_auto_update_mode(role: str, kind: str, ref: str | None = None) -> int:
+    """Daily/timer path: fetch, skip when current, otherwise update + install + restart."""
+    global ASSUME_YES
+    print()
+    print(f"Auto-update check (role={role})")
+    if ref and str(ref).strip() and str(ref).strip().lower() != "latest":
+        print(f"Git ref: {ref}")
+    print("-" * 40)
+
+    if role == "panel" and kind == "linux" and hestia_detected() and is_root():
+        # Production panel: use the Hestia auto-update script (build + systemd).
+        script = ROOT / "deploy" / "hestiacp" / "auto_update.sh"
+        if script.is_file():
+            return run(["bash", str(script)])
+        print("ERROR: deploy/hestiacp/auto_update.sh missing")
+        return 1
+
+    avail = git_updates_available(ref)
+    if avail is False:
+        print("Already up to date — skipped install/restart.")
+        print(STATUS_ALREADY_UP_TO_DATE)
+        return 0
+    if avail is None:
+        print("Could not determine remote tip — running update anyway.")
+    else:
+        print("Updates available — pulling, installing, and restarting.")
+
+    ASSUME_YES = True
+    code = run_update_mode(role, kind, ref=ref)
+    if code == 0:
+        print(STATUS_UPDATED)
+    return code
 
 
 def run_update_mode(role: str, kind: str, ref: str | None = None) -> int:
@@ -1166,9 +1276,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Sync this checkout for the machine role (sparse git pull), then refresh deps hints.",
     )
     p.add_argument(
+        "--auto-update",
+        action="store_true",
+        help="Check git for updates; if behind, pull + install deps + restart (for daily timers).",
+    )
+    p.add_argument(
         "--ref",
         default="",
-        help="With --update: git branch/tag/SHA to sync (or 'latest' for current-branch pull). "
+        help="With --update/--auto-update: git branch/tag/SHA (or 'latest' for current-branch pull). "
         "Also SCRAPEBOARD_UPDATE_REF.",
     )
     p.add_argument(
@@ -1253,13 +1368,16 @@ def main(argv: list[str] | None = None) -> int:
         print("Supported: macOS, Linux, Windows.")
         return 1
 
-    if args.update:
+    if args.update or args.auto_update:
         role = args.role or current_role()
         if not role:
-            print("ERROR: --update needs a role. Pass --role panel|worker or set .scrapeboard-role.")
+            which = "--auto-update" if args.auto_update else "--update"
+            print(f"ERROR: {which} needs a role. Pass --role panel|worker or set .scrapeboard-role.")
             return 1
         role = ensure_role(role, force=args.force_role)
         ref = (args.ref or os.environ.get("SCRAPEBOARD_UPDATE_REF") or "").strip() or None
+        if args.auto_update:
+            return run_auto_update_mode(role, kind, ref=ref)
         return run_update_mode(role, kind, ref=ref)
 
     role = args.role

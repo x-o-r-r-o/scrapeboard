@@ -275,6 +275,67 @@ EOF
   systemctl restart "${SERVICE_NAME}"
 }
 
+write_auto_update_timer() {
+  # Daily git check → pull + install + restart when behind (default 04:00 local).
+  local enabled="${AUTO_UPDATE_ENABLED:-1}"
+  local hour="${AUTO_UPDATE_HOUR:-4}"
+  local minute="${AUTO_UPDATE_MINUTE:-0}"
+  local svc_name="${SERVICE_NAME}-auto-update"
+  local auto_script="${APP_DIR}/deploy/hestiacp/auto_update.sh"
+
+  if [[ "${enabled}" != "1" && "${enabled}" != "true" && "${enabled}" != "yes" ]]; then
+    echo "==> Auto-update timer disabled (AUTO_UPDATE_ENABLED=${enabled})"
+    systemctl disable --now "${svc_name}.timer" 2>/dev/null || true
+    rm -f "/etc/systemd/system/${svc_name}.service" "/etc/systemd/system/${svc_name}.timer"
+    systemctl daemon-reload 2>/dev/null || true
+    return 0
+  fi
+
+  if [[ ! -f "$auto_script" ]]; then
+    echo "WARN: ${auto_script} missing — skip auto-update timer" >&2
+    return 0
+  fi
+  chmod +x "$auto_script" || true
+
+  # Clamp hour/minute
+  if ! [[ "$hour" =~ ^[0-9]+$ ]] || (( hour > 23 )); then hour=4; fi
+  if ! [[ "$minute" =~ ^[0-9]+$ ]] || (( minute > 59 )); then minute=0; fi
+  printf -v hour "%02d" "$hour"
+  printf -v minute "%02d" "$minute"
+
+  echo "==> systemd timer ${svc_name}.timer (daily ${hour}:${minute}, check then update)..."
+  cat > "/etc/systemd/system/${svc_name}.service" <<EOF
+[Unit]
+Description=Scrapeboard panel git auto-update (check → pull → install → restart)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+Nice=10
+ExecStart=/bin/bash ${auto_script}
+EOF
+
+  cat > "/etc/systemd/system/${svc_name}.timer" <<EOF
+[Unit]
+Description=Daily Scrapeboard panel auto-update check
+
+[Timer]
+OnCalendar=*-*-* ${hour}:${minute}:00
+Persistent=true
+RandomizedDelaySec=900
+Unit=${svc_name}.service
+
+[Install]
+WantedBy=timers.target
+EOF
+
+  systemctl daemon-reload
+  systemctl enable --now "${svc_name}.timer"
+  echo "    timer: systemctl list-timers ${svc_name}.timer"
+  echo "    logs:  journalctl -u ${svc_name}.service -n 50"
+}
+
 install_nginx_snippet() {
   echo "==> HestiaCP nginx snippet..."
   # Ensure port in snippet matches API_PORT
@@ -321,6 +382,11 @@ print_done() {
 
  Update after code changes:
    SITE_USER=${SITE_USER} DOMAIN=${DOMAIN} bash deploy/hestiacp/update.sh
+
+ Daily auto-update (git check → install → restart when behind):
+   systemctl list-timers ${SERVICE_NAME}-auto-update.timer
+   journalctl -u ${SERVICE_NAME}-auto-update.service -n 50
+   # disable: AUTO_UPDATE_ENABLED=0 in deploy/config.env, then re-run update.sh
 ================================================================
 EOF
 }
@@ -337,6 +403,7 @@ run_install() {
   build_frontend
   publish_frontend
   write_systemd
+  write_auto_update_timer
   install_nginx_snippet
   install_spa_web_template
   wait_health
@@ -356,6 +423,7 @@ run_update() {
   build_frontend
   publish_frontend
   write_systemd
+  write_auto_update_timer
   install_nginx_snippet
   install_spa_web_template
   wait_health

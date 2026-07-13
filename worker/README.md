@@ -231,6 +231,40 @@ Foreground runs (no `--service`) still use a temp work directory unless you set 
 
 Worker hosts should have `.scrapeboard-role=worker` (written by `install.py`). Updates use **worker sparse-checkout** (`/*` minus `panel/` and `deploy/`) so panel sources never land on scrape machines.
 
+### Daily auto-update (host)
+
+`install_service.*` also installs a **daily** check (default **04:00 local**): fetch git → if behind, `install.py --role worker --auto-update --yes` (pip + service restart). No-op when already current.
+
+```bash
+# Logs
+tail -f worker/logs/auto_update.log
+
+# Linux
+systemctl --user list-timers scrapeboard-worker-auto-update.timer
+
+# Manual run
+bash worker/auto_update.sh
+# or: python3 install.py --role worker --auto-update --yes
+
+# Disable auto-update on next service install:
+bash install_service.sh --no-auto-update
+# Schedule: SCRAPEBOARD_AUTO_UPDATE_HOUR=5 SCRAPEBOARD_AUTO_UPDATE_MINUTE=30 bash install_service.sh
+```
+
+Windows: Scheduled Task `ScrapeboardWorkerAutoUpdate` (daily 04:00). Uninstall removes both tasks.
+
+### Fleet auto-update (panel)
+
+The panel also queues online workers once per day (**04:00 UTC** by default). Env in `panel/backend/.env`:
+
+| Variable | Default | Meaning |
+|----------|---------|---------|
+| `WORKER_AUTO_UPDATE_ENABLED` | `true` | Set `false` / `0` to disable |
+| `WORKER_AUTO_UPDATE_HOUR_UTC` | `4` | UTC hour |
+| `WORKER_AUTO_UPDATE_REF` | `main` | Git ref |
+
+Host timers + fleet queue both check-before-apply; recent successes are not re-queued for ~20h.
+
 ### One-click fleet update (control panel)
 
 After you push worker changes to GitHub, you do **not** need to SSH each VPS:
@@ -241,7 +275,7 @@ After you push worker changes to GitHub, you do **not** need to SSH each VPS:
 4. Click **Update all workers**, or **Request update** on a single row.
 5. Watch the **Update** column: `pending` → `updating` → `success` / `failed` (message + time via polling).
 
-Online agents pick the command up on the next heartbeat, wait for active scrapes (up to 10 minutes), run the fixed update path (`install.py --role worker --update --ref …`), report status, then exit so LaunchAgent / systemd / Task Scheduler restarts the new code.
+Online agents pick the command up on the next heartbeat, wait for active scrapes (up to 10 minutes), run the fixed update path (`install.py --role worker --auto-update --ref …`), report status, then exit so LaunchAgent / systemd / Task Scheduler restarts the new code (skipped when already up to date).
 
 **Requirements on each worker host:**
 
@@ -270,6 +304,8 @@ Tailscale is **not** required — workers only need outbound HTTPS to the panel.
 ```bash
 # From repo root (preferred):
 python3 install.py --role worker --update
+# Check-then-apply (timers use this):
+python3 install.py --role worker --auto-update --yes
 # optional: python3 install.py --role worker --update --ref main
 # or: bash worker/update.sh          # Windows: worker\update.bat
 

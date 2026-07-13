@@ -34,7 +34,7 @@ ROOT = Path(__file__).resolve().parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-VERSION = "0.8.5"
+VERSION = "0.8.6"
 CONFIG_NAME = "worker_config.json"
 HOST_OS = platform.system()  # Windows | Darwin | Linux
 SERVICE_NAME = "scrapeboard-worker"
@@ -835,7 +835,8 @@ class PanelClient:
 def _run_fixed_worker_update(ref: str) -> tuple[bool, str]:
     """Run the fixed worker update path only (no arbitrary shell from the panel).
 
-    Preserves role-based sparse-checkout via install.py --role worker --update.
+    Preserves role-based sparse-checkout via install.py --role worker --auto-update
+    (falls back to --update on older checkouts).
     """
     if not (REPO_ROOT / ".git").exists():
         return False, "not a git checkout — clone the repo (worker role) to enable remote updates"
@@ -851,42 +852,59 @@ def _run_fixed_worker_update(ref: str) -> tuple[bool, str]:
     # killing this process mid-report via service restart.
     env["SCRAPEBOARD_SKIP_SERVICE_RESTART"] = "1"
 
-    cmd = [
-        sys.executable,
-        str(install_py),
-        "--role",
-        "worker",
-        "--update",
-        "--yes",
-        "--ref",
-        wanted,
-    ]
-    print(f"[worker] running update: {' '.join(cmd)}", flush=True)
-    try:
-        proc = subprocess.run(
-            cmd,
-            cwd=str(REPO_ROOT),
-            env=env,
-            capture_output=True,
-            text=True,
-            timeout=900,
-        )
-    except subprocess.TimeoutExpired:
-        return False, "update timed out after 900s"
-    except Exception as e:
-        return False, f"update failed to start: {e}"
+    modes = ("--auto-update", "--update")
+    last_msg = "update failed"
+    for mode in modes:
+        cmd = [
+            sys.executable,
+            str(install_py),
+            "--role",
+            "worker",
+            mode,
+            "--yes",
+            "--ref",
+            wanted,
+        ]
+        print(f"[worker] running update: {' '.join(cmd)}", flush=True)
+        try:
+            proc = subprocess.run(
+                cmd,
+                cwd=str(REPO_ROOT),
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=900,
+            )
+        except subprocess.TimeoutExpired:
+            return False, "update timed out after 900s"
+        except Exception as e:
+            return False, f"update failed to start: {e}"
 
-    out = ((proc.stdout or "") + "\n" + (proc.stderr or "")).strip()
-    tail = out[-1500:] if out else ""
-    if proc.returncode != 0:
-        msg = f"update exited {proc.returncode}"
+        out = ((proc.stdout or "") + "\n" + (proc.stderr or "")).strip()
+        tail = out[-1500:] if out else ""
+        if proc.returncode == 0:
+            if "SCRAPEBOARD_STATUS=already_up_to_date" in out:
+                return True, "already_up_to_date"
+            msg = "update ok"
+            if tail:
+                msg = f"{msg}; {tail.splitlines()[-1][:200]}"
+            return True, msg
+
+        # Older install.py may not know --auto-update yet — try --update once.
+        if mode == "--auto-update" and (
+            "unrecognized arguments" in out.lower()
+            or "unknown option" in out.lower()
+            or "auto-update" in out.lower() and "error" in out.lower()
+        ):
+            print("[worker] install.py has no --auto-update; falling back to --update", flush=True)
+            continue
+
+        last_msg = f"update exited {proc.returncode}"
         if tail:
-            msg = f"{msg}: {tail}"
-        return False, msg
-    msg = "update ok"
-    if tail:
-        msg = f"{msg}; {tail.splitlines()[-1][:200]}"
-    return True, msg
+            last_msg = f"{last_msg}: {tail}"
+        return False, last_msg
+
+    return False, last_msg
 
 
 def _schedule_service_restart_hint() -> None:
@@ -1701,6 +1719,10 @@ def main(argv=None) -> int:
 
         if not ok:
             print(f"[worker] update failed: {message}", flush=True)
+            return False
+
+        if "already_up_to_date" in (message or "").lower():
+            print(f"[worker] already up to date — no restart ({message})", flush=True)
             return False
 
         print(f"[worker] update succeeded: {message}", flush=True)

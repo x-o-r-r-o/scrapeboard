@@ -1,22 +1,30 @@
 @echo off
 REM Install Scrapeboard worker as a Windows Scheduled Task (runs at logon,
 REM restarts on failure, no terminal required).
+REM Also installs a daily auto-update task (git check → pip → restart).
 REM Usage:
 REM   install_service.bat
 REM   install_service.bat --uninstall
+REM   install_service.bat --no-auto-update
 
 setlocal EnableExtensions
 cd /d "%~dp0"
 set "ROOT=%CD%"
+set "REPO=%ROOT%\.."
 set "TASK=ScrapeboardWorker"
+set "AUTOTASK=ScrapeboardWorkerAutoUpdate"
 set "UNINSTALL=0"
+set "INSTALL_AUTO=1"
 
 if /I "%~1"=="--uninstall" set "UNINSTALL=1"
 if /I "%~1"=="-u" set "UNINSTALL=1"
+if /I "%~1"=="--no-auto-update" set "INSTALL_AUTO=0"
+if /I "%~2"=="--no-auto-update" set "INSTALL_AUTO=0"
 
 if "%UNINSTALL%"=="1" (
   schtasks /Delete /TN "%TASK%" /F >nul 2>&1
-  echo Uninstalled Scheduled Task: %TASK%
+  schtasks /Delete /TN "%AUTOTASK%" /F >nul 2>&1
+  echo Uninstalled Scheduled Tasks: %TASK% and %AUTOTASK%
   exit /b 0
 )
 
@@ -75,5 +83,33 @@ echo   Starts at user logon, runs in background ^(no console window with pythonw
 echo   Logs: %ROOT%\logs\worker.log
 echo   Stop:  install_service.bat --uninstall
 echo   Or:    schtasks /End /TN %TASK%
+
+REM Daily auto-update at 04:00 local
+if "%INSTALL_AUTO%"=="1" (
+  set "AUTOWRAP=%ROOT%\run_auto_update.cmd"
+  > "%AUTOWRAP%" echo @echo off
+  >> "%AUTOWRAP%" echo cd /d "%REPO%"
+  >> "%AUTOWRAP%" echo set SCRAPEBOARD_ASSUME_YES=1
+  >> "%AUTOWRAP%" echo if exist "%ROOT%\.venv\Scripts\python.exe" ^(
+  >> "%AUTOWRAP%" echo   "%ROOT%\.venv\Scripts\python.exe" install.py --role worker --auto-update --yes ^>^> "%ROOT%\logs\auto_update.log" 2^>^&1
+  >> "%AUTOWRAP%" echo ^) else ^(
+  >> "%AUTOWRAP%" echo   python install.py --role worker --auto-update --yes ^>^> "%ROOT%\logs\auto_update.log" 2^>^&1
+  >> "%AUTOWRAP%" echo ^)
+  schtasks /Delete /TN "%AUTOTASK%" /F >nul 2>&1
+  schtasks /Create /TN "%AUTOTASK%" /TR "\"%AUTOWRAP%\"" /SC DAILY /ST 04:00 /RL HIGHEST /F
+  if errorlevel 1 (
+    schtasks /Create /TN "%AUTOTASK%" /TR "\"%AUTOWRAP%\"" /SC DAILY /ST 04:00 /F
+  )
+  if errorlevel 1 (
+    echo WARN: could not create daily auto-update task %AUTOTASK%
+  ) else (
+    echo Installed daily auto-update task "%AUTOTASK%" at 04:00 local.
+    echo   Logs: %ROOT%\logs\auto_update.log
+  )
+) else (
+  schtasks /Delete /TN "%AUTOTASK%" /F >nul 2>&1
+  echo Skipped auto-update task ^(--no-auto-update^).
+)
+
 echo.
 pause

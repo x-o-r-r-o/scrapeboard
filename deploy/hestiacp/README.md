@@ -247,6 +247,31 @@ ssh root@YOUR_SERVER_IP 'bash /home/cvmso/apps/scrapeboard/deploy/hestiacp/updat
 
 **Update keeps** existing `panel/backend/.env` (secrets are not overwritten).
 
+### Daily auto-update
+
+Install/update enables a systemd timer that **checks git once per day**, and only when the remote is ahead runs the full update (pip + frontend build + `systemctl restart scrapeboard`).
+
+```bash
+systemctl list-timers scrapeboard-auto-update.timer
+journalctl -u scrapeboard-auto-update.service -n 50 --no-pager
+# Run once now:
+systemctl start scrapeboard-auto-update.service
+```
+
+Schedule defaults (in `deploy/config.env`):
+
+| Key | Default | Meaning |
+|-----|---------|---------|
+| `AUTO_UPDATE_ENABLED` | `1` | `0` disables the timer |
+| `AUTO_UPDATE_HOUR` | `4` | Local server hour (0–23) |
+| `AUTO_UPDATE_MINUTE` | `0` | Minute |
+
+Manual check without waiting for the timer:
+
+```bash
+bash deploy/hestiacp/auto_update.sh
+```
+
 ---
 
 ## 6. Paths reference
@@ -261,6 +286,7 @@ ssh root@YOUR_SERVER_IP 'bash /home/cvmso/apps/scrapeboard/deploy/hestiacp/updat
 | Public site | `/home/cvmso/web/scrape.cvmso.com/public_html/` |
 | Nginx snippet | `/home/cvmso/conf/web/scrape.cvmso.com/nginx.ssl.conf_scrapeboard` |
 | systemd unit | `/etc/systemd/system/scrapeboard.service` |
+| auto-update timer | `/etc/systemd/system/scrapeboard-auto-update.timer` |
 
 ---
 

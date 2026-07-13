@@ -113,13 +113,14 @@ def _write_update(w: WorkerNode, patch: dict[str, Any]) -> dict[str, Any]:
     return get_update_state(w)
 
 
-def request_update(w: WorkerNode, *, ref: str | None = None) -> dict[str, Any]:
+def request_update(w: WorkerNode, *, ref: str | None = None, message: str | None = None) -> dict[str, Any]:
     """Mark worker for update on next heartbeat/lease.
 
     If the reported agent version cannot handle remote updates, fail immediately
     instead of leaving an infinite pending state.
     """
     wanted = normalize_ref(ref)
+    msg = (message or "Queued by admin").strip()[:2000] or "Queued by admin"
     if not version_supports_remote_update(w.version or ""):
         now = utcnow_iso()
         return _write_update(
@@ -138,7 +139,7 @@ def request_update(w: WorkerNode, *, ref: str | None = None) -> dict[str, Any]:
         {
             "status": "pending",
             "ref": wanted,
-            "message": "Queued by admin",
+            "message": msg,
             "requested_at": utcnow_iso(),
             "started_at": None,
             "finished_at": None,
