@@ -131,6 +131,8 @@ async def _job_out(db: AsyncSession, j: Job, *, viewer: User | None = None) -> J
         owner_id=j.owner_id,
         owner_username=owner.username if owner else None,
         owner_telegram_id=owner.telegram_id if owner else None,
+        source=getattr(j, "source", None) or (j.settings or {}).get("source") or "gmaps",
+        channels=list(getattr(j, "channels", None) or (j.settings or {}).get("channels") or []),
         status=j.status,
         settings=j.settings or {},
         threads=threads,
@@ -259,8 +261,15 @@ async def create_job(
     scrape_websites: str | None = Form(default=None),
     max_results: int | None = Form(default=None),
     name: str | None = Form(default=None),
+    source: str | None = Form(default=None),
+    channels: str | None = Form(default=None),
+    validate_after: str | None = Form(default=None),
+    check_mx: str | None = Form(default=None),
+    check_disposable: str | None = Form(default=None),
+    smtp_probe: str | None = Form(default=None),
+    use_dork: str | None = Form(default=None),
     keywords: UploadFile = File(...),
-    locations: UploadFile = File(...),
+    locations: UploadFile | None = File(default=None),
     user: User = Depends(require_ready_user),
     db: AsyncSession = Depends(get_db),
 ):
@@ -273,17 +282,45 @@ async def create_job(
         overrides["scrape_websites"] = scrape_websites
     if max_results is not None:
         overrides["max_results"] = max_results
+    if validate_after is not None:
+        overrides["validate_after"] = validate_after
+    if check_mx is not None:
+        overrides["check_mx"] = check_mx
+    if check_disposable is not None:
+        overrides["check_disposable"] = check_disposable
+    if smtp_probe is not None:
+        overrides["smtp_probe"] = smtp_probe
+    if use_dork is not None:
+        overrides["use_dork"] = use_dork
+    channel_list = None
+    if channels is not None and str(channels).strip():
+        channel_list = [p.strip() for p in str(channels).split(",") if p.strip()]
+    src = (source or "gmaps").strip().lower()
+    if src in ("maps", "google_maps", "google-maps"):
+        src = "gmaps"
+    kw_bytes = await keywords.read()
+    dork_on = str(use_dork or "").strip().lower() in ("1", "true", "yes", "on")
+    if locations is not None:
+        loc_bytes = await locations.read()
+        loc_name = locations.filename
+    elif src == "email_validate" or (src == "google_search" and dork_on):
+        loc_bytes = b"-\n"
+        loc_name = "locations.txt"
+    else:
+        raise HTTPException(400, "locations file required")
     try:
         job = await jobs_svc.create_job_from_bytes(
             db,
             user,
-            await keywords.read(),
-            await locations.read(),
+            kw_bytes,
+            loc_bytes,
             overrides,
             name=name,
             keywords_name=keywords.filename,
-            locations_name=locations.filename,
+            locations_name=loc_name,
             check_ext=True,
+            source=source,
+            channels=channel_list,
         )
     except PermissionError as e:
         raise HTTPException(403, str(e)) from e

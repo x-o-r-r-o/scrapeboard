@@ -14,6 +14,7 @@ import {
 } from "./pages/AdminPages";
 import { ProxiesAdminPage } from "./pages/ProxyPoolsPage";
 import { CaptchaAdminPage } from "./pages/CaptchaAdminPage";
+import { ScrapersAdminPage } from "./pages/ScrapersAdminPage";
 
 export default function App() {
   return (
@@ -31,6 +32,7 @@ export default function App() {
           <Route path="admin/billing" element={<BillingAdminPage />} />
           <Route path="admin/proxies" element={<ProxiesAdminPage />} />
           <Route path="admin/workers" element={<WorkersAdminPage />} />
+          <Route path="admin/scrapers" element={<ScrapersAdminPage />} />
           <Route path="admin/captcha" element={<CaptchaAdminPage />} />
           <Route path="admin/support" element={<SupportAdminPage />} />
           <Route path="admin/security" element={<SecurityAdminPage />} />

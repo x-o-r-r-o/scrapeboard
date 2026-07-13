@@ -15,8 +15,11 @@ DEMO_COMMANDS = [
         "key": "help",
         "command": "/help",
         "title": "Help",
-        "description": "Commands list plus keyword/location upload formats (same content as /formats)",
-        "response_text": "Commands are listed dynamically from Bot Builder. Upload formats are included below (or type /formats).",
+        "description": "Commands list plus upload formats for all scrapers (same as /formats)",
+        "response_text": (
+            "Use /formats for upload rules, /scrapers for sources, /run source=… to start. "
+            "Full guide: TELEGRAM_USERS.md"
+        ),
         "enabled": True,
         "audience": "everyone",
         "sort_order": 20,
@@ -25,11 +28,21 @@ DEMO_COMMANDS = [
         "key": "formats",
         "command": "/formats",
         "title": "File formats",
-        "description": "Alias — same upload rules as the formats section of /help (not a menu button)",
+        "description": "Upload rules for all scrapers (Maps, Search/dorks, emails, Facebook, social)",
         "response_text": "",
         "enabled": True,
         "audience": "everyone",
         "sort_order": 25,
+    },
+    {
+        "key": "scrapers",
+        "command": "/scrapers",
+        "title": "Scrapers",
+        "description": "List allowed scraper modules + /run source= examples",
+        "response_text": "",
+        "enabled": True,
+        "audience": "users",
+        "sort_order": 28,
     },
     {
         "key": "whoami",
@@ -95,8 +108,14 @@ DEMO_COMMANDS = [
         "key": "run",
         "command": "/run",
         "title": "Run job",
-        "description": "Start a scrape job after uploading valid keywords + locations",
-        "response_text": "Usage: /run [name=MyJob] [engine=chrome] [threads=2]. See /help for upload formats.",
+        "description": "Queue a scrape after uploading inputs (source= / use_dork= / threads=…)",
+        "response_text": (
+            "Usage: /run [source=gmaps|google_search|tiktok_shop|email_harvest|"
+            "email_validate|youtube|…] [name=MyJob] [engine=chrome] [threads=2] "
+            "[use_dork=yes] [validate_after=yes] [max_results=50]\n"
+            "Upload keywords (+ locations unless email_validate or Google dorks). "
+            "See /scrapers and /formats. Guide: TELEGRAM_USERS.md"
+        ),
         "enabled": True,
         "audience": "subscribers",
         "sort_order": 80,
@@ -597,7 +616,7 @@ DEMO_WORKFLOWS = [
             "steps": [
                 {"action": "ensure_telegram_user"},
                 {"if": "no_subscription", "say": "Welcome. Use Buy on the menu or tap a package below."},
-                {"if": "subscribed", "say": "You are ready. Upload keywords & locations (.txt/.csv — see Help), then Run. Use Upgrade for a higher tier."},
+                {"if": "subscribed", "say": "You are ready. Upload .txt/.csv (caption keywords/locations/emails), then /run source=…. See /scrapers and /formats."},
             ],
         },
     },
@@ -646,7 +665,7 @@ DEMO_WORKFLOWS = [
     {
         "key": "job_run",
         "name": "Job run & delivery",
-        "description": "Upload inputs → /run → progress → ZIP via Telegram + panel",
+        "description": "Upload inputs → /run source=… (any enabled scraper) → progress → ZIP via Telegram + panel",
         "enabled": True,
         "is_demo": True,
         "sort_order": 40,

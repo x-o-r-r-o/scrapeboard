@@ -1,10 +1,11 @@
-# Google Maps Scraper — Scrapeboard (Panel) + Worker
+# Scrapeboard — Panel + Worker (multi-source)
 
 | Folder | Role |
 |--------|------|
 | [`panel/`](panel/) | Scrapeboard web control panel (FastAPI + React) — [README](panel/README.md) |
-| [`worker/`](worker/) | Worker-only scrape agent (Windows / macOS / Linux) — [README](worker/README.md) |
-| [`deploy/`](deploy/) | HestiaCP production install (OpsBoard-style) — [README](deploy/hestiacp/README.md) |
+| [`worker/`](worker/) | Worker scrape agent (Maps + Search + email + social) — [README](worker/README.md) |
+| [`deploy/`](deploy/) | HestiaCP production install — [README](deploy/hestiacp/README.md) |
+| [`TELEGRAM_USERS.md`](TELEGRAM_USERS.md) | Telegram end-user guide (all scrapers) |
 
 **Machine role:** first install writes `.scrapeboard-role` (`panel` \| `worker`, gitignored) at the repo/app root. Override with `SCRAPEBOARD_ROLE`. Panel sync excludes `worker/`; worker sync excludes `panel/` and `deploy/`. Mismatched update commands fail unless you reconfigure (`--force-role` / `FORCE_ROLE_SWITCH=1`).
 

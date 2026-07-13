@@ -1079,43 +1079,160 @@ def run_chunk(
     stop: threading.Event | None = None,
     on_progress=None,
 ) -> tuple[int, Path | None]:
-    import gmaps_scraper as gs
+    settings = dict(job.get("settings") or {})
+    source = (
+        str(job.get("source") or settings.get("source") or "gmaps").strip().lower()
+        or "gmaps"
+    )
+    if source in ("maps", "google_maps", "google-maps"):
+        source = "gmaps"
 
     keywords = job.get("keywords") or []
     locations = job.get("locations") or []
-    settings = dict(job.get("settings") or {})
     proxies_text = job.get("proxies_text") or ""
+    channels = job.get("channels") or settings.get("channels") or []
 
-    ensure_engine_ready(settings, skip=skip_setup)
+    needs_browser = source not in ("email_validate",)
+    if needs_browser:
+        ensure_engine_ready(settings, skip=skip_setup)
 
     work_dir.mkdir(parents=True, exist_ok=True)
     proxies_path = work_dir / "proxies.txt"
     proxies_path.write_text(proxies_text, encoding="utf-8")
 
+    import gmaps_scraper as gs
+
     args = gs.build_args_from_settings(settings)
     args.proxies = str(proxies_path)
     args.no_proxy = not bool(proxies_text.strip())
     args.threads = max(1, int(settings.get("threads") or 1))
-    args.skip_setup = True  # already ensured above
+    args.skip_setup = True
     if not settings.get("browser_path"):
         args.browser_path = None
+    # Phase D / Google Search flags (not native argparse fields — attach dynamically)
+    args.validate_after = bool(settings.get("validate_after"))
+    args.check_mx = settings.get("check_mx", True)
+    args.check_disposable = settings.get("check_disposable", True)
+    args.smtp_probe = bool(settings.get("smtp_probe"))
+    args.use_dork = bool(settings.get("use_dork"))
 
     out_dir = work_dir / "out" / str(chunk["id"])
     out_dir.mkdir(parents=True, exist_ok=True)
     stop_event = stop if stop is not None else threading.Event()
     ts = str(job.get("ts") or "run")
 
-    rows, _failed = gs.execute_index_batch(
-        args,
-        keywords,
-        [gs.format_location(l) for l in locations],
-        int(chunk["start"]),
-        int(chunk["end"]),
-        str(out_dir),
-        ts,
-        stop_event,
-        on_progress=on_progress,
-    )
+    if source == "gmaps":
+        rows, _failed = gs.execute_index_batch(
+            args,
+            keywords,
+            [gs.format_location(l) for l in locations],
+            int(chunk["start"]),
+            int(chunk["end"]),
+            str(out_dir),
+            ts,
+            stop_event,
+            on_progress=on_progress,
+        )
+    elif source == "tiktok_shop":
+        import tiktok_shop_scraper as tss
+
+        rows, _failed = tss.execute_index_batch(
+            args,
+            keywords,
+            locations,
+            int(chunk["start"]),
+            int(chunk["end"]),
+            str(out_dir),
+            ts,
+            stop_event,
+            on_progress=on_progress,
+        )
+    elif source == "google_search":
+        import google_search_scraper as gss
+
+        rows, _failed = gss.execute_index_batch(
+            args,
+            keywords,
+            locations,
+            int(chunk["start"]),
+            int(chunk["end"]),
+            str(out_dir),
+            ts,
+            stop_event,
+            on_progress=on_progress,
+        )
+    elif source == "email_harvest":
+        import email_harvest_scraper as ehs
+
+        rows, _failed = ehs.execute_index_batch(
+            args,
+            keywords,
+            locations,
+            int(chunk["start"]),
+            int(chunk["end"]),
+            str(out_dir),
+            ts,
+            stop_event,
+            on_progress=on_progress,
+            channels=channels,
+        )
+    elif source == "email_validate":
+        import email_validator as ev
+
+        rows, _failed = ev.execute_index_batch(
+            args,
+            keywords,
+            locations,
+            int(chunk["start"]),
+            int(chunk["end"]),
+            str(out_dir),
+            ts,
+            stop_event,
+            on_progress=on_progress,
+        )
+    elif source in ("youtube", "reddit", "pinterest", "tiktok"):
+        import social_public_scraper as sps
+
+        rows, _failed = sps.execute_index_batch(
+            args,
+            keywords,
+            locations,
+            int(chunk["start"]),
+            int(chunk["end"]),
+            str(out_dir),
+            ts,
+            stop_event,
+            on_progress=on_progress,
+            source=source,
+        )
+    elif source in (
+        "facebook_pages",
+        "facebook_groups",
+        "facebook_posts",
+        "facebook_comments",
+        "instagram",
+        "linkedin",
+        "twitter",
+    ):
+        import meta_social_scraper as mss
+
+        rows, _failed = mss.execute_index_batch(
+            args,
+            keywords,
+            locations,
+            int(chunk["start"]),
+            int(chunk["end"]),
+            str(out_dir),
+            ts,
+            stop_event,
+            on_progress=on_progress,
+            source=source,
+        )
+    else:
+        raise RuntimeError(
+            f"Scraper source {source!r} is not implemented on this worker yet."
+        )
+
     zip_path = work_dir / f"chunk_{chunk['id']}.zip"
     if any(out_dir.rglob("*.csv")):
         _zip_dir(out_dir, zip_path)

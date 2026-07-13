@@ -60,6 +60,7 @@ def _migrate_sqlite(sync_conn) -> None:
         ("headings", "JSON DEFAULT '[]'"),
         ("features", "JSON DEFAULT '[]'"),
         ("allowed_engines", "JSON DEFAULT '[\"all\"]'"),
+        ("allowed_sources", "JSON DEFAULT '[\"gmaps\"]'"),
         ("dedicated_worker", "BOOLEAN DEFAULT 0"),
         ("scrape_defaults", "JSON DEFAULT '{}'"),
         ("chunk_size", "INTEGER DEFAULT 500"),
@@ -116,6 +117,10 @@ def _migrate_sqlite(sync_conn) -> None:
     jobs = _sqlite_columns(sync_conn, "jobs")
     if jobs and "name" not in jobs:
         sync_conn.execute(text("ALTER TABLE jobs ADD COLUMN name VARCHAR(128)"))
+    if jobs and "source" not in jobs:
+        sync_conn.execute(text("ALTER TABLE jobs ADD COLUMN source VARCHAR(64) DEFAULT 'gmaps'"))
+    if jobs and "channels" not in jobs:
+        sync_conn.execute(text("ALTER TABLE jobs ADD COLUMN channels JSON DEFAULT '[]'"))
 
     job_chunks = _sqlite_columns(sync_conn, "job_chunks")
     if job_chunks:

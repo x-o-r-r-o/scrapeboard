@@ -348,7 +348,8 @@ def pip_install_requirements(pip: Path, req: Path, *, cwd: Path) -> bool:
     code = run([str(pip), "install", "--upgrade", "pip"], cwd=cwd)
     if code != 0:
         return False
-    code = run([str(pip), "install", "-r", str(req)], cwd=cwd)
+    # Refresh packages to latest versions matching the pin file (same as first install).
+    code = run([str(pip), "install", "--upgrade", "-r", str(req)], cwd=cwd)
     if code == 0:
         note_installed(f"pip -r {req.name} ({cwd.name})")
         return True

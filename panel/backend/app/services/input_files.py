@@ -180,6 +180,65 @@ def entries_to_bytes(entries: list[str]) -> bytes:
     return ("\n".join(entries) + "\n").encode("utf-8")
 
 
+def parse_email_list(
+    data: bytes,
+    *,
+    filename: str | None = None,
+    check_ext: bool = False,
+    configured_extensions: list[str] | None = None,
+) -> list[str]:
+    """Parse one-email-per-line or CSV with an email column."""
+    if check_ext:
+        check_extension(filename, configured_extensions)
+    text = decode_utf8(data)
+    emails: list[str] = []
+    seen: set[str] = set()
+
+    # CSV with email header?
+    first = _first_content_line(text)
+    if first and "," in first:
+        lower = first.lower()
+        if "email" in lower.split(",")[0] or any(
+            h.strip().lower() in ("email", "e-mail", "mail") for h in first.split(",")
+        ):
+            try:
+                reader = csv.DictReader(io.StringIO(text))
+                col = None
+                if reader.fieldnames:
+                    for name in reader.fieldnames:
+                        if name and name.strip().lower() in ("email", "e-mail", "mail", "emails"):
+                            col = name
+                            break
+                if col:
+                    for row in reader:
+                        raw = (row.get(col) or "").strip()
+                        if not raw or raw.startswith("#"):
+                            continue
+                        key = raw.lower()
+                        if key not in seen:
+                            seen.add(key)
+                            emails.append(raw)
+                    if emails:
+                        return emails
+            except csv.Error:
+                pass
+
+    for raw in text.splitlines():
+        s = raw.strip()
+        if not s or s.startswith("#"):
+            continue
+        # Take first cell if CSV-like without header
+        if "," in s and "@" in s:
+            s = s.split(",")[0].strip().strip('"')
+        key = s.lower()
+        if key not in seen:
+            seen.add(key)
+            emails.append(s)
+    if not emails:
+        raise InputFileError("Email file has no addresses")
+    return emails
+
+
 def validate_pair(
     kw_bytes: bytes,
     loc_bytes: bytes,
@@ -208,39 +267,63 @@ def validate_pair(
 
 
 def formats_help_text(*, max_upload_mb: int | None = None, extensions: list[str] | None = None) -> str:
-    """User-facing format guide for /help and /formats."""
+    """User-facing format guide for /help and /formats (keep under Telegram’s ~4k limit)."""
     exts = ", ".join(allowed_extensions(extensions))
     size = f"\n• Size limit: {max_upload_mb} MB (plan may be lower)" if max_upload_mb else ""
     return (
-        "📁 How to upload inputs\n"
+        "📁 Upload inputs (Telegram or panel)\n"
         "\n"
-        "Send two documents (Telegram) or upload two files (panel):\n"
-        "1) Keywords — caption or name must include “keywords”\n"
-        "2) Locations — caption or name must include “locations”\n"
-        "Then send /run (or Queue job in the panel).\n"
+        "1) Send a .txt/.csv document with a caption:\n"
+        "   • keywords / dork — search queries\n"
+        "   • locations / region — cities or regions\n"
+        "   • emails — for email_validate only\n"
+        "2) /run source=…   (default source=gmaps)\n"
+        "3) /status · /stop\n"
         "\n"
-        f"Accepted types: {exts}\n"
-        "Encoding: UTF-8\n"
-        f"{size}"
+        "Your allowed scrapers: /scrapers\n"
+        "Full written guide: TELEGRAM_USERS.md (repo / admin)\n"
         "\n"
-        "TXT (and CSV without a header column):\n"
-        "• One entry per line\n"
-        "• Blank lines and # comments are ignored\n"
+        "—— Scrapers (source=) ——\n"
+        "Maps:     gmaps (default)\n"
+        "Commerce: tiktok_shop\n"
+        "Search:   google_search  (+ use_dork=yes for Google dorks)\n"
+        "Email:    email_harvest  (+ validate_after=yes)\n"
+        "          email_validate (emails file only)\n"
+        "Facebook: facebook_pages | facebook_groups |\n"
+        "          facebook_posts | facebook_comments\n"
+        "Social:   youtube | reddit | pinterest | tiktok |\n"
+        "          instagram | linkedin | twitter\n"
         "\n"
-        "Keywords example:\n"
+        "—— /run examples ——\n"
+        "/run source=gmaps threads=2 name=Dentists-TX\n"
+        "/run source=google_search use_dork=yes\n"
+        "/run source=email_validate\n"
+        "/run source=email_harvest validate_after=yes\n"
+        "/run source=tiktok_shop\n"
+        "/run source=youtube max_results=30\n"
+        "\n"
+        f"Accepted types: {exts} · UTF-8{size}\n"
+        "\n"
+        "TXT: one entry per line (# comments OK)\n"
+        "\n"
+        "Keywords:\n"
         "dentist\n"
         "plumber\n"
-        "coffee shop\n"
         "\n"
-        "Locations example (city,state,country):\n"
+        "Locations (city,state,country):\n"
         "Austin,Texas,USA\n"
         "Miami,Florida,USA\n"
         "\n"
-        "CSV (optional):\n"
-        "• Keywords: header column named keyword (or query / search)\n"
-        "• Locations: header column named location — or same one-per-line "
-        "city,state,country format as TXT\n"
+        "Google dorks (source=google_search use_dork=yes):\n"
+        'site:linkedin.com/in "dentist" Austin\n'
+        "filetype:pdf invoice 2024\n"
+        "(locations optional — omit or use -)\n"
         "\n"
-        "Jobs are not started if a file is empty, unreadable, wrong type, "
-        "or has no queries/locations."
+        "Emails (source=email_validate, caption emails):\n"
+        "one@example.com\n"
+        "two@example.com\n"
+        "\n"
+        "CSV headers (optional): keyword/query · location · email\n"
+        "\n"
+        "Jobs are rejected if a file is empty, unreadable, or wrong type."
     )

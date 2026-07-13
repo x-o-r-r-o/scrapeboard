@@ -192,6 +192,27 @@ class CaptchaSettingsUpdate(BaseModel):
     captcha_backup_host: str | None = None
 
 
+class ScraperCatalogItem(BaseModel):
+    id: str
+    label: str
+    group: str
+    group_label: str
+    description: str
+    implemented: bool
+    risk: str
+    inputs: str
+    selectable: bool
+
+
+class ScraperSettingsOut(BaseModel):
+    enabled_sources: list[str]
+    catalog: list[ScraperCatalogItem] = Field(default_factory=list)
+
+
+class ScraperSettingsUpdate(BaseModel):
+    enabled_sources: list[str]
+
+
 class PackageOut(BaseModel):
     id: int
     slug: str
@@ -202,6 +223,26 @@ class PackageOut(BaseModel):
     threads: int
     max_upload_mb: int
     allowed_engines: list
+    allowed_sources: list = Field(
+        default_factory=lambda: [
+            "gmaps",
+            "tiktok_shop",
+            "google_search",
+            "email_harvest",
+            "email_validate",
+            "youtube",
+            "reddit",
+            "pinterest",
+            "tiktok",
+            "facebook_pages",
+            "facebook_groups",
+            "facebook_posts",
+            "facebook_comments",
+            "instagram",
+            "linkedin",
+            "twitter",
+        ]
+    )
     description: str = ""
     headings: list = Field(default_factory=list)
     features: list = Field(default_factory=list)
@@ -222,6 +263,26 @@ class PackageCreate(BaseModel):
     threads: int = 2
     max_upload_mb: int = 5
     allowed_engines: list = Field(default_factory=lambda: ["all"])
+    allowed_sources: list = Field(
+        default_factory=lambda: [
+            "gmaps",
+            "tiktok_shop",
+            "google_search",
+            "email_harvest",
+            "email_validate",
+            "youtube",
+            "reddit",
+            "pinterest",
+            "tiktok",
+            "facebook_pages",
+            "facebook_groups",
+            "facebook_posts",
+            "facebook_comments",
+            "instagram",
+            "linkedin",
+            "twitter",
+        ]
+    )
     description: str = ""
     headings: list = Field(default_factory=list)
     features: list = Field(default_factory=list)
@@ -239,6 +300,7 @@ class PackageUpdate(BaseModel):
     threads: int | None = None
     max_upload_mb: int | None = None
     allowed_engines: list | None = None
+    allowed_sources: list | None = None
     description: str | None = None
     headings: list | None = None
     features: list | None = None
@@ -611,6 +673,8 @@ class JobOut(BaseModel):
     owner_id: int
     owner_username: str | None = None
     owner_telegram_id: str | None = None
+    source: str = "gmaps"
+    channels: list = Field(default_factory=list)
     status: str
     settings: dict
     threads: int = 1

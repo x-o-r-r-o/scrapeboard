@@ -406,12 +406,12 @@ source .venv/bin/activate
 
 echo "--- Installing requirements ---"
 python -m pip install --upgrade pip
-if ! python -m pip install -r requirements.txt; then
+if ! python -m pip install --upgrade -r requirements.txt; then
   echo "pip install failed"
   if [[ "$OS" == "Linux" ]] && can_elevate; then
     echo "Retrying after ensuring build-essential…"
     ensure_linux_build_essentials_if_needed || true
-    if ! python -m pip install -r requirements.txt; then
+    if ! python -m pip install --upgrade -r requirements.txt; then
       echo "pip install failed again"
       note_manual "Fix pip errors, then re-run setup_and_run.sh"
       print_summary

@@ -126,12 +126,22 @@ async def list_packages(user: User = Depends(require_ready_user), db: AsyncSessi
     if user.role != "admin":
         q = q.where(Package.is_active == True)  # noqa: E712
     rows = (await db.execute(q)).scalars().all()
-    # Ensure API always returns filled scrape_defaults
+    # Ensure API always returns filled scrape_defaults / allowed_sources
+    from app.services.scraper_registry import normalize_source_list
+
     out = []
+    dirty = False
     for pkg in rows:
         if not pkg.scrape_defaults:
             pkg.scrape_defaults = package_defaults_from_package(pkg)
+            dirty = True
+        normalized = normalize_source_list(getattr(pkg, "allowed_sources", None))
+        if list(getattr(pkg, "allowed_sources", None) or []) != normalized:
+            pkg.allowed_sources = normalized
+            dirty = True
         out.append(pkg)
+    if dirty:
+        await db.commit()
     return out
 
 
@@ -148,6 +158,9 @@ async def create_package(
         raise HTTPException(400, "Slug exists")
     data = body.model_dump()
     scrape_defaults = data.pop("scrape_defaults", None)
+    from app.services.scraper_registry import normalize_source_list
+
+    data["allowed_sources"] = normalize_source_list(data.get("allowed_sources"))
     pkg = Package(**data)
     if scrape_defaults:
         pkg.scrape_defaults = normalize_worker_config(
@@ -178,6 +191,10 @@ async def update_package(
         raise HTTPException(404, "Not found")
     data = body.model_dump(exclude_unset=True)
     scrape_defaults = data.pop("scrape_defaults", None)
+    if "allowed_sources" in data:
+        from app.services.scraper_registry import normalize_source_list
+
+        data["allowed_sources"] = normalize_source_list(data["allowed_sources"])
     for k, v in data.items():
         setattr(pkg, k, v)
     if scrape_defaults is not None:

@@ -17,6 +17,7 @@ const ADMIN_LINKS: NavLink[] = [
   { to: "/app/admin/billing", label: "Billing & Telegram" },
   { to: "/app/admin/proxies", label: "Proxy pools" },
   { to: "/app/admin/workers", label: "Workers" },
+  { to: "/app/admin/scrapers", label: "Scrapers" },
   { to: "/app/admin/captcha", label: "2captcha / CaptchaAI" },
   { to: "/app/admin/support", label: "Support" },
   { to: "/app/admin/security", label: "Security" },

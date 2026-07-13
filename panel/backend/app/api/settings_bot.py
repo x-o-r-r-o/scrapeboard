@@ -591,7 +591,9 @@ async def install_demos(_: User = Depends(require_admin), __: User = Depends(req
             row.command = cmd.get("command", row.command)
             row.audience = cmd.get("audience", row.audience)
             row.sort_order = cmd.get("sort_order", row.sort_order)
-            if cmd.get("response_text") is not None and not row.response_text:
+            if cmd.get("response_text") is not None and (
+                not row.response_text or cmd["key"] in ("run", "help", "formats", "scrapers")
+            ):
                 row.response_text = cmd["response_text"]
     existing_wf = {w.key for w in (await db.execute(select(BotWorkflow))).scalars().all()}
     for i, wf in enumerate(DEMO_WORKFLOWS):

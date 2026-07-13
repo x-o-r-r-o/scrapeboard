@@ -399,7 +399,17 @@ async def create_job_from_bytes(
     keywords_name: str | None = None,
     locations_name: str | None = None,
     check_ext: bool = False,
+    source: str | None = None,
+    channels: list | None = None,
 ) -> Job:
+    from app.services.scraper_registry import (
+        SOURCE_GMAPS,
+        get_scraper,
+        normalize_channels,
+        normalize_source_list,
+    )
+    from app.services.scraper_settings import get_scraper_settings
+
     perms = effective_perms(user)
     if not perms.get("can_run") and user.role != "admin":
         raise PermissionError("No run permission")
@@ -410,6 +420,55 @@ async def create_job_from_bytes(
     if user.role != "admin" and not sub:
         raise PermissionError("Active subscription required")
 
+    overrides = overrides or {}
+    # Resolve scraper source (Form / Telegram / overrides). Default gmaps.
+    raw_source = source if source is not None else overrides.get("source")
+    raw_key = str(raw_source).strip().lower() if raw_source not in (None, "") else ""
+    if raw_key in ("maps", "google_maps", "google-maps"):
+        raw_key = SOURCE_GMAPS
+    if raw_key in ("x", "twitter_x", "x_twitter"):
+        raw_key = "twitter"
+    if raw_key:
+        job_source = raw_key
+        spec = get_scraper(job_source)
+        if spec is None:
+            raise ValueError(f"Unknown scraper source: {raw_source!r}")
+    else:
+        job_source = SOURCE_GMAPS
+        spec = get_scraper(job_source)
+    assert spec is not None
+    if not spec.implemented:
+        raise ValueError(
+            f"Scraper {spec.label!r} is registered but not available yet. "
+            f"Use Google Maps for now."
+        )
+
+    site = await get_scraper_settings(db)
+    enabled = set(normalize_source_list(site.enabled_sources))
+    if job_source not in enabled and user.role != "admin":
+        raise PermissionError(f"Scraper {spec.label!r} is disabled on this site")
+
+    pkg = None
+    package_engines = None
+    package_sources = None
+    if user.role != "admin" and sub and getattr(sub, "package_id", None):
+        pkg = await db.get(Package, sub.package_id)
+        if pkg:
+            package_engines = pkg.allowed_engines
+            package_sources = normalize_source_list(getattr(pkg, "allowed_sources", None))
+    if user.role != "admin":
+        allowed = set(package_sources or [SOURCE_GMAPS])
+        if job_source not in allowed:
+            raise PermissionError(f"Scraper {spec.label!r} is not included in your package")
+
+    raw_channels = channels if channels is not None else overrides.get("channels")
+    job_channels = normalize_channels(raw_channels)
+    if job_source == "email_harvest":
+        if not job_channels:
+            job_channels = ["google_search"]
+    else:
+        job_channels = []
+
     cfg = get_settings()
     max_mb = 5
     if user.role == "admin":
@@ -417,30 +476,37 @@ async def create_job_from_bytes(
     elif sub:
         max_mb = int(getattr(sub, "max_upload_mb", None) or perms.get("max_upload_mb") or 5)
     max_bytes = max(1, max_mb) * 1024 * 1024
-    if len(kw_bytes) + len(loc_bytes) > max_bytes:
+    if len(kw_bytes) + len(loc_bytes or b"") > max_bytes:
         raise ValueError(f"Upload exceeds plan limit ({max_mb} MB)")
 
     billing = await get_billing(db)
-    try:
-        kw_lines, loc_lines = validate_pair(
-            kw_bytes,
-            loc_bytes,
-            keywords_name=keywords_name,
-            locations_name=locations_name,
-            configured_extensions=billing.allowed_extensions,
-            check_ext=check_ext,
-        )
-    except InputFileError as e:
-        raise ValueError(str(e)) from e
+    from app.services.input_files import parse_email_list
 
-    pkg = None
-    package_engines = None
-    if user.role != "admin" and sub and getattr(sub, "package_id", None):
-        pkg = await db.get(Package, sub.package_id)
-        if pkg:
-            package_engines = pkg.allowed_engines
+    if job_source == "email_validate":
+        try:
+            kw_lines = parse_email_list(
+                kw_bytes,
+                filename=keywords_name,
+                check_ext=check_ext,
+                configured_extensions=billing.allowed_extensions,
+            )
+        except InputFileError as e:
+            raise ValueError(str(e)) from e
+        loc_lines = ["-"]
+    else:
+        try:
+            kw_lines, loc_lines = validate_pair(
+                kw_bytes,
+                loc_bytes if loc_bytes is not None else b"",
+                keywords_name=keywords_name,
+                locations_name=locations_name,
+                configured_extensions=billing.allowed_extensions,
+                check_ext=check_ext,
+            )
+        except InputFileError as e:
+            raise ValueError(str(e)) from e
+
     defaults = package_defaults_from_package(pkg)
-    overrides = overrides or {}
     settings = {
         "engine": overrides.get("engine") or defaults.get("engine") or "chrome",
         "threads": int(overrides.get("threads") or defaults.get("threads") or 2),
@@ -452,7 +518,40 @@ async def create_job_from_bytes(
             if overrides.get("max_results") is not None
             else (defaults.get("max_results") if defaults.get("max_results") is not None else 0)
         ),
+        "source": job_source,
     }
+    if job_channels:
+        settings["channels"] = job_channels
+
+    # Phase D flags
+    validate_after = overrides.get("validate_after")
+    if validate_after is None:
+        validate_after = False
+    if isinstance(validate_after, str):
+        validate_after = validate_after.strip().lower() in ("1", "true", "yes", "on")
+    else:
+        validate_after = bool(validate_after)
+    if job_source == "email_harvest" and validate_after:
+        settings["validate_after"] = True
+    if job_source == "email_validate":
+        settings["check_mx"] = str(overrides.get("check_mx", "yes")).lower() not in ("0", "false", "no")
+        settings["check_disposable"] = str(overrides.get("check_disposable", "yes")).lower() not in (
+            "0",
+            "false",
+            "no",
+        )
+        settings["smtp_probe"] = str(overrides.get("smtp_probe", "no")).lower() in ("1", "true", "yes")
+        # Validator does not need a browser engine
+        settings["engine"] = "chrome"
+
+    # Google Search dork mode: keywords file holds full queries (operators OK).
+    use_dork = overrides.get("use_dork")
+    if isinstance(use_dork, str):
+        use_dork = use_dork.strip().lower() in ("1", "true", "yes", "on")
+    else:
+        use_dork = bool(use_dork)
+    if job_source == "google_search" and use_dork:
+        settings["use_dork"] = True
 
     thread_cap = await user_thread_allowance(db, user)
     requested = max(1, int(settings["threads"]))
@@ -468,7 +567,13 @@ async def create_job_from_bytes(
     settings["queued_for_threads"] = requested > free
 
     ae = package_engines if package_engines else perms.get("allowed_engines", "all")
-    if ae and ae != "all" and settings["engine"] not in ae and user.role != "admin":
+    if (
+        job_source != "email_validate"
+        and ae
+        and ae != "all"
+        and settings["engine"] not in ae
+        and user.role != "admin"
+    ):
         raise PermissionError(f"Engine {settings['engine']} not allowed")
 
     job_dir = cfg.uploads_dir / f"user_{user.id}"
@@ -480,7 +585,10 @@ async def create_job_from_bytes(
     kw_path.write_bytes(entries_to_bytes(kw_lines))
     loc_path.write_bytes(entries_to_bytes(loc_lines))
 
-    total = len(kw_lines) * len(loc_lines)
+    if job_source == "email_validate":
+        total = len(kw_lines)
+    else:
+        total = len(kw_lines) * len(loc_lines)
     try:
         pkg_chunk = max(1, int(getattr(pkg, "chunk_size", None) or DEFAULT_CHUNK_SIZE))
     except (TypeError, ValueError):
@@ -499,6 +607,8 @@ async def create_job_from_bytes(
         public_id=public_id,
         owner_id=user.id,
         name=display_name,
+        source=job_source,
+        channels=job_channels,
         status="queued",
         settings=settings,
         keywords_path=str(kw_path),
@@ -573,62 +683,145 @@ async def update_queued_job_settings(
 
 
 def merge_job_csvs(public_id: str, owner_id: int | None = None) -> Path | None:
-    """Merge all part CSVs into per-location files and return zip path."""
+    """Merge all part CSVs into result files and return zip path.
+
+    Google Maps parts use per-location files (query_location + name/address dedupe).
+    Other scrapers (TikTok Shop, Google Search, email harvest) merge into a single
+    ``results.csv`` with the union of observed columns.
+    """
     oid = owner_id if owner_id is not None else owner_id_from_public_id(public_id)
     parts = job_parts_dir(public_id, oid)
     merge = job_merge_dir(public_id, oid)
-    by_loc: dict[str, list[dict]] = {}
-    seen: dict[str, set[tuple[str, str]]] = {}
+
+    all_rows: list[dict] = []
+    all_fields: list[str] = []
+    seen_fields: set[str] = set()
+    maps_mode = False
 
     for csv_path in parts.rglob("*.csv"):
         try:
             with open(csv_path, newline="", encoding="utf-8") as fh:
-                for row in csv.DictReader(fh):
-                    loc = row.get("query_location") or "results"
-                    key = (row.get("name") or "", row.get("address") or "")
-                    bucket = seen.setdefault(loc, set())
-                    if key in bucket:
-                        continue
-                    bucket.add(key)
-                    by_loc.setdefault(loc, []).append(row)
+                reader = csv.DictReader(fh)
+                if reader.fieldnames:
+                    for f in reader.fieldnames:
+                        if f and f not in seen_fields:
+                            seen_fields.add(f)
+                            all_fields.append(f)
+                    if "query_location" in reader.fieldnames and "name" in reader.fieldnames:
+                        maps_mode = True
+                for row in reader:
+                    all_rows.append(dict(row))
         except OSError:
             continue
 
-    if not by_loc:
+    if not all_rows:
         return None
 
-    fieldnames = [
-        "keyword",
-        "query_location",
-        "name",
-        "address",
-        "phone",
-        "email",
-        "website",
-        "review_count",
-        "category",
-        "latitude",
-        "longitude",
-        "opening_hours",
-        "facebook",
-        "instagram",
-        "twitter",
-        "linkedin",
-        "youtube",
-        "tiktok",
-        "pinterest",
-        "whatsapp",
-        "telegram",
-        "maps_url",
-    ]
+    merge.mkdir(parents=True, exist_ok=True)
     written: list[Path] = []
-    for loc, rows in by_loc.items():
-        safe = "".join(c if c.isalnum() or c in "-_" else "_" for c in loc)[:80]
-        out = merge / f"{safe}.csv"
+
+    if maps_mode:
+        by_loc: dict[str, list[dict]] = {}
+        seen: dict[str, set[tuple[str, str]]] = {}
+        for row in all_rows:
+            loc = row.get("query_location") or "results"
+            key = (row.get("name") or "", row.get("address") or "")
+            bucket = seen.setdefault(loc, set())
+            if key in bucket:
+                continue
+            bucket.add(key)
+            by_loc.setdefault(loc, []).append(row)
+        fieldnames = [
+            "keyword",
+            "query_location",
+            "name",
+            "address",
+            "phone",
+            "email",
+            "website",
+            "review_count",
+            "category",
+            "latitude",
+            "longitude",
+            "opening_hours",
+            "facebook",
+            "instagram",
+            "twitter",
+            "linkedin",
+            "youtube",
+            "tiktok",
+            "pinterest",
+            "whatsapp",
+            "telegram",
+            "maps_url",
+        ]
+        for loc, rows in by_loc.items():
+            safe = "".join(c if c.isalnum() or c in "-_" else "_" for c in loc)[:80]
+            out = merge / f"{safe}.csv"
+            with open(out, "w", newline="", encoding="utf-8") as fh:
+                w = csv.DictWriter(fh, fieldnames=fieldnames, extrasaction="ignore")
+                w.writeheader()
+                for r in rows:
+                    w.writerow(r)
+            written.append(out)
+    else:
+        # Prefer stable column order for known scrapers
+        preferred = [
+            "email",
+            "email_type",
+            "status",
+            "reason",
+            "syntax_ok",
+            "mx_ok",
+            "is_disposable",
+            "is_role",
+            "smtp_ok",
+            "handle",
+            "entity_type",
+            "subreddit",
+            "author",
+            "channel",
+            "channel_url",
+            "username",
+            "nickname",
+            "followers",
+            "bio",
+            "profile_url",
+            "shop_signal",
+            "keyword",
+            "location",
+            "region",
+            "rank",
+            "title",
+            "url",
+            "snippet",
+            "source_url",
+            "page_title",
+            "channel",
+            "discovery_url",
+            "query",
+        ]
+        fieldnames = [f for f in preferred if f in seen_fields]
+        fieldnames.extend(f for f in all_fields if f not in fieldnames)
+        # Dedupe: email+source_url or username+profile_url or full row tuple
+        deduped: list[dict] = []
+        seen_keys: set[tuple] = set()
+        for row in all_rows:
+            if row.get("email"):
+                key = ("e", row.get("email"), row.get("source_url") or row.get("url"))
+            elif row.get("username"):
+                key = ("u", row.get("username"), row.get("profile_url") or row.get("region"))
+            else:
+                key = ("r", tuple(sorted((k, str(v)) for k, v in row.items() if v)))
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+            deduped.append(row)
+        out = merge / "results.csv"
         with open(out, "w", newline="", encoding="utf-8") as fh:
-            w = csv.DictWriter(fh, fieldnames=fieldnames, extrasaction="ignore")
+            w = csv.DictWriter(fh, fieldnames=fieldnames or ["value"], extrasaction="ignore")
             w.writeheader()
-            for r in rows:
+            for r in deduped:
                 w.writerow(r)
         written.append(out)
 

@@ -1,5 +1,11 @@
 # Google Maps Business Scraper
 
+> **Scrapeboard note:** In the panel/worker product this engine is the **`gmaps`** job source.
+> Other sources (Google Search + dorks, email harvest/validate, TikTok Shop, Facebook, social)
+> are separate modules — see [`../TELEGRAM_USERS.md`](../TELEGRAM_USERS.md),
+> [`README.md`](README.md), and root [`../README.md`](../README.md#scraper-modules).
+> This file documents **Maps** CLI flags and behavior for `gmaps_scraper.py`.
+
 Multi-threaded Google Maps scraper. Every keyword is searched against every
 location, results stream to a CSV row-by-row (nothing is lost on interruption),
 and you can drive it with **Chrome** (Playwright Chromium), **Brave**, or

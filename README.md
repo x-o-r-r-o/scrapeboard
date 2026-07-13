@@ -1,20 +1,23 @@
 # Scrapeboard
 
-**Scrapeboard** is a production Google Maps lead-scraping platform with:
+**Scrapeboard** is a production multi-source lead-scraping platform with:
 
-1. **Control panel** ([`panel/`](panel/)) — FastAPI + React: users, 2FA, billing, jobs, workers, Bot Builder  
-2. **Worker agents** ([`worker/`](worker/)) — scrape-only machines (Windows / macOS / Linux) that pull job chunks  
+1. **Control panel** ([`panel/`](panel/)) — FastAPI + React: users, 2FA, billing, jobs, scrapers, workers, Bot Builder  
+2. **Worker agents** ([`worker/`](worker/)) — scrape-only machines (Windows / macOS / Linux) that pull job chunks for Maps, Search, email, TikTok Shop, Facebook, and social sources  
 3. **Telegram bot** — optional full bot wired to the same backend (commands, payments, jobs, support)
+
+**Telegram end users:** see [`TELEGRAM_USERS.md`](TELEGRAM_USERS.md) (`/help` · `/formats` · `/scrapers` on the bot).
 
 Deploy the panel once on **HestiaCP** (OpsBoard / OmniDesk style). It runs as **systemd** until you remove it. Workers on other machines talk only to **`https://scrape.cvmso.com`**.
 
 | Doc | Path |
 |-----|------|
 | **Run by default** | [below](#run-by-default) |
+| **Telegram users** | [`TELEGRAM_USERS.md`](TELEGRAM_USERS.md) |
 | Panel | [`panel/README.md`](panel/README.md) |
 | Worker | [`worker/README.md`](worker/README.md) |
 | HestiaCP deploy | [`deploy/hestiacp/README.md`](deploy/hestiacp/README.md) |
-| Scrape engine flags | [`worker/SCRAPER.md`](worker/SCRAPER.md) |
+| Maps engine flags | [`worker/SCRAPER.md`](worker/SCRAPER.md) |
 | Short map | [`STRUCTURE.md`](STRUCTURE.md) |
 
 ---
@@ -30,13 +33,14 @@ Deploy the panel once on **HestiaCP** (OpsBoard / OmniDesk style). It runs as **
 7. [Panel setup guide](#panel-setup-guide)
 8. [Worker setup](#worker-setup)
 9. [Telegram Bot Builder](#telegram-bot-builder)
-10. [Billing & subscriptions](#billing--subscriptions)
-11. [Jobs, proxies & scrape settings](#jobs-proxies--scrape-settings)
-12. [API overview](#api-overview)
-13. [Operations & troubleshooting](#operations--troubleshooting)
-14. [Updating](#updating)
-15. [Environment reference](#environment-reference)
-16. [License / notes](#license--notes)
+10. [Scraper modules](#scraper-modules)
+11. [Billing & subscriptions](#billing--subscriptions)
+12. [Jobs, proxies & scrape settings](#jobs-proxies--scrape-settings)
+13. [API overview](#api-overview)
+14. [Operations & troubleshooting](#operations--troubleshooting)
+15. [Updating](#updating)
+16. [Environment reference](#environment-reference)
+17. [License / notes](#license--notes)
 
 ---
 
@@ -85,6 +89,7 @@ There is **no public registration**. Admins create users. Support tickets open v
 ```
 scrapeboard/
 ├── README.md                 ← this documentation
+├── TELEGRAM_USERS.md         ← Telegram end-user guide (all scrapers)
 ├── STRUCTURE.md
 ├── .scrapeboard-role         ← local machine role panel|worker (gitignored)
 ├── install.py / install.sh / install.bat / install.command
@@ -106,15 +111,18 @@ scrapeboard/
 │   ├── frontend/             ← React (Vite)
 │   └── data/                 ← DB, uploads, results (runtime; not in git)
 └── worker/                   ← scrape agent (see worker/README.md)
-    ├── agent.py              ← wizard + panel client
-    ├── gmaps_scraper.py      ← browser scrape engine
+    ├── agent.py              ← wizard + panel client + multi-source dispatch
+    ├── gmaps_scraper.py      ← Maps engine (+ shared browser bootstrap)
+    ├── google_search_scraper.py / email_* / tiktok_shop_* / social_* / meta_*
     ├── setup_and_run.*       ← first-run wizard (+ optional service install)
     ├── install_service.*     ← **default** background service (login/boot)
     ├── update.sh / update.bat← worker-role git sync (no panel/)
     ├── requirements.txt
-    ├── SCRAPER.md
+    ├── SCRAPER.md            ← Maps engine flags
     └── worker_config.json    ← created on first run (gitignored)
 ```
+
+End-user Telegram guide: [`TELEGRAM_USERS.md`](TELEGRAM_USERS.md).
 
 ---
 
@@ -122,11 +130,12 @@ scrapeboard/
 
 ### Scraping (worker)
 
+- **Multi-source:** Google Maps (`gmaps`), Google Search (+ dorks), email harvest/validate, TikTok Shop, YouTube, Reddit, Pinterest, TikTok, Facebook (pages/groups/posts/comments), Instagram, LinkedIn, X/Twitter — see [Scraper modules](#scraper-modules)  
 - Engines: Chrome (Playwright Chromium), Google Chrome, Edge, Brave, Camoufox  
 - Multi-threaded browsers, proxy pools, pacing / cool-downs, stealth  
-- Exhaustive Maps scroll, optional website enrich (email + socials)  
+- Maps: exhaustive scroll, optional website enrich (email + socials)  
 - CAPTCHA providers: none / 2captcha / CaptchaAI  
-- Resumable chunked jobs, per-location CSV, ZIP delivery  
+- Resumable chunked jobs, CSV + ZIP delivery  
 - First-run wizard + auto browser/package install (Windows / macOS / Linux)  
 - Clean shutdown of browsers on stop  
 
@@ -140,7 +149,8 @@ scrapeboard/
 - `/start` auto-creates a panel user linked to the Telegram id and shows packages to buy  
 - Admin proxy pools assigned to workers  
 - Worker enrollment tokens, online CPU/RAM, drain/disable  
-- Jobs: upload keywords/locations, queue, progress, stop, download ZIP  
+- Jobs: pick scraper, upload inputs, queue, progress, stop, download ZIP  
+- Package **allowed sources** + Admin **Scrapers** enable flags  
 - Users only see **their own** jobs and stats  
 - Scrape defaults (admin)  
 - Global captcha solvers primary + backup (admin)  
@@ -151,8 +161,11 @@ scrapeboard/
 - Connect BotFather token from the panel  
 - Toggle commands, audiences, welcome text, support chat  
 - `/packages` `/buy` `/paid` `/subscription` `/run` `/status` `/stop` `/support`  
-- Upload keyword/location files with captions  
-- **Telegram admin** (`role=admin` + linked `telegram_id` + Bot Builder admin commands): `/admin` menu for users, subscriptions, workers, packages, jobs, proxies, captcha/bot toggles — see [`panel/README.md`](panel/README.md#telegram-admin)  
+- `/formats` `/scrapers` — upload rules + allowed scraper modules  
+- Upload keyword / location / email files with captions  
+- `/run source=…` for any enabled module (Maps default)  
+- **User guide:** [`TELEGRAM_USERS.md`](TELEGRAM_USERS.md)  
+- **Telegram admin** (`role=admin` + linked `telegram_id` + Bot Builder admin commands): `/admin` menu — see [`panel/README.md`](panel/README.md#telegram-admin)  
 - Results optionally delivered as Telegram documents  
 
 ---
@@ -518,11 +531,12 @@ See [Telegram Bot Builder](#telegram-bot-builder).
 ### 8. User flow (Jobs)
 
 1. Active subscription (or admin)  
-2. **Jobs → New job** → upload `keywords.txt` + `locations.txt`  
-3. Optional engine/threads (each job’s threads must be ≤ plan allowance)  
+2. **Jobs → New job** → pick scraper → upload inputs (`keywords`/`locations`, or `emails` / Google dorks)  
+3. Optional engine/threads/dork/validate flags (threads ≤ plan allowance)  
 4. **One job at a time:** only one job per owner runs; additional jobs stay **queued** until the running one finishes (completes / stops / fails). Thread allowance still caps threads on that single job.  
 5. Watch progress; **Stop** or wait for complete → **Download** ZIP  
 
+Telegram: `/scrapers` · `/formats` · `/run source=…` — [`TELEGRAM_USERS.md`](TELEGRAM_USERS.md).  
 UI route map and API notes: [`panel/README.md`](panel/README.md).
 
 ---
@@ -563,7 +577,7 @@ python agent.py --skip-setup     # never auto-install
 
 1. `POST /api/worker-api/heartbeat` (CPU/RAM)  
 2. `POST /api/worker-api/lease` → chunk + keywords/locations + settings + proxies  
-3. Runs `gmaps_scraper` for that chunk  
+3. Runs the scraper for that chunk’s `source` (Maps, Search, email, social, …)  
 4. Zips CSV parts → `POST /api/worker-api/upload`  
 5. `POST /api/worker-api/ack` → panel merges when all chunks done → user ZIP + optional Telegram  
 
@@ -605,13 +619,13 @@ Click **Install / refresh demos** to load onboarding, USDT buy, manual buy, job 
 
 | Command | Who | Purpose |
 |---------|-----|---------|
-| `/start` `/help` `/formats` | everyone / gated | Welcome (auto-create account + packages), help, upload format rules |
+| `/start` `/help` `/formats` `/scrapers` | everyone / gated | Welcome, help, upload rules, allowed scrapers |
 | `/whoami` | everyone | Telegram id + link status |
 | `/packages` | everyone* | List plans |
 | `/buy <slug>` | linked users | Create order + payment instructions |
 | `/paid <txid>` | linked users | On-chain USDT TRC-20 verify (BEP-20: tip for admin) |
 | `/subscription` | users | Own plan |
-| `/run [k=v…]` | subscribers | Queue job from uploaded inputs |
+| `/run [k=v…]` | subscribers | Queue job (`source=`, `use_dork=`, …) |
 | `/status` | users | **Own jobs only** |
 | `/stop` | subscribers | Stop own job + partial ZIP |
 | `/support …` | users | Open/follow-up ticket → support chat; admin replies notify user here |
@@ -628,6 +642,8 @@ Click **Install / refresh demos** to load onboarding, USDT buy, manual buy, job 
 \* if “public packages” enabled  
 \*\* only if “admin Telegram commands” enabled; runtime also requires `User.role=admin` linked via `telegram_id`. Full list: [`panel/README.md`](panel/README.md#telegram-admin).  
 
+**End-user instructions (all modules):** [`TELEGRAM_USERS.md`](TELEGRAM_USERS.md)
+
 ### Support tickets
 
 1. **Bot Builder**: enable Support + set support chat id (admin Telegram id or group).
@@ -638,17 +654,55 @@ Click **Install / refresh demos** to load onboarding, USDT buy, manual buy, job 
 
 ### Upload inputs in Telegram
 
-Send a `.txt` / `.csv` (UTF-8) document with caption `keywords` or `locations`.
+Send a `.txt` / `.csv` (UTF-8) document with caption:
+
+| Caption | Role |
+|---------|------|
+| `keywords` or `dork` | Queries / niches / dork lines |
+| `locations` or `region` | Cities or regions (keyword × location jobs) |
+| `emails` | Email list for `source=email_validate` |
 
 - **TXT:** one entry per line; blank lines and `#` comments ignored. Locations: `city,state,country`.
-- **CSV:** same line format, or a header column named `keyword`/`query` (keywords) or `location` (locations).
+- **CSV:** same line format, or a header column named `keyword`/`query`, `location`, or `email`.
+- **`email_validate`:** emails file only (no locations).
+- **`google_search` + `use_dork=yes`:** keywords = full Google queries; locations optional.
 - Invalid/empty/wrong-type files are rejected **before** a job is queued. See `/formats` (also on `/help`).
 
-Then `/run engine=chrome threads=2`.
+Then queue, for example:
+
+```text
+/run source=gmaps engine=chrome threads=2
+/run source=google_search use_dork=yes
+/run source=email_validate
+/run source=tiktok_shop
+```
+
+Your allowed modules: `/scrapers`. Full guide: [`TELEGRAM_USERS.md`](TELEGRAM_USERS.md).
 
 ### Link a Telegram user
 
 Admin → Users → set **Telegram ID** (user can get it via `/whoami` on the bot).
+
+---
+
+## Scraper modules
+
+Jobs carry a `source` field (default **`gmaps`**). Site-wide enable flags live under **Admin → Scrapers**; packages have **allowed sources**. Workers dispatch by `source` in `agent.py`.
+
+| `source=` | Module | Inputs |
+|-----------|--------|--------|
+| `gmaps` | Google Maps businesses | keywords × locations |
+| `tiktok_shop` | TikTok Shop creators | niches × regions |
+| `google_search` | Google SERP (+ optional dorks) | keywords × locations, or dork lines |
+| `email_harvest` | Emails via Google Search channel | keywords × locations |
+| `email_validate` | Syntax / disposable / MX (+ optional SMTP) | email list |
+| `facebook_pages` / `facebook_groups` / `facebook_posts` / `facebook_comments` | Meta public discovery | keywords × locations |
+| `instagram` | Instagram discovery | keywords × locations |
+| `tiktok` | General TikTok profiles | keywords × locations |
+| `youtube` / `reddit` / `pinterest` | Public social search | keywords × locations |
+| `linkedin` / `twitter` | SERP discovery (high risk) | keywords × locations |
+
+Telegram: `/scrapers` · Panel: Jobs scraper picker · Details: [`TELEGRAM_USERS.md`](TELEGRAM_USERS.md) · Maps engine flags: [`worker/SCRAPER.md`](worker/SCRAPER.md).
 
 ---
 

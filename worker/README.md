@@ -1,8 +1,11 @@
 # Scrapeboard Worker
 
-Scrape-only agent for **Windows, macOS, and Linux**. Connects to the Scrapeboard panel, leases job chunks, scrapes with `gmaps_scraper.py`, and uploads ZIP results.
+Scrape-only agent for **Windows, macOS, and Linux**. Connects to the Scrapeboard panel, leases job chunks, runs the scraper for each job’s **`source`**, and uploads ZIP results.
 
-**This folder has no Telegram, billing, or user UI** — those live in the [panel](../panel/README.md).
+Supported sources (dispatched in `agent.py`): **`gmaps`**, **`tiktok_shop`**, **`google_search`**, **`email_harvest`**, **`email_validate`**, **`youtube`**, **`reddit`**, **`pinterest`**, **`tiktok`**, **`facebook_pages` / `groups` / `posts` / `comments`**, **`instagram`**, **`linkedin`**, **`twitter`**.
+
+**This folder has no Telegram, billing, or user UI** — those live in the [panel](../panel/README.md).  
+Telegram end users: [`../TELEGRAM_USERS.md`](../TELEGRAM_USERS.md).
 
 Production panel URL: **`https://scrape.cvmso.com`**
 
@@ -449,7 +452,7 @@ Standalone engine CLI (`gmaps_scraper.py`) is separate — see [`SCRAPER.md`](SC
 
 1. `POST /api/worker-api/heartbeat` — online + CPU/RAM/disk/load + host identity + `active_chunks` (so the panel can reclaim orphan leases; may include `done_in_chunk` / `rows` for live UI progress); may set `resource_throttling` when the local resource guard is pausing new leases  
 2. `POST /api/worker-api/lease` — up to **`max_browsers` concurrent leases** (one instance per user job chunk); while CPU/RAM are over cap the agent **waits and retries** (jobs stay queued — never denied/failed/skipped; see [Resource guard](#resource-guard-agent-084)); each lease includes keywords/locations + merged settings + proxies  
-3. Runs `gmaps_scraper` for that chunk using the job’s **thread** count (browsers inside the instance)  
+3. Runs the module for that job’s `source` (Maps via `gmaps_scraper`, Search/social via other scrapers; `email_validate` skips the browser)  
 4. While scraping: `POST /api/worker-api/progress` (~every 2s / each search) so Jobs UI shows climbing searches/rows before the chunk finishes  
 5. Zips CSV parts → `POST /api/worker-api/upload`  
 6. `POST /api/worker-api/ack` — panel merges when all chunks complete → user ZIP (+ optional Telegram); agent retries on failure; ack is source of truth (clears live counters)  
@@ -496,17 +499,23 @@ Older agents only bump panel progress on **ack** (whole chunk finished), so Jobs
 
 | File | Purpose |
 |------|---------|
-| `agent.py` | Entrypoint, wizard, panel client |
-| `gmaps_scraper.py` | Cross-platform scrape engine |
+| `agent.py` | Entrypoint, wizard, panel client, multi-source `run_chunk` |
+| `gmaps_scraper.py` | Google Maps engine + browser/deps bootstrap |
+| `google_search_scraper.py` | Google SERP (+ dork mode) |
+| `email_harvest_scraper.py` / `email_validator.py` / `email_extract.py` | Email harvest & validate |
+| `tiktok_shop_scraper.py` | TikTok Shop creators |
+| `social_public_scraper.py` | YouTube, Reddit, Pinterest, TikTok |
+| `meta_social_scraper.py` | Facebook ×4, Instagram, LinkedIn, X |
+| `browser_scrape_lib.py` | Shared Playwright/SERP helpers |
 | `setup_and_run.bat` | Windows first-run (+ optional service install) |
 | `setup_and_run.sh` | Linux/macOS first-run (+ optional service install) |
 | `setup_and_run.command` | macOS Finder launcher |
 | `install_service.sh` | macOS LaunchAgent / Linux systemd user install |
 | `install_service.bat` / `.ps1` | Windows Scheduled Task install |
 | `mac_setup_and_test.command` | Legacy Brave smoke test |
-| `requirements.txt` | Python deps |
+| `requirements.txt` | Python deps (includes `dnspython` for MX) |
 | `keywords.txt` / `locations.txt` / `proxies.txt` | Samples / standalone engine use |
-| `SCRAPER.md` | Full engine flags & behavior |
+| `SCRAPER.md` | Maps engine flags & behavior |
 | `worker_config.json` | Local secrets (created on setup; not in git) |
 
 ---

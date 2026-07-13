@@ -99,6 +99,37 @@ class CaptchaSettings(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 
 
+class ScraperSettings(Base):
+    """Global enable/disable for scraper sources (menu kill switches). gmaps always kept on."""
+
+    __tablename__ = "scraper_settings"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
+    # Source ids from scraper_registry that may appear in menus when also package-allowed.
+    enabled_sources: Mapped[list] = mapped_column(
+        JSON,
+        default=lambda: [
+            "gmaps",
+            "tiktok_shop",
+            "google_search",
+            "email_harvest",
+            "email_validate",
+            "youtube",
+            "reddit",
+            "pinterest",
+            "tiktok",
+            "facebook_pages",
+            "facebook_groups",
+            "facebook_posts",
+            "facebook_comments",
+            "instagram",
+            "linkedin",
+            "twitter",
+        ],
+    )
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+
 class Package(Base):
     __tablename__ = "packages"
 
@@ -113,6 +144,28 @@ class Package(Base):
     threads: Mapped[int] = mapped_column(Integer, default=2)
     max_upload_mb: Mapped[int] = mapped_column(Integer, default=5)
     allowed_engines: Mapped[list] = mapped_column(JSON, default=lambda: ["all"])
+    # Which scraper sources subscribers on this plan may select (default Maps only).
+    allowed_sources: Mapped[list] = mapped_column(
+        JSON,
+        default=lambda: [
+            "gmaps",
+            "tiktok_shop",
+            "google_search",
+            "email_harvest",
+            "email_validate",
+            "youtube",
+            "reddit",
+            "pinterest",
+            "tiktok",
+            "facebook_pages",
+            "facebook_groups",
+            "facebook_posts",
+            "facebook_comments",
+            "instagram",
+            "linkedin",
+            "twitter",
+        ],
+    )
     description: Mapped[str] = mapped_column(Text, default="")
     headings: Mapped[list] = mapped_column(JSON, default=list)  # marketing / bot display titles
     features: Mapped[list] = mapped_column(JSON, default=list)  # bullet feature list
@@ -295,6 +348,10 @@ class Job(Base):
     owner_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
     # Optional human label; empty/null → UI/Telegram fall back to public_id
     name: Mapped[str | None] = mapped_column(String(128), nullable=True, default=None)
+    # Scraper source id (scraper_registry). Default / legacy jobs = gmaps.
+    source: Mapped[str] = mapped_column(String(64), default="gmaps", index=True)
+    # email_harvest channel ids (optional); unused for gmaps.
+    channels: Mapped[list] = mapped_column(JSON, default=list)
     status: Mapped[str] = mapped_column(String(32), default="queued")  # queued|running|completed|stopped|failed
     settings: Mapped[dict] = mapped_column(JSON, default=dict)
     keywords_path: Mapped[str | None] = mapped_column(String(512), nullable=True)

@@ -102,7 +102,7 @@ call .venv\Scripts\activate.bat
 
 echo --- Installing requirements ---
 python -m pip install --upgrade pip
-python -m pip install -r requirements.txt
+python -m pip install --upgrade -r requirements.txt
 if errorlevel 1 (
   echo pip install failed
   if "%ASSUME_YES%"=="0" pause

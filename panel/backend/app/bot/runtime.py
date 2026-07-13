@@ -51,6 +51,7 @@ CODE_HANDLED_COMMANDS = frozenset(
         "/start",
         "/help",
         "/formats",
+        "/scrapers",
         "/packages",
         "/plans",
         "/buy",
@@ -385,7 +386,14 @@ class TelegramBotRuntime:
         resolved = COMMAND_ALIASES.get(cmd, cmd)
         is_admin_cmd = resolved in ADMIN_COMMANDS or cmd in ADMIN_COMMANDS
 
-        if user and not user.is_active and cmd not in ("/whoami", "/id", "/start", "/help", "/formats"):
+        if user and not user.is_active and cmd not in (
+            "/whoami",
+            "/id",
+            "/start",
+            "/help",
+            "/formats",
+            "/scrapers",
+        ):
             await self._send(token, chat_id, "⛔ Your account is disabled. Contact support.")
             return
 
@@ -442,7 +450,8 @@ class TelegramBotRuntime:
                 token,
                 chat_id,
                 f"{help_body}\n\nUse the menu buttons below, or type a command.\n\n"
-                f"— Upload formats —\n{formats}",
+                f"— Upload & scrapers —\n{formats}\n\n"
+                f"Your allowed modules: /scrapers",
                 reply_markup=menu,
             )
             return
@@ -464,8 +473,12 @@ class TelegramBotRuntime:
                     max_upload_mb=cap,
                     extensions=b.allowed_extensions,
                 )
-                + "\n\n(Also included under /help.)",
+                + "\n\nYour allowed modules: /scrapers\n(Also included under /help.)",
             )
+            return
+
+        if cmd == "/scrapers":
+            await self._scrapers_list(db, token, chat_id, user)
             return
 
         # billing open commands (/packages aliases to same list as /buy|/upgrade)
@@ -602,14 +615,14 @@ class TelegramBotRuntime:
 
         if user.role == "admin":
             msg += "\nAdmin — no subscription required."
-            msg += "\nUpload keywords + locations (.txt/.csv), then Run. See Help for formats."
+            msg += "\nUpload inputs (.txt/.csv), then /run source=…. See /scrapers and /formats."
             msg += "\nTap Admin for the admin command menu."
             await self._send(token, chat_id, msg, reply_markup=menu)
             return
 
         if sub:
             msg += f"\nPlan: {sub.package_name} until {sub.expires_at.date()}."
-            msg += "\nUpload keywords + locations (.txt/.csv), then Run. See Help for formats."
+            msg += "\nUpload inputs (.txt/.csv), then /run source=…. See /scrapers and /formats."
             msg += "\nTap Upgrade for a higher tier (same/lower plans are not offered)."
             await self._send(token, chat_id, msg, reply_markup=menu)
             return
@@ -967,15 +980,19 @@ class TelegramBotRuntime:
             return
         cap_txt = (caption or "").lower()
         kind = None
-        if "keyword" in cap_txt or "keyword" in fname:
+        if any(t in cap_txt for t in ("email", "emails", "e-mail")) or any(
+            t in fname for t in ("email", "emails")
+        ):
             kind = "keywords"
-        elif "location" in cap_txt or "location" in fname:
+        elif "keyword" in cap_txt or "keyword" in fname or "dork" in cap_txt or "dork" in fname:
+            kind = "keywords"
+        elif "location" in cap_txt or "location" in fname or "region" in cap_txt or "region" in fname:
             kind = "locations"
         if not kind:
             await self._send(
                 token,
                 chat_id,
-                "Send a .txt or .csv with caption 'keywords' or 'locations'. See /formats.",
+                "Send a .txt or .csv with caption 'keywords', 'locations', or 'emails'. See /formats.",
             )
             return
 
@@ -996,13 +1013,26 @@ class TelegramBotRuntime:
             ).content
 
         try:
-            entries = parse_entries(
-                raw,
-                kind,  # type: ignore[arg-type]
-                filename=fname,
-                check_ext=True,
-                configured_extensions=allowed,
-            )
+            # Email lists: accept via parse_email_list when caption/name says email
+            if any(t in cap_txt for t in ("email", "emails", "e-mail")) or any(
+                t in fname for t in ("email", "emails")
+            ):
+                from app.services.input_files import parse_email_list
+
+                entries = parse_email_list(
+                    raw,
+                    filename=fname,
+                    check_ext=True,
+                    configured_extensions=allowed,
+                )
+            else:
+                entries = parse_entries(
+                    raw,
+                    kind,  # type: ignore[arg-type]
+                    filename=fname,
+                    check_ext=True,
+                    configured_extensions=allowed,
+                )
         except InputFileError as e:
             await self._send(
                 token,
@@ -1020,8 +1050,69 @@ class TelegramBotRuntime:
         await self._send(
             token,
             chat_id,
-            f"✅ Saved {len(entries)} {kind}. Upload the other file if needed, then /run.",
+            f"✅ Saved {len(entries)} {kind}. Upload the other file if needed, then /run "
+            f"(e.g. /run source=google_search use_dork=yes). See /scrapers.",
         )
+
+    async def _scrapers_list(self, db, token, chat_id, user) -> None:
+        from app.models import Package
+        from app.services.scraper_registry import SOURCE_GMAPS, catalog_payload
+        from app.services.scraper_settings import get_scraper_settings
+
+        site = await get_scraper_settings(db)
+        allowed: list[str] | None = None
+        is_admin = bool(user and user.role == "admin")
+        if user and not is_admin:
+            sub = await billing_svc.active_subscription(db, user)
+            if not sub or not getattr(sub, "package_id", None):
+                allowed = [SOURCE_GMAPS]
+            else:
+                pkg = await db.get(Package, sub.package_id)
+                allowed = list(getattr(pkg, "allowed_sources", None) or [SOURCE_GMAPS]) if pkg else [SOURCE_GMAPS]
+        rows = catalog_payload(
+            enabled_sources=list(site.enabled_sources or []),
+            allowed_sources=allowed,
+            is_admin=is_admin,
+        )
+        lines = [
+            "🛠 Scrapers for /run source=…",
+            "(Only sources allowed on your plan are listed.)",
+            "",
+        ]
+        current_group = None
+        any_sel = False
+        for r in rows:
+            if not r.get("selectable"):
+                continue
+            any_sel = True
+            g = r.get("group_label") or r.get("group") or ""
+            if g != current_group:
+                current_group = g
+                lines.append(f"— {g} —")
+            sid = r["id"]
+            mark = "★" if sid == SOURCE_GMAPS else "•"
+            inputs = r.get("inputs") or "keywords × locations"
+            lines.append(f"{mark} {sid} — {r['label']}")
+            lines.append(f"  {r.get('description') or ''}")
+            lines.append(f"  Inputs: {inputs}")
+        if not any_sel:
+            lines.append("(none selectable — /buy or ask admin)")
+        lines.extend(
+            [
+                "",
+                "Examples:",
+                "/run source=gmaps threads=2",
+                "/run source=google_search use_dork=yes",
+                "/run source=email_validate",
+                "/run source=email_harvest validate_after=yes",
+                "/run source=tiktok_shop",
+                "/run source=youtube max_results=30",
+                "/run source=facebook_pages",
+                "",
+                "Upload rules: /formats  ·  Help: /help",
+            ]
+        )
+        await self._send(token, chat_id, "\n".join(lines))
 
     async def _run(self, db, token, chat_id, user, args) -> None:
         perms = jobs_svc.effective_perms(user)
@@ -1036,9 +1127,6 @@ class TelegramBotRuntime:
         inputs = self._inputs.get(user.id) or {}
         kw = inputs.get("keywords")
         loc = inputs.get("locations")
-        if not kw or not loc or not kw.exists() or not loc.exists():
-            await self._send(token, chat_id, "Upload keywords and locations files first (caption them).")
-            return
         overrides: dict[str, Any] = {}
         for tok in args:
             if "=" in tok:
@@ -1048,17 +1136,55 @@ class TelegramBotRuntime:
         display_name = overrides.pop("name", None)
         if display_name is None:
             display_name = overrides.pop("title", None)
+        source = overrides.pop("source", None)
+        channels_raw = overrides.pop("channels", None)
+        channel_list = None
+        if channels_raw is not None:
+            channel_list = [p.strip() for p in str(channels_raw).split(",") if p.strip()]
+
+        from app.services.scraper_registry import normalize_source
+
+        src = normalize_source(source)
+        dork_on = str(overrides.get("use_dork", "")).strip().lower() in ("1", "true", "yes", "on")
+
+        if not kw or not kw.exists():
+            await self._send(
+                token,
+                chat_id,
+                "Upload a keywords (or emails) file first (caption it). See /formats.",
+            )
+            return
+
+        loc_bytes: bytes
+        loc_name: str
+        if loc and loc.exists():
+            loc_bytes = loc.read_bytes()
+            loc_name = loc.name
+        elif src == "email_validate" or (src == "google_search" and dork_on):
+            loc_bytes = b"-\n"
+            loc_name = "locations.txt"
+        else:
+            await self._send(
+                token,
+                chat_id,
+                "Upload keywords and locations files first (caption them). "
+                "For Google dorks use /run source=google_search use_dork=yes. See /formats.",
+            )
+            return
+
         try:
             job = await jobs_svc.create_job_from_bytes(
                 db,
                 user,
                 kw.read_bytes(),
-                loc.read_bytes(),
+                loc_bytes,
                 overrides,
                 name=display_name,
                 keywords_name=kw.name,
-                locations_name=loc.name,
+                locations_name=loc_name,
                 check_ext=False,
+                source=source,
+                channels=channel_list,
             )
         except (PermissionError, ValueError) as e:
             await self._send(token, chat_id, f"❌ {e}\nJob was not started. See /formats.")
@@ -1070,11 +1196,12 @@ class TelegramBotRuntime:
             )
         else:
             wait_note = "Workers will pick it up when a slot is free.\n"
+        src_note = f"source={getattr(job, 'source', None) or src}"
         await self._send(
             token,
             chat_id,
             f"✅ Job queued: {jobs_svc.job_display_label(job)}\n"
-            f"{job.total_searches:,} searches · {jobs_svc.job_thread_count(job)} threads.\n"
+            f"{src_note} · {job.total_searches:,} searches · {jobs_svc.job_thread_count(job)} threads.\n"
             f"{wait_note}"
             f"/status for progress.",
         )
@@ -1100,7 +1227,8 @@ class TelegramBotRuntime:
             await self._send(
                 token,
                 chat_id,
-                "No jobs yet.\nUpload keywords + locations, then /run.\nUse /status anytime for progress.",
+                "No jobs yet.\nUpload inputs, then /run source=…\n"
+                "See /scrapers and /formats. Use /status anytime for progress.",
             )
             return
 
@@ -1155,7 +1283,7 @@ class TelegramBotRuntime:
                 f"{done}/{j.total_searches} · rows {rows}"
             )
         lines.append("")
-        lines.append("Tips: Status (/status) · /stop to cancel · panel Jobs for download")
+        lines.append("Tips: /status · /stop · /scrapers · /formats · panel Jobs for download")
         await self._send(token, chat_id, "\n".join(lines))
 
     async def _stop_job(self, db, token, chat_id, user) -> None:
@@ -1215,6 +1343,8 @@ class TelegramBotRuntime:
         # Always surface formats even if the DB row is missing/disabled.
         if not any(c.command == "/formats" for c in commands.values()):
             lines.append("/formats — Accepted file types and format rules")
+        if not any(c.command == "/scrapers" for c in commands.values()):
+            lines.append("/scrapers — Available scraper sources for /run")
         return "\n".join(lines) if len(lines) > 1 else "No commands available."
 
 

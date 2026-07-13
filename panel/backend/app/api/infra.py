@@ -1105,6 +1105,14 @@ async def worker_lease(
             "job": {
                 "job_id": job.public_id,
                 "owner_id": job.owner_id,
+                "source": getattr(job, "source", None)
+                or (job.settings or {}).get("source")
+                or "gmaps",
+                "channels": list(
+                    getattr(job, "channels", None)
+                    or (job.settings or {}).get("channels")
+                    or []
+                ),
                 "keywords": keywords,
                 "locations": locations,
                 "settings": settings,

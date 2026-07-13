@@ -716,6 +716,7 @@ type PackageRow = {
   threads: number;
   max_upload_mb: number;
   allowed_engines: string[];
+  allowed_sources: string[];
   description: string;
   headings: string[];
   features: string[];
@@ -723,6 +724,13 @@ type PackageRow = {
   scrape_defaults: ScrapeConfig;
   chunk_size: number;
   is_active: boolean;
+};
+
+type RegistryItem = {
+  id: string;
+  label: string;
+  group_label: string;
+  implemented: boolean;
 };
 
 const EMPTY_PKG_FORM = {
@@ -734,6 +742,24 @@ const EMPTY_PKG_FORM = {
   threads: 2,
   max_upload_mb: 5,
   allowed_engines: ["all"] as string[],
+  allowed_sources: [
+    "gmaps",
+    "tiktok_shop",
+    "google_search",
+    "email_harvest",
+    "email_validate",
+    "youtube",
+    "reddit",
+    "pinterest",
+    "tiktok",
+    "facebook_pages",
+    "facebook_groups",
+    "facebook_posts",
+    "facebook_comments",
+    "instagram",
+    "linkedin",
+    "twitter",
+  ] as string[],
   description: "",
   headings: [] as string[],
   features: [] as string[],
@@ -746,6 +772,7 @@ export function PackagesAdminPage() {
   const { schema } = usePermSchema();
   const engines = schema?.engines || ["chrome", "google-chrome", "edge", "brave", "camoufox"];
   const [packages, setPackages] = useState<PackageRow[]>([]);
+  const [registry, setRegistry] = useState<RegistryItem[]>([]);
   const [form, setForm] = useState(EMPTY_PKG_FORM);
   const [edit, setEdit] = useState<PackageRow | null>(null);
   const [msg, setMsg] = useState("");
@@ -756,6 +783,9 @@ export function PackagesAdminPage() {
   }
   useEffect(() => {
     refresh().catch((e) => setError(e.message));
+    api<RegistryItem[]>("/api/scrapers/registry")
+      .then(setRegistry)
+      .catch(() => undefined);
   }, []);
 
   function normalizeEngines(ae: string[] | "all"): string[] {
@@ -776,6 +806,9 @@ export function PackagesAdminPage() {
         threads: form.threads,
         max_upload_mb: form.max_upload_mb,
         allowed_engines: normalizeEngines(form.allowed_engines as string[] | "all"),
+        allowed_sources: form.allowed_sources.includes("gmaps")
+          ? form.allowed_sources
+          : ["gmaps", ...form.allowed_sources],
         description: form.description,
         headings: form.headings.map((s) => s.trim()).filter(Boolean),
         features: form.features.map((s) => s.trim()).filter(Boolean),
@@ -806,6 +839,9 @@ export function PackagesAdminPage() {
           threads: edit.threads,
           max_upload_mb: edit.max_upload_mb,
           allowed_engines: normalizeEngines(edit.allowed_engines as string[] | "all"),
+          allowed_sources: (edit.allowed_sources || ["gmaps"]).includes("gmaps")
+            ? edit.allowed_sources || ["gmaps"]
+            : ["gmaps", ...(edit.allowed_sources || [])],
           description: edit.description || "",
           headings: (edit.headings || []).map((s) => s.trim()).filter(Boolean),
           features: (edit.features || []).map((s) => s.trim()).filter(Boolean),
@@ -893,6 +929,35 @@ export function PackagesAdminPage() {
           onChange={(v) => setForm({ ...form, allowed_engines: v === "all" ? ["all"] : v })}
           engines={engines}
         />
+        <div style={{ gridColumn: "1 / -1" }}>
+          <div style={{ fontWeight: 600, marginBottom: "0.35rem" }}>Allowed scrapers</div>
+          <p className="muted" style={{ margin: "0 0 0.5rem" }}>
+            Which sources subscribers on this plan may select. Google Maps is always included. Other sources
+            also need global enable under Admin → Scrapers and an implemented worker module.
+          </p>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: "0.65rem 1rem" }}>
+            {registry.map((s) => (
+              <label key={s.id} style={{ display: "flex", gap: "0.35rem", alignItems: "center" }}>
+                <input
+                  type="checkbox"
+                  checked={form.allowed_sources.includes(s.id)}
+                  disabled={s.id === "gmaps"}
+                  onChange={() => {
+                    if (s.id === "gmaps") return;
+                    setForm({
+                      ...form,
+                      allowed_sources: form.allowed_sources.includes(s.id)
+                        ? form.allowed_sources.filter((x) => x !== s.id)
+                        : [...form.allowed_sources, s.id],
+                    });
+                  }}
+                />
+                {s.label}
+                {!s.implemented ? <span className="muted"> (soon)</span> : null}
+              </label>
+            ))}
+          </div>
+        </div>
         <label style={{ gridColumn: "1 / -1", display: "flex", gap: "0.45rem", alignItems: "center" }}>
           <input type="checkbox" checked={form.dedicated_worker} onChange={(e) => setForm({ ...form, dedicated_worker: e.target.checked })} />
           Dedicated worker package (subscribers can optionally pin workers; leave empty = all workers)
@@ -954,6 +1019,7 @@ export function PackagesAdminPage() {
                         headings: p.headings || [],
                         features: p.features || [],
                         allowed_engines: p.allowed_engines?.length ? p.allowed_engines : ["all"],
+                        allowed_sources: p.allowed_sources?.length ? p.allowed_sources : ["gmaps"],
                         dedicated_worker: Boolean(p.dedicated_worker),
                         scrape_defaults: { ...DEFAULT_SCRAPE_CONFIG, ...(p.scrape_defaults || {}), threads: p.threads },
                         chunk_size: p.chunk_size || 500,
@@ -1032,6 +1098,32 @@ export function PackagesAdminPage() {
             onChange={(v) => setEdit({ ...edit, allowed_engines: v === "all" ? ["all"] : v })}
             engines={engines}
           />
+          <div style={{ gridColumn: "1 / -1" }}>
+            <div style={{ fontWeight: 600, marginBottom: "0.35rem" }}>Allowed scrapers</div>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: "0.65rem 1rem" }}>
+              {registry.map((s) => (
+                <label key={s.id} style={{ display: "flex", gap: "0.35rem", alignItems: "center" }}>
+                  <input
+                    type="checkbox"
+                    checked={(edit.allowed_sources || ["gmaps"]).includes(s.id)}
+                    disabled={s.id === "gmaps"}
+                    onChange={() => {
+                      if (s.id === "gmaps") return;
+                      const cur = edit.allowed_sources || ["gmaps"];
+                      setEdit({
+                        ...edit,
+                        allowed_sources: cur.includes(s.id)
+                          ? cur.filter((x) => x !== s.id)
+                          : [...cur, s.id],
+                      });
+                    }}
+                  />
+                  {s.label}
+                  {!s.implemented ? <span className="muted"> (soon)</span> : null}
+                </label>
+              ))}
+            </div>
+          </div>
           <label style={{ gridColumn: "1 / -1", display: "flex", gap: "0.45rem", alignItems: "center" }}>
             <input type="checkbox" checked={Boolean(edit.dedicated_worker)} onChange={(e) => setEdit({ ...edit, dedicated_worker: e.target.checked })} />
             Dedicated worker package (subscribers can optionally pin workers; leave empty = all workers)

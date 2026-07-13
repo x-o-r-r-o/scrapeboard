@@ -184,6 +184,14 @@ def ensure_dependencies(args):
             print("[setup] psutil not installed (optional) — browser cleanup on "
                   "shutdown will be best-effort without it.")
 
+    # dnspython for email_validate MX lookups (A-record fallback if missing).
+    if importlib.util.find_spec("dns") is None:
+        try:
+            _pip_install(["dnspython"])
+        except Exception:
+            print("[setup] dnspython not installed — email MX checks will use "
+                  "socket A-record fallback.")
+
     # 2) Browser binary (expensive; only done once, tracked by a per-user
     #    sentinel stored in the HOME directory — never in the script folder, so
     #    it cannot ship with the code and wrongly skip setup on someone else's

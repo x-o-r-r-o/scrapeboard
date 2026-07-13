@@ -177,6 +177,12 @@ def merge_lease_settings(
     for k, v in (job_settings or {}).items():
         if k in WORKER_SCRAPE_KEYS and v is not None:
             settings[k] = v
+    # Multi-scraper discriminators (not Maps scrape flags) — pass through from job
+    js = job_settings or {}
+    if js.get("source"):
+        settings["source"] = str(js["source"]).strip().lower()
+    if isinstance(js.get("channels"), list):
+        settings["channels"] = list(js["channels"])
     try:
         threads = int(settings.get("threads") or 1)
     except (TypeError, ValueError):

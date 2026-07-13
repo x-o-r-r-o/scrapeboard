@@ -10,6 +10,8 @@ type Job = {
   owner_id: number;
   owner_username: string | null;
   owner_telegram_id: string | null;
+  source?: string;
+  channels?: string[];
   status: string;
   threads: number;
   total_searches: number;
@@ -24,11 +26,21 @@ type Job = {
   waiting_for_threads?: boolean;
   blocking_job_public_id?: string | null;
   blocking_job_label?: string | null;
-  settings?: { engine?: string; threads?: number };
+  settings?: { engine?: string; threads?: number; source?: string };
   chunks_pending?: number | null;
   chunks_leased?: number | null;
   chunks_done?: number | null;
   workers?: Array<{ worker_id: number; worker_name: string; leased_chunks: number; online: boolean }> | null;
+};
+
+type ScraperOption = {
+  id: string;
+  label: string;
+  group: string;
+  group_label: string;
+  description: string;
+  implemented: boolean;
+  selectable: boolean;
 };
 
 type ThreadQuota = {
@@ -73,6 +85,11 @@ export function JobsPage() {
   const [engine, setEngine] = useState("chrome");
   const [threads, setThreads] = useState(2);
   const [jobName, setJobName] = useState("");
+  const [source, setSource] = useState("gmaps");
+  const [scrapers, setScrapers] = useState<ScraperOption[]>([]);
+  const [validateAfter, setValidateAfter] = useState(false);
+  const [smtpProbe, setSmtpProbe] = useState(false);
+  const [useDork, setUseDork] = useState(false);
   const [filterOwner, setFilterOwner] = useState("");
   const [filterStatus, setFilterStatus] = useState("");
   const [filterQ, setFilterQ] = useState("");
@@ -114,6 +131,16 @@ export function JobsPage() {
   }, [filterOwner, filterStatus, filterQ, isAdmin]);
 
   useEffect(() => {
+    api<ScraperOption[]>("/api/scrapers")
+      .then((rows) => {
+        setScrapers(rows);
+        const first = rows.find((r) => r.selectable);
+        if (first) setSource(first.id);
+      })
+      .catch(() => undefined);
+  }, []);
+
+  useEffect(() => {
     if (!isAdmin) return;
     api<Array<{ id: number; username: string }>>("/api/users")
       .then(setOwners)
@@ -128,12 +155,33 @@ export function JobsPage() {
     const fd = new FormData(form);
     fd.set("engine", engine);
     fd.set("threads", String(threads));
+    fd.set("source", source);
+    if (source === "email_harvest") {
+      fd.set("channels", "google_search");
+      if (validateAfter) fd.set("validate_after", "yes");
+    }
+    if (source === "google_search" && useDork) {
+      fd.set("use_dork", "yes");
+      if (!fd.get("locations")) {
+        fd.set("locations", new Blob(["-\n"], { type: "text/plain" }), "locations.txt");
+      }
+    }
+    if (source === "email_validate") {
+      fd.set("smtp_probe", smtpProbe ? "yes" : "no");
+      fd.set("check_mx", "yes");
+      fd.set("check_disposable", "yes");
+      if (!fd.get("locations")) {
+        fd.set("locations", new Blob(["-\n"], { type: "text/plain" }), "locations.txt");
+      }
+    }
     const trimmedName = jobName.trim();
     if (trimmedName) fd.set("name", trimmedName);
     try {
       const created = await api<Job>("/api/jobs", { method: "POST", body: fd });
       form.reset();
       setJobName("");
+      const keep = scrapers.find((r) => r.selectable);
+      setSource(keep?.id || "gmaps");
       if (created.blocking_job_label || created.blocking_job_public_id) {
         const behind = created.blocking_job_label || created.blocking_job_public_id;
         setMsg(`Job queued — 1 job at a time — waiting for ${behind} to finish.`);
@@ -318,6 +366,37 @@ export function JobsPage() {
         ) : null}
         <div className="form-grid two">
           <label className="field" style={{ gridColumn: "1 / -1" }}>
+            Scraper
+            <select className="input" value={source} onChange={(e) => setSource(e.target.value)} required>
+              {scrapers.length === 0 ? (
+                <option value="gmaps">Google Maps</option>
+              ) : (
+                (() => {
+                  const groups = new Map<string, ScraperOption[]>();
+                  for (const s of scrapers) {
+                    const list = groups.get(s.group_label) || [];
+                    list.push(s);
+                    groups.set(s.group_label, list);
+                  }
+                  return Array.from(groups.entries()).map(([label, items]) => (
+                    <optgroup key={label} label={label}>
+                      {items.map((s) => (
+                        <option key={s.id} value={s.id} disabled={!s.selectable}>
+                          {s.label}
+                          {!s.implemented ? " (coming soon)" : !s.selectable ? " (not enabled)" : ""}
+                        </option>
+                      ))}
+                    </optgroup>
+                  ));
+                })()
+              )}
+            </select>
+          </label>
+          <p className="muted" style={{ margin: 0, gridColumn: "1 / -1" }}>
+            {scrapers.find((s) => s.id === source)?.description ||
+              "Google Maps is the default live scraper. Other sources appear when enabled."}
+          </p>
+          <label className="field" style={{ gridColumn: "1 / -1" }}>
             Name <span className="muted">(optional)</span>
             <input
               className="input"
@@ -329,18 +408,136 @@ export function JobsPage() {
             />
           </label>
           <label className="field">
-            Keywords file
-            <input className="input" type="file" name="keywords" accept=".txt,.csv" required />
+            {source === "email_validate"
+              ? "Emails file"
+              : source === "tiktok_shop"
+                ? "Niches / keywords file"
+                : "Keywords file"}
+            <input
+              className="input"
+              type="file"
+              name="keywords"
+              accept=".txt,.csv"
+              required
+            />
           </label>
-          <label className="field">
-            Locations file
-            <input className="input" type="file" name="locations" accept=".txt,.csv" required />
-          </label>
+          {source === "email_validate" || (source === "google_search" && useDork) ? null : (
+            <label className="field">
+              {source === "tiktok_shop" ? "Regions file" : "Locations file"}
+              <input className="input" type="file" name="locations" accept=".txt,.csv" required />
+            </label>
+          )}
           <p className="muted" style={{ margin: 0, gridColumn: "1 / -1" }}>
-            UTF-8 <code>.txt</code> / <code>.csv</code>: one keyword or <code>city,state,country</code> per line
-            (# comments OK). CSV may use a <code>keyword</code>/<code>query</code> or <code>location</code> header
-            column. Invalid files are rejected before the job is queued.
+            {source === "tiktok_shop" ? (
+              <>
+                UTF-8 <code>.txt</code> / <code>.csv</code>: one niche/keyword per line and one region
+                (e.g. <code>US</code>, <code>United States</code>) per line. Discovers creators via
+                public Google Search + TikTok profile pages (no TikTok API / Affiliate login).
+              </>
+            ) : source === "google_search" ? (
+              <>
+                UTF-8 keyword × location files. Scrapes Google Search results (title, URL, snippet) in
+                a real browser — captchas/blocks possible; use proxies.
+                {useDork ? (
+                  <>
+                    {" "}
+                    <strong>Dork mode:</strong> each keyword line is a full Google query (operators
+                    like <code>site:</code>, <code>filetype:</code>, <code>intitle:</code> OK). Location
+                    file is optional.
+                  </>
+                ) : null}
+              </>
+            ) : source === "email_harvest" ? (
+              <>
+                UTF-8 keyword × location files. Uses the <strong>Google Search</strong> channel:
+                SERP → visit pages → extract emails. Optionally validate MX/disposable after harvest.
+              </>
+            ) : source === "email_validate" ? (
+              <>
+                UTF-8 <code>.txt</code> / <code>.csv</code> with one email per line (or an{" "}
+                <code>email</code> column). Checks syntax, disposable domains, and MX records. SMTP
+                probe is optional and often blocked by providers.
+              </>
+            ) : source === "youtube" ? (
+              <>
+                Keyword × location files. Opens YouTube search (Google SERP fallback) and collects
+                video/channel links. Login walls and captchas are common — use proxies.
+              </>
+            ) : source === "reddit" ? (
+              <>
+                Keyword × location files. Public Reddit search + Google <code>site:reddit.com</code>{" "}
+                fallback. Collects post titles and URLs.
+              </>
+            ) : source === "pinterest" ? (
+              <>
+                Keyword × location files. Public Pinterest pin search + Google fallback.
+              </>
+            ) : source === "tiktok" ? (
+              <>
+                Keyword × location files. Discovers general TikTok profiles via Google (distinct from
+                TikTok Shop). Heavy anti-bot — proxies recommended.
+              </>
+            ) : source?.startsWith("facebook_") ? (
+              <>
+                Keyword × location files. Discovers public Facebook {source.replace("facebook_", "")} via
+                Google <code>site:facebook.com</code>. Login walls are common; results are best-effort
+                public SERP metadata. Proxies strongly recommended.
+              </>
+            ) : source === "instagram" ? (
+              <>
+                Keyword × location files. Instagram discovery via Google (+ light native tag attempt).
+                Very high ban/login risk — use residential proxies.
+              </>
+            ) : source === "linkedin" ? (
+              <>
+                Keyword × location files. LinkedIn public profiles/companies via Google SERP. Extreme
+                ToS/ban risk; expect thin public snippets only.
+              </>
+            ) : source === "twitter" ? (
+              <>
+                Keyword × location files. X/Twitter profiles and posts via Google SERP. Extreme
+                ban/ToS risk; login walls are common.
+              </>
+            ) : (
+              <>
+                UTF-8 <code>.txt</code> / <code>.csv</code>: one keyword or <code>city,state,country</code> per line
+                (# comments OK). CSV may use a <code>keyword</code>/<code>query</code> or <code>location</code> header
+                column. Invalid files are rejected before the job is queued.
+              </>
+            )}
           </p>
+          {source === "email_harvest" ? (
+            <label style={{ gridColumn: "1 / -1", display: "flex", gap: "0.45rem", alignItems: "center" }}>
+              <input
+                type="checkbox"
+                checked={validateAfter}
+                onChange={(e) => setValidateAfter(e.target.checked)}
+              />
+              Validate emails after harvest (syntax / disposable / MX)
+            </label>
+          ) : null}
+          {source === "google_search" ? (
+            <label style={{ gridColumn: "1 / -1", display: "flex", gap: "0.45rem", alignItems: "center" }}>
+              <input
+                type="checkbox"
+                checked={useDork}
+                onChange={(e) => setUseDork(e.target.checked)}
+              />
+              Use Google dork queries (keywords file = full search operators)
+            </label>
+          ) : null}
+          {source === "email_validate" ? (
+            <label style={{ gridColumn: "1 / -1", display: "flex", gap: "0.45rem", alignItems: "center" }}>
+              <input
+                type="checkbox"
+                checked={smtpProbe}
+                onChange={(e) => setSmtpProbe(e.target.checked)}
+              />
+              SMTP probe (optional — slow, often inconclusive)
+            </label>
+          ) : null}
+          {source === "email_validate" ? null : (
+            <>
           <label className="field">
             Engine
             <select className="input" value={engine} onChange={(e) => setEngine(e.target.value)}>
@@ -351,6 +548,8 @@ export function JobsPage() {
               <option value="edge">edge</option>
             </select>
           </label>
+            </>
+          )}
           <label className="field">
             Threads {quota ? <span className="muted">(max {quota.thread_allowance})</span> : null}
             <input
@@ -425,6 +624,7 @@ export function JobsPage() {
             <tr>
               <th>Job</th>
               {isAdmin ? <th>Owner</th> : null}
+              <th>Scraper</th>
               <th>Status</th>
               <th>Threads</th>
               {isAdmin ? <th>Workers</th> : null}
@@ -455,6 +655,11 @@ export function JobsPage() {
                     {j.owner_telegram_id ? <div className="muted" style={{ fontSize: "0.75rem" }}>tg:{j.owner_telegram_id}</div> : null}
                   </td>
                 ) : null}
+                <td>
+                  <code style={{ fontSize: "0.8rem" }}>
+                    {j.source || j.settings?.source || "gmaps"}
+                  </code>
+                </td>
                 <td>
                   <span className={`badge ${j.status === "completed" ? "ok" : j.status === "running" ? "warn" : j.status === "failed" ? "danger" : ""}`}>
                     {j.status}
@@ -577,6 +782,10 @@ export function JobsPage() {
             <div>
               <div className="muted">Status</div>
               {detailJob.status} · {detailJob.threads} threads · engine {detailJob.settings?.engine || "—"}
+            </div>
+            <div>
+              <div className="muted">Scraper</div>
+              <code>{detailJob.source || detailJob.settings?.source || "gmaps"}</code>
             </div>
             <div>
               <div className="muted">Progress</div>
