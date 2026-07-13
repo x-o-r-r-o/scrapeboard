@@ -31,6 +31,9 @@ from browser_scrape_lib import (
 CSV_FIELDS = [
     "keyword",
     "region",
+    "name",
+    "email",
+    "phone",
     "username",
     "nickname",
     "followers",
@@ -90,6 +93,9 @@ def _work(args, unit: Unit, page) -> list[dict[str, Any]]:
             {
                 "keyword": unit.keyword,
                 "region": region,
+                "name": profile.get("name") or profile.get("nickname") or user,
+                "email": profile.get("email", ""),
+                "phone": profile.get("phone", ""),
                 "username": profile.get("username") or user,
                 "nickname": profile.get("nickname", ""),
                 "followers": profile.get("followers", ""),
@@ -106,6 +112,9 @@ def _work(args, unit: Unit, page) -> list[dict[str, Any]]:
             {
                 "keyword": unit.keyword,
                 "region": region,
+                "name": "",
+                "email": "",
+                "phone": "",
                 "username": "",
                 "nickname": "",
                 "followers": "",

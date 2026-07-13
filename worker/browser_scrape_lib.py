@@ -213,18 +213,109 @@ def re_tiktok_user():
     )
 
 
+def enrich_page_contacts(
+    page,
+    args,
+    url: str,
+    *,
+    name_hints: list[str] | None = None,
+    log=print,
+) -> dict[str, str]:
+    """Visit a public URL and pull name / email / phone from visible HTML.
+
+    Login walls often hide contact details; still harvest whatever is public
+    (mailto/tel links, bios, snippets in meta tags).
+    """
+    from email_extract import contacts_from_text, guess_display_name
+
+    out = {
+        "name": "",
+        "email": "",
+        "phone": "",
+        "emails": "",
+        "phones": "",
+        "snippet": "",
+        "page_title": "",
+    }
+    if not url or not goto(page, url, args, log=log):
+        # Still use hints for name
+        out["name"] = guess_display_name(*(name_hints or []))
+        return out
+    try:
+        page.wait_for_timeout(1100)
+    except Exception:
+        pass
+    try:
+        data = page.evaluate(
+            """() => {
+              const metaDesc = document.querySelector('meta[name="description"]');
+              const ogTitle = document.querySelector('meta[property="og:title"]');
+              const ogDesc = document.querySelector('meta[property="og:description"]');
+              const h1 = document.querySelector('h1');
+              let html = '';
+              try { html = document.documentElement ? document.documentElement.outerHTML : ''; } catch (e) {}
+              let text = '';
+              try { text = document.body ? document.body.innerText : ''; } catch (e) {}
+              return {
+                title: document.title || '',
+                ogTitle: ogTitle ? (ogTitle.content || '') : '',
+                h1: h1 ? (h1.innerText || '').trim() : '',
+                description: metaDesc ? (metaDesc.content || '') : '',
+                ogDescription: ogDesc ? (ogDesc.content || '') : '',
+                text: (text || '').slice(0, 12000),
+                html: (html || '').slice(0, 200000)
+              };
+            }"""
+        )
+    except Exception:
+        data = {}
+    title = str((data or {}).get("title") or "")
+    og_title = str((data or {}).get("ogTitle") or "")
+    h1 = str((data or {}).get("h1") or "")
+    desc = str((data or {}).get("description") or "")
+    og_desc = str((data or {}).get("ogDescription") or "")
+    text = str((data or {}).get("text") or "")
+    html = str((data or {}).get("html") or "")
+    out["page_title"] = (og_title or title)[:200]
+    blob = f"{html}\n{text}\n{desc}\n{og_desc}"
+    contacts = contacts_from_text(blob)
+    out["email"] = contacts.get("email") or ""
+    out["phone"] = contacts.get("phone") or ""
+    out["emails"] = contacts.get("emails") or ""
+    out["phones"] = contacts.get("phones") or ""
+    low = text.lower()
+    if any(x in low for x in ("log in", "sign up", "create an account", "join linkedin", "sign in to")):
+        # Keep whatever contacts we already got from meta/html; shorten snippet
+        out["snippet"] = (desc or og_desc or text[:240]).strip()[:400]
+    else:
+        out["snippet"] = (text[:400] or desc or og_desc).strip()[:400]
+    out["name"] = guess_display_name(
+        h1,
+        og_title,
+        title,
+        *(name_hints or []),
+    )
+    return out
+
+
 def enrich_tiktok_profile(page, args, username: str, log=print) -> dict[str, str]:
-    """Open public TikTok profile; extract visible bio / follower signals."""
+    """Open public TikTok profile; extract name / bio / followers / email / phone."""
+    from email_extract import contacts_from_text, guess_display_name
+
     url = f"https://www.tiktok.com/@{username}"
     out = {
         "username": username,
         "profile_url": url,
         "nickname": "",
+        "name": "",
         "followers": "",
         "bio": "",
         "shop_signal": "",
+        "email": "",
+        "phone": "",
     }
     if not goto(page, url, args, log=log):
+        out["name"] = username
         return out
     try:
         page.wait_for_timeout(2500)
@@ -236,8 +327,11 @@ def enrich_tiktok_profile(page, args, username: str, log=print) -> dict[str, str
               const text = document.body ? document.body.innerText : '';
               const metaDesc = document.querySelector('meta[name="description"]');
               const ogTitle = document.querySelector('meta[property="og:title"]');
+              let html = '';
+              try { html = document.documentElement ? document.documentElement.outerHTML : ''; } catch (e) {}
               return {
                 text: (text || '').slice(0, 8000),
+                html: (html || '').slice(0, 150000),
                 description: metaDesc ? (metaDesc.content || '') : '',
                 title: ogTitle ? (ogTitle.content || '') : (document.title || ''),
                 hasShop: /tiktok shop|shop tab|view shop/i.test(text || '')
@@ -249,9 +343,13 @@ def enrich_tiktok_profile(page, args, username: str, log=print) -> dict[str, str
     title = str((data or {}).get("title") or "")
     desc = str((data or {}).get("description") or "")
     text = str((data or {}).get("text") or "")
+    html = str((data or {}).get("html") or "")
     out["nickname"] = title.split("@")[0].strip(" |-\n\t")[:120]
+    out["name"] = guess_display_name(out["nickname"], title, username) or username
     out["bio"] = (desc or text[:400]).strip()[:500]
-    # Followers often appear like "1.2M Followers"
+    contacts = contacts_from_text(f"{html}\n{text}\n{desc}\n{out['bio']}")
+    out["email"] = contacts.get("email") or ""
+    out["phone"] = contacts.get("phone") or ""
     import re
 
     m = re.search(r"([\d.,]+[KMB]?)\s*Followers", text, re.I)

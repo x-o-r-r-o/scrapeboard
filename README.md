@@ -691,7 +691,7 @@ Jobs carry a `source` field (default **`gmaps`**). Site-wide enable flags live u
 
 | `source=` | Module | Inputs |
 |-----------|--------|--------|
-| `gmaps` | Google Maps businesses | keywords × locations |
+| `gmaps` | Google Maps businesses | keywords × locations; optional `scrape_websites=yes\|no` (email/social from sites) |
 | `tiktok_shop` | TikTok Shop creators | niches × regions |
 | `google_search` | Google SERP (+ optional dorks) | keywords × locations, or dork lines |
 | `email_harvest` | Emails via Google Search channel | keywords × locations |

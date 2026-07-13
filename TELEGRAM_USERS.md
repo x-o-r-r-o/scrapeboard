@@ -41,6 +41,7 @@ Commands also appear under **`/help`**, **`/formats`**, and **`/scrapers`** on t
 | `engine=` | `engine=chrome` | `chrome`, `brave`, `camoufox`, … |
 | `threads=` | `threads=2` | Browsers for this job (≤ plan) |
 | `max_results=` | `max_results=50` | Cap per search (0 = default/unlimited where supported) |
+| `scrape_websites=` | `scrape_websites=no` | **Google Maps only** — visit business websites for email/socials (`yes` default) |
 | `use_dork=` | `use_dork=yes` | **Google Search only** — keywords = full dork queries |
 | `validate_after=` | `validate_after=yes` | **Email harvest** — MX/syntax after harvest |
 | `smtp_probe=` | `smtp_probe=yes` | **Email validate** — optional SMTP check |
@@ -50,6 +51,7 @@ Examples:
 
 ```text
 /run source=gmaps threads=2 name=Dentists-TX
+/run source=gmaps scrape_websites=no
 /run source=google_search use_dork=yes
 /run source=email_validate
 /run source=email_harvest validate_after=yes
@@ -87,7 +89,7 @@ Availability depends on site enable flags, your package’s **allowed sources**,
 
 | `source=` | Inputs | What it does |
 |-----------|--------|----------------|
-| `gmaps` *(default)* | keywords × locations | Google Maps businesses (name, phone, website, optional email/social enrich) |
+| `gmaps` *(default)* | keywords × locations | Google Maps businesses (name, phone, website). Optional `scrape_websites=yes` visits sites for email/socials |
 
 ### Commerce
 
@@ -103,28 +105,28 @@ Availability depends on site enable flags, your package’s **allowed sources**,
 | `email_harvest` | keywords × locations | Google Search → visit pages → extract emails. Optional `validate_after=yes` |
 | `email_validate` | email list only | Syntax, disposable domains, MX; optional `smtp_probe=yes` |
 
-### Meta / Facebook
-
-| `source=` | Inputs | Notes |
-|-----------|--------|--------|
-| `facebook_pages` | keywords × locations | Public pages via SERP — login walls common |
-| `facebook_groups` | keywords × locations | Public groups discovery |
-| `facebook_posts` | keywords × locations | Post URLs / snippets |
-| `facebook_comments` | keywords × locations | Limited without login |
-
 ### Social
 
 | `source=` | Inputs | Notes |
 |-----------|--------|--------|
-| `instagram` | keywords × locations | High ban/login risk — proxies recommended |
-| `tiktok` | keywords × locations | General profiles (not Shop) |
-| `youtube` | keywords × locations | Videos / channels |
-| `reddit` | keywords × locations | Public posts |
-| `pinterest` | keywords × locations | Pins |
-| `linkedin` | keywords × locations | Extreme ToS/ban risk; thin public snippets |
-| `twitter` | keywords × locations | X/Twitter via SERP; login walls common |
+| `instagram` | keywords × locations | Name / email / phone from public bios when visible |
+| `tiktok` | keywords × locations | Same from public profile bios |
+| `youtube` | keywords × locations | Channel/video pages — contact fields when public |
+| `reddit` | keywords × locations | Posts + public page contacts |
+| `pinterest` | keywords × locations | Pins/profiles + public contacts |
+| `linkedin` | keywords × locations | Often login-walled; thin public data |
+| `twitter` | keywords × locations | Name / email / phone from public bios when visible |
 
-**Risk:** Maps is the most mature path. Search, social, and Meta modules use real browsers against public pages/SERPs — expect captchas, thin data, and blocks. Prefer residential proxies for high-risk sources.
+### Meta / Facebook
+
+| `source=` | Inputs | Notes |
+|-----------|--------|--------|
+| `facebook_pages` | keywords × locations | Name / email / phone when public on page |
+| `facebook_groups` | keywords × locations | Same when public |
+| `facebook_posts` | keywords × locations | Post + profile contact enrichment |
+| `facebook_comments` | keywords × locations | Limited without login |
+
+CSV columns always include **`name`**, **`email`**, and **`phone`** (blank when not publicly available). Login walls and captchas often hide contacts — residential proxies help.
 
 ---
 

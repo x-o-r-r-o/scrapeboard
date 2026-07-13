@@ -102,3 +102,115 @@ def classify_email(email: str) -> str:
     if domain in free:
         return "free_mail"
     return "business"
+
+
+# --- Phones -----------------------------------------------------------------
+
+# Prefer tel: hrefs; then international / NANP-ish numbers in text.
+_TEL_HREF_RE = re.compile(r"(?i)tel:([+\d][\d\-.\s()extEXT]{5,24})")
+_PHONE_RE = re.compile(
+    r"(?<![\w./])("
+    r"(?:\+|00)\d{1,3}[\s\-.]*(?:\(?\d{1,4}\)?[\s\-.]*)?(?:\d[\s\-.]*){6,14}\d"
+    r"|"
+    r"\(?\d{2,4}\)?[\s\-.]?\d{3}[\s\-.]?\d{3,4}"
+    r"|"
+    r"\d{3}[\s\-.]?\d{3}[\s\-.]?\d{4}"
+    r")(?![\w./])"
+)
+
+_PHONE_BAD = re.compile(
+    r"(?i)\b(20\d{2}|19\d{2}|isbn|order|zip|postal|tracking|version)\b"
+)
+
+
+def normalize_phone(raw: str) -> str | None:
+    if not raw:
+        return None
+    s = unescape(unquote(str(raw))).strip()
+    s = re.sub(r"(?i)\s*(ext|extension|x)\.?\s*\d+\s*$", "", s).strip()
+    s = s.strip(".,;:<>()[]{}\"' ")
+    digits = re.sub(r"[^\d+]", "", s)
+    if digits.startswith("00"):
+        digits = "+" + digits[2:]
+    core = digits.lstrip("+")
+    if not core.isdigit():
+        return None
+    if len(core) < 7 or len(core) > 15:
+        return None
+    # Drop obvious non-phones (years, short codes alone)
+    if len(core) == 4 or (len(core) == 8 and core.startswith("20")):
+        return None
+    if digits.startswith("+"):
+        return "+" + core
+    return core
+
+
+def extract_phones_from_text(text: str) -> list[str]:
+    if not text:
+        return []
+    found: list[str] = []
+    seen: set[str] = set()
+
+    def _add(raw: str):
+        phone = normalize_phone(raw)
+        if not phone:
+            return
+        key = re.sub(r"\D", "", phone)
+        if key in seen:
+            return
+        # Avoid matching pure years / ids buried in long text snippets
+        if _PHONE_BAD.search(raw) and len(key) <= 8:
+            return
+        seen.add(key)
+        found.append(phone)
+
+    for m in _TEL_HREF_RE.finditer(text):
+        _add(m.group(1))
+    for m in _PHONE_RE.finditer(text):
+        _add(m.group(1))
+    return found
+
+
+def contacts_from_text(text: str) -> dict[str, str]:
+    """First email + phone found in free text (SERP snippet, bio, page body)."""
+    emails = extract_emails_from_text(text)
+    phones = extract_phones_from_text(text)
+    return {
+        "email": emails[0] if emails else "",
+        "phone": phones[0] if phones else "",
+        "emails": "; ".join(emails[:5]),
+        "phones": "; ".join(phones[:5]),
+    }
+
+
+def guess_display_name(*candidates: str) -> str:
+    """Pick a human-looking name from title / channel / handle candidates."""
+    skip = {
+        "",
+        "home",
+        "login",
+        "log in",
+        "sign up",
+        "instagram",
+        "facebook",
+        "youtube",
+        "reddit",
+        "pinterest",
+        "tiktok",
+        "linkedin",
+        "twitter",
+        "x",
+    }
+    for raw in candidates:
+        if not raw:
+            continue
+        name = re.sub(r"\s+", " ", str(raw)).strip()
+        # Drop trailing site suffixes: "Foo - YouTube", "Foo | Instagram"
+        name = re.split(r"\s*[\|\-–—]\s*(?:YouTube|Instagram|Facebook|TikTok|LinkedIn|X|Twitter|Reddit|Pinterest)\b", name, maxsplit=1, flags=re.I)[0]
+        name = name.strip(" |-\t\n@")
+        if not name or name.lower() in skip:
+            continue
+        if len(name) < 2 or len(name) > 120:
+            continue
+        return name
+    return ""

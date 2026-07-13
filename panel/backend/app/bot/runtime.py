@@ -1101,7 +1101,8 @@ class TelegramBotRuntime:
             [
                 "",
                 "Examples:",
-                "/run source=gmaps threads=2",
+                "/run source=gmaps threads=2 scrape_websites=yes",
+                "/run source=gmaps scrape_websites=no",
                 "/run source=google_search use_dork=yes",
                 "/run source=email_validate",
                 "/run source=email_harvest validate_after=yes",

@@ -1,11 +1,9 @@
-"""Phase E — public social scrapers (browser, no official APIs).
+"""Public social scrapers (browser, no official APIs).
 
 Sources: youtube · reddit · pinterest · tiktok (general, not Shop).
 
-Strategy per keyword × location:
-  1. Prefer native public search URL when stable
-  2. Fall back to Google SERP site: filters
-  3. Parse visible cards / links into CSV rows
+Each result row includes **name**, **email**, and **phone** when publicly
+visible (page visit + SERP/bio text). Login walls often hide contacts.
 """
 
 from __future__ import annotations
@@ -19,6 +17,7 @@ from urllib.parse import quote_plus, urlparse
 from browser_scrape_lib import (
     Unit,
     cartesian_units,
+    enrich_page_contacts,
     enrich_tiktok_profile,
     goto,
     google_search_url,
@@ -28,13 +27,19 @@ from browser_scrape_lib import (
     tiktok_usernames_from_text,
     write_csv,
 )
+from email_extract import contacts_from_text, guess_display_name
 
 PHASE_E_SOURCES = frozenset({"youtube", "reddit", "pinterest", "tiktok"})
+
+CONTACT_FIELDS = ["name", "email", "phone"]
 
 CSV_BY_SOURCE: dict[str, list[str]] = {
     "youtube": [
         "keyword",
         "location",
+        "name",
+        "email",
+        "phone",
         "title",
         "url",
         "channel",
@@ -45,6 +50,9 @@ CSV_BY_SOURCE: dict[str, list[str]] = {
     "reddit": [
         "keyword",
         "location",
+        "name",
+        "email",
+        "phone",
         "title",
         "url",
         "subreddit",
@@ -55,6 +63,9 @@ CSV_BY_SOURCE: dict[str, list[str]] = {
     "pinterest": [
         "keyword",
         "location",
+        "name",
+        "email",
+        "phone",
         "title",
         "url",
         "snippet",
@@ -63,6 +74,9 @@ CSV_BY_SOURCE: dict[str, list[str]] = {
     "tiktok": [
         "keyword",
         "location",
+        "name",
+        "email",
+        "phone",
         "username",
         "nickname",
         "followers",
@@ -81,6 +95,67 @@ def _cap(args) -> int:
 
 def _query(unit: Unit) -> str:
     return f"{unit.keyword} {unit.location}".strip()
+
+
+def _seed_contacts(row: dict[str, Any], *blobs: str) -> None:
+    """Fill name/email/phone from free text (snippets) without a page visit."""
+    blob = "\n".join(b for b in blobs if b)
+    c = contacts_from_text(blob)
+    if c.get("email") and not row.get("email"):
+        row["email"] = c["email"]
+    if c.get("phone") and not row.get("phone"):
+        row["phone"] = c["phone"]
+    if not row.get("name"):
+        row["name"] = guess_display_name(
+            row.get("channel"),
+            row.get("author"),
+            row.get("nickname"),
+            row.get("title"),
+            row.get("username"),
+            row.get("subreddit"),
+        )
+
+
+def _enrich_row(args, page, row: dict[str, Any], *, prefer_url_keys: tuple[str, ...] = ("url",)) -> None:
+    _seed_contacts(row, row.get("snippet") or "", row.get("title") or "", row.get("bio") or "")
+    visit = ""
+    for k in prefer_url_keys:
+        visit = (row.get(k) or "").strip()
+        if visit:
+            break
+    if not visit:
+        return
+    hints = [
+        row.get("name") or "",
+        row.get("channel") or "",
+        row.get("nickname") or "",
+        row.get("author") or "",
+        row.get("title") or "",
+        row.get("username") or "",
+        row.get("handle") or "",
+    ]
+    info = enrich_page_contacts(page, args, visit, name_hints=hints)
+    if info.get("name"):
+        row["name"] = info["name"]
+    elif not row.get("name"):
+        row["name"] = guess_display_name(*hints)
+    if info.get("email") and not row.get("email"):
+        row["email"] = info["email"]
+    if info.get("phone") and not row.get("phone"):
+        row["phone"] = info["phone"]
+    if info.get("snippet") and not row.get("snippet"):
+        row["snippet"] = info["snippet"]
+
+
+def _enrich_all(args, page, rows: list[dict[str, Any]], *, prefer_url_keys: tuple[str, ...] = ("url",)) -> list[dict[str, Any]]:
+    for row in rows:
+        try:
+            _enrich_row(args, page, row, prefer_url_keys=prefer_url_keys)
+        except Exception:
+            _seed_contacts(row, row.get("snippet") or "", row.get("title") or "")
+        for f in CONTACT_FIELDS:
+            row.setdefault(f, "")
+    return rows
 
 
 def _work_youtube(args, unit: Unit, page) -> list[dict[str, Any]]:
@@ -122,6 +197,9 @@ def _work_youtube(args, unit: Unit, page) -> list[dict[str, Any]]:
                 {
                     "keyword": unit.keyword,
                     "location": unit.location,
+                    "name": "",
+                    "email": "",
+                    "phone": "",
                     "title": it.get("title", ""),
                     "url": it.get("url", ""),
                     "channel": it.get("channel", ""),
@@ -130,32 +208,33 @@ def _work_youtube(args, unit: Unit, page) -> list[dict[str, Any]]:
                     "query": q,
                 }
             )
-    if rows:
-        return rows
-    # Google fallback
-    if not goto(page, google_search_url(f"site:youtube.com {q}", num=_cap(args)), args):
-        return []
-    try:
-        page.wait_for_timeout(1200)
-    except Exception:
-        pass
-    for i, item in enumerate(parse_google_organic(page)[: _cap(args)], start=1):
-        u = item.get("url") or ""
-        if "youtube.com" not in u:
-            continue
-        rows.append(
-            {
-                "keyword": unit.keyword,
-                "location": unit.location,
-                "title": item.get("title", ""),
-                "url": u,
-                "channel": "",
-                "channel_url": "",
-                "snippet": item.get("snippet", ""),
-                "query": q,
-            }
-        )
-    return rows
+    if not rows:
+        if not goto(page, google_search_url(f"site:youtube.com {q}", num=_cap(args)), args):
+            return []
+        try:
+            page.wait_for_timeout(1200)
+        except Exception:
+            pass
+        for item in parse_google_organic(page)[: _cap(args)]:
+            u = item.get("url") or ""
+            if "youtube.com" not in u:
+                continue
+            rows.append(
+                {
+                    "keyword": unit.keyword,
+                    "location": unit.location,
+                    "name": "",
+                    "email": "",
+                    "phone": "",
+                    "title": item.get("title", ""),
+                    "url": u,
+                    "channel": "",
+                    "channel_url": "",
+                    "snippet": item.get("snippet", ""),
+                    "query": q,
+                }
+            )
+    return _enrich_all(args, page, rows, prefer_url_keys=("channel_url", "url"))
 
 
 def _work_reddit(args, unit: Unit, page) -> list[dict[str, Any]]:
@@ -196,6 +275,9 @@ def _work_reddit(args, unit: Unit, page) -> list[dict[str, Any]]:
                 {
                     "keyword": unit.keyword,
                     "location": unit.location,
+                    "name": "",
+                    "email": "",
+                    "phone": "",
                     "title": it.get("title", ""),
                     "url": it.get("url", ""),
                     "subreddit": it.get("subreddit", ""),
@@ -204,35 +286,37 @@ def _work_reddit(args, unit: Unit, page) -> list[dict[str, Any]]:
                     "query": q,
                 }
             )
-    if rows:
-        return rows
-    if not goto(page, google_search_url(f"site:reddit.com {q}", num=_cap(args)), args):
-        return []
-    try:
-        page.wait_for_timeout(1200)
-    except Exception:
-        pass
-    for item in parse_google_organic(page)[: _cap(args)]:
-        u = item.get("url") or ""
-        if "reddit.com" not in u:
-            continue
-        sub = ""
-        m = re.search(r"reddit\.com/r/([^/]+)", u, re.I)
-        if m:
-            sub = m.group(1)
-        rows.append(
-            {
-                "keyword": unit.keyword,
-                "location": unit.location,
-                "title": item.get("title", ""),
-                "url": u,
-                "subreddit": sub,
-                "author": "",
-                "snippet": item.get("snippet", ""),
-                "query": q,
-            }
-        )
-    return rows
+    if not rows:
+        if not goto(page, google_search_url(f"site:reddit.com {q}", num=_cap(args)), args):
+            return []
+        try:
+            page.wait_for_timeout(1200)
+        except Exception:
+            pass
+        for item in parse_google_organic(page)[: _cap(args)]:
+            u = item.get("url") or ""
+            if "reddit.com" not in u:
+                continue
+            sub = ""
+            m = re.search(r"reddit\.com/r/([^/]+)", u, re.I)
+            if m:
+                sub = m.group(1)
+            rows.append(
+                {
+                    "keyword": unit.keyword,
+                    "location": unit.location,
+                    "name": "",
+                    "email": "",
+                    "phone": "",
+                    "title": item.get("title", ""),
+                    "url": u,
+                    "subreddit": sub,
+                    "author": "",
+                    "snippet": item.get("snippet", ""),
+                    "query": q,
+                }
+            )
+    return _enrich_all(args, page, rows)
 
 
 def _work_pinterest(args, unit: Unit, page) -> list[dict[str, Any]]:
@@ -268,42 +352,46 @@ def _work_pinterest(args, unit: Unit, page) -> list[dict[str, Any]]:
                 {
                     "keyword": unit.keyword,
                     "location": unit.location,
+                    "name": "",
+                    "email": "",
+                    "phone": "",
                     "title": it.get("title", ""),
                     "url": it.get("url", ""),
                     "snippet": "",
                     "query": q,
                 }
             )
-    if rows:
-        return rows
-    if not goto(page, google_search_url(f"site:pinterest.com {q}", num=_cap(args)), args):
-        return []
-    try:
-        page.wait_for_timeout(1200)
-    except Exception:
-        pass
-    for item in parse_google_organic(page)[: _cap(args)]:
-        u = item.get("url") or ""
-        if "pinterest." not in u:
-            continue
-        rows.append(
-            {
-                "keyword": unit.keyword,
-                "location": unit.location,
-                "title": item.get("title", ""),
-                "url": u,
-                "snippet": item.get("snippet", ""),
-                "query": q,
-            }
-        )
-    return rows
+    if not rows:
+        if not goto(page, google_search_url(f"site:pinterest.com {q}", num=_cap(args)), args):
+            return []
+        try:
+            page.wait_for_timeout(1200)
+        except Exception:
+            pass
+        for item in parse_google_organic(page)[: _cap(args)]:
+            u = item.get("url") or ""
+            if "pinterest." not in u:
+                continue
+            rows.append(
+                {
+                    "keyword": unit.keyword,
+                    "location": unit.location,
+                    "name": "",
+                    "email": "",
+                    "phone": "",
+                    "title": item.get("title", ""),
+                    "url": u,
+                    "snippet": item.get("snippet", ""),
+                    "query": q,
+                }
+            )
+    return _enrich_all(args, page, rows)
 
 
 def _work_tiktok(args, unit: Unit, page) -> list[dict[str, Any]]:
     """General TikTok (profiles/content), distinct from TikTok Shop commerce."""
     q = _query(unit)
     rows: list[dict[str, Any]] = []
-    # Native search often heavily bot-gated — Google discovery is primary
     gq = f"site:tiktok.com {q}"
     if not goto(page, google_search_url(gq, num=20), args):
         return []
@@ -333,7 +421,6 @@ def _work_tiktok(args, unit: Unit, page) -> list[dict[str, Any]]:
         blob = f"{item.get('url','')} {item.get('title','')} {item.get('snippet','')}"
         for u in tiktok_usernames_from_text(blob):
             _add(u, item.get("url", ""))
-        # /@user in URL path
         path = urlparse(item.get("url") or "").path
         m = re.match(r"/@([A-Za-z0-9._]{2,64})", path or "")
         if m:
@@ -344,19 +431,22 @@ def _work_tiktok(args, unit: Unit, page) -> list[dict[str, Any]]:
     usernames = usernames[: _cap(args)]
     for user in usernames:
         profile = enrich_tiktok_profile(page, args, user)
-        rows.append(
-            {
-                "keyword": unit.keyword,
-                "location": unit.location,
-                "username": profile.get("username") or user,
-                "nickname": profile.get("nickname", ""),
-                "followers": profile.get("followers", ""),
-                "bio": profile.get("bio", ""),
-                "profile_url": profile.get("profile_url") or f"https://www.tiktok.com/@{user}",
-                "discovery_url": discovery.get(user, ""),
-                "query": q,
-            }
-        )
+        row = {
+            "keyword": unit.keyword,
+            "location": unit.location,
+            "name": profile.get("name") or profile.get("nickname") or user,
+            "email": profile.get("email", ""),
+            "phone": profile.get("phone", ""),
+            "username": profile.get("username") or user,
+            "nickname": profile.get("nickname", ""),
+            "followers": profile.get("followers", ""),
+            "bio": profile.get("bio", ""),
+            "profile_url": profile.get("profile_url") or f"https://www.tiktok.com/@{user}",
+            "discovery_url": discovery.get(user, ""),
+            "query": q,
+        }
+        _seed_contacts(row, row.get("bio") or "")
+        rows.append(row)
     return rows
 
 
@@ -384,20 +474,19 @@ def execute_index_batch(
 ) -> tuple[int, int]:
     _ = solver
     source = (source or "youtube").strip().lower()
-    if source not in _WORKERS:
-        raise ValueError(f"Unsupported Phase E source: {source}")
+    if source not in PHASE_E_SOURCES:
+        raise ValueError(f"Unsupported social source: {source}")
     units = cartesian_units(list(keywords or []), list(locations or []), int(start), int(end))
     if not units:
         return 0, 0
     proxies = load_proxy_list(getattr(args, "proxies", "") or "", bool(getattr(args, "no_proxy", False)))
     stop = stop_event if stop_event is not None else threading.Event()
-    work = _WORKERS[source]
     rows = run_threaded_units(
         args=args,
         units=units,
         proxies=proxies,
         stop_event=stop,
-        work=work,
+        work=_WORKERS[source],
         on_progress=on_progress,
         log=log,
     )

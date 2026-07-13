@@ -108,11 +108,12 @@ DEMO_COMMANDS = [
         "key": "run",
         "command": "/run",
         "title": "Run job",
-        "description": "Queue a scrape after uploading inputs (source= / use_dork= / threads=…)",
+        "description": "Queue a scrape after uploading inputs (source= / scrape_websites= / use_dork= …)",
         "response_text": (
             "Usage: /run [source=gmaps|google_search|tiktok_shop|email_harvest|"
             "email_validate|youtube|…] [name=MyJob] [engine=chrome] [threads=2] "
-            "[use_dork=yes] [validate_after=yes] [max_results=50]\n"
+            "[scrape_websites=yes|no] [use_dork=yes] [validate_after=yes] [max_results=50]\n"
+            "Maps: scrape_websites=yes visits business sites for email/socials (default yes).\n"
             "Upload keywords (+ locations unless email_validate or Google dorks). "
             "See /scrapers and /formats. Guide: TELEGRAM_USERS.md"
         ),

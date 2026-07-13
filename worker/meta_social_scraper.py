@@ -1,11 +1,11 @@
-"""Phase F/G — Meta + LinkedIn + X public discovery (browser, no official APIs).
+"""Meta + LinkedIn + X public discovery (browser, no official APIs).
 
 Sources:
-  F: facebook_pages | facebook_groups | facebook_posts | facebook_comments | instagram
-  G: linkedin | twitter
+  facebook_pages | facebook_groups | facebook_posts | facebook_comments | instagram
+  linkedin | twitter
 
-Heavy login/captcha walls are expected. Primary path = Google SERP with site:
-filters; native URLs tried when useful. Yield is best-effort public metadata.
+Each CSV row includes **name**, **email**, and **phone** when publicly visible
+(SERP snippet + page visit). Login/captcha walls often hide contacts — best-effort.
 """
 
 from __future__ import annotations
@@ -19,6 +19,7 @@ from urllib.parse import quote_plus, urlparse, unquote
 from browser_scrape_lib import (
     Unit,
     cartesian_units,
+    enrich_page_contacts,
     goto,
     google_search_url,
     load_proxy_list,
@@ -26,6 +27,7 @@ from browser_scrape_lib import (
     run_threaded_units,
     write_csv,
 )
+from email_extract import contacts_from_text, guess_display_name
 
 PHASE_FG_SOURCES = frozenset(
     {
@@ -42,6 +44,9 @@ PHASE_FG_SOURCES = frozenset(
 CSV_COMMON = [
     "keyword",
     "location",
+    "name",
+    "email",
+    "phone",
     "title",
     "url",
     "snippet",
@@ -50,7 +55,6 @@ CSV_COMMON = [
     "query",
 ]
 
-# Per-source Google query templates
 _SITE_QUERY: dict[str, Callable[[str], str]] = {
     "facebook_pages": lambda q: f'site:facebook.com "{q}" (page OR pages OR "about")',
     "facebook_groups": lambda q: f"site:facebook.com/groups {q}",
@@ -59,6 +63,14 @@ _SITE_QUERY: dict[str, Callable[[str], str]] = {
     "instagram": lambda q: f"site:instagram.com {q}",
     "linkedin": lambda q: f"site:linkedin.com {q} (in OR company OR pulse)",
     "twitter": lambda q: f"(site:x.com OR site:twitter.com) {q}",
+}
+
+# Prefer contact-oriented SERP when hunting emails/phones on profiles
+_CONTACT_QUERY: dict[str, Callable[[str], str]] = {
+    "facebook_pages": lambda q: f'site:facebook.com "{q}" (email OR contact OR phone OR call OR "@")',
+    "instagram": lambda q: f'site:instagram.com "{q}" (email OR contact OR "DM" OR phone OR "@")',
+    "linkedin": lambda q: f'site:linkedin.com "{q}" (email OR contact OR phone)',
+    "twitter": lambda q: f'(site:x.com OR site:twitter.com) "{q}" (email OR contact OR phone OR bio)',
 }
 
 
@@ -149,14 +161,12 @@ def _filter_url(url: str, source: str) -> bool:
     if source == "facebook_groups":
         return "/groups/" in u
     if source == "facebook_pages":
-        # Prefer pages; still allow bare profile-like paths that SERP returns as pages
         if "/groups/" in u or "/marketplace/" in u:
             return False
         return True
     if source == "facebook_posts":
         return any(x in u for x in ("/posts/", "permalink", "/story.php", "/photo", "/watch", "/reel/"))
     if source == "facebook_comments":
-        # Threads often live on post URLs; accept posts + comment anchors
         return any(x in u for x in ("/posts/", "permalink", "/story.php", "comment_id", "reply"))
     if source == "instagram":
         return "instagram.com" in u and "/accounts/" not in u
@@ -167,9 +177,55 @@ def _filter_url(url: str, source: str) -> bool:
     return True
 
 
-def _serp_rows(args, unit: Unit, page, source: str) -> list[dict[str, Any]]:
+def _profile_url(url: str, source: str, handle: str) -> str:
+    """Prefer a profile/page URL over a post URL for contact enrichment."""
+    u = (url or "").lower()
+    if source == "instagram" and handle and ("/p/" in u or "/reel/" in u or "/tv/" in u):
+        return f"https://www.instagram.com/{handle}/"
+    if source == "twitter" and handle and "/status/" in u:
+        host = "x.com" if "x.com" in u else "twitter.com"
+        return f"https://{host}/{handle}"
+    if source == "linkedin" and handle:
+        if "/in/" in u:
+            return f"https://www.linkedin.com/in/{handle}"
+        if "/company/" in u:
+            return f"https://www.linkedin.com/company/{handle}"
+    if source.startswith("facebook") and handle and any(
+        x in u for x in ("/posts/", "/permalink", "/story.php", "/photo", "/watch", "/reel/")
+    ):
+        return f"https://www.facebook.com/{handle}"
+    return url
+
+
+def _blank_row(unit: Unit, *, title: str, url: str, snippet: str, handle: str, entity_type: str, query: str) -> dict[str, Any]:
+    return {
+        "keyword": unit.keyword,
+        "location": unit.location,
+        "name": "",
+        "email": "",
+        "phone": "",
+        "title": title,
+        "url": url,
+        "snippet": snippet,
+        "handle": handle,
+        "entity_type": entity_type,
+        "query": query,
+    }
+
+
+def _apply_snippet_contacts(row: dict[str, Any]) -> None:
+    c = contacts_from_text(f"{row.get('title') or ''}\n{row.get('snippet') or ''}")
+    if c.get("email"):
+        row["email"] = c["email"]
+    if c.get("phone"):
+        row["phone"] = c["phone"]
+    if not row.get("name"):
+        row["name"] = guess_display_name(row.get("title"), row.get("handle"))
+
+
+def _serp_rows(args, unit: Unit, page, source: str, query_fn: Callable[[str], str]) -> list[dict[str, Any]]:
     q = _query(unit)
-    gq = _SITE_QUERY[source](q)
+    gq = query_fn(q)
     if not goto(page, google_search_url(gq, num=_cap(args)), args):
         return []
     try:
@@ -182,30 +238,28 @@ def _serp_rows(args, unit: Unit, page, source: str) -> list[dict[str, Any]]:
         url = (item.get("url") or "").strip()
         if not _filter_url(url, source):
             continue
-        # Normalize tracking junk
         url = url.split("?")[0] if "facebook.com" in url or "instagram.com" in url else url
         if url in seen:
             continue
         seen.add(url)
-        rows.append(
-            {
-                "keyword": unit.keyword,
-                "location": unit.location,
-                "title": item.get("title", ""),
-                "url": url,
-                "snippet": item.get("snippet", ""),
-                "handle": _guess_handle(url, source),
-                "entity_type": _entity_type(url, source),
-                "query": gq,
-            }
+        handle = _guess_handle(url, source)
+        row = _blank_row(
+            unit,
+            title=item.get("title", ""),
+            url=url,
+            snippet=item.get("snippet", ""),
+            handle=handle,
+            entity_type=_entity_type(url, source),
+            query=gq,
         )
+        _apply_snippet_contacts(row)
+        rows.append(row)
         if len(rows) >= _cap(args):
             break
     return rows
 
 
 def _try_native_instagram(args, unit: Unit, page) -> list[dict[str, Any]]:
-    """Best-effort Instagram tag/search; usually blocked — returns [] often."""
     q = _query(unit)
     tag = re.sub(r"[^a-zA-Z0-9_]", "", unit.keyword.replace(" ", ""))[:40]
     url = f"https://www.instagram.com/explore/tags/{quote_plus(tag)}/" if tag else (
@@ -241,51 +295,77 @@ def _try_native_instagram(args, unit: Unit, page) -> list[dict[str, Any]]:
         u = it.get("url") or ""
         if not _filter_url(u, "instagram"):
             continue
-        rows.append(
-            {
-                "keyword": unit.keyword,
-                "location": unit.location,
-                "title": it.get("title", ""),
-                "url": u,
-                "snippet": "",
-                "handle": _guess_handle(u, "instagram"),
-                "entity_type": _entity_type(u, "instagram"),
-                "query": q,
-            }
+        handle = _guess_handle(u, "instagram")
+        row = _blank_row(
+            unit,
+            title=it.get("title", ""),
+            url=u,
+            snippet="",
+            handle=handle,
+            entity_type=_entity_type(u, "instagram"),
+            query=q,
         )
+        rows.append(row)
     return rows
+
+
+def _enrich_contacts(args, page, rows: list[dict[str, Any]], source: str) -> list[dict[str, Any]]:
+    for row in rows:
+        try:
+            visit = _profile_url(row.get("url") or "", source, row.get("handle") or "")
+            hints = [row.get("name") or "", row.get("title") or "", row.get("handle") or ""]
+            info = enrich_page_contacts(page, args, visit, name_hints=hints)
+            if info.get("name"):
+                row["name"] = info["name"]
+            elif not row.get("name"):
+                row["name"] = guess_display_name(*hints)
+            if info.get("email") and not row.get("email"):
+                row["email"] = info["email"]
+            if info.get("phone") and not row.get("phone"):
+                row["phone"] = info["phone"]
+            if info.get("snippet"):
+                # Prefer longer public bio over SERP snippet when available
+                if len(info["snippet"]) > len(row.get("snippet") or ""):
+                    row["snippet"] = info["snippet"]
+            _apply_snippet_contacts(row)
+        except Exception:
+            _apply_snippet_contacts(row)
+        for f in ("name", "email", "phone"):
+            row.setdefault(f, "")
+    return rows
+
+
+def _merge_rows(primary: list[dict[str, Any]], extra: list[dict[str, Any]], limit: int) -> list[dict[str, Any]]:
+    seen = {r["url"] for r in primary}
+    out = list(primary)
+    for r in extra:
+        if r["url"] in seen:
+            # Merge contacts onto existing
+            for existing in out:
+                if existing["url"] == r["url"]:
+                    for k in ("email", "phone", "name", "snippet"):
+                        if r.get(k) and not existing.get(k):
+                            existing[k] = r[k]
+                    break
+            continue
+        out.append(r)
+        seen.add(r["url"])
+        if len(out) >= limit:
+            break
+    return out[:limit]
 
 
 def _work_factory(source: str):
     def _work(args, unit: Unit, page) -> list[dict[str, Any]]:
-        rows = _serp_rows(args, unit, page, source)
+        rows = _serp_rows(args, unit, page, source, _SITE_QUERY[source])
+        # Extra contact-oriented SERP for profile-heavy sources
+        if source in _CONTACT_QUERY and len(rows) < _cap(args):
+            extra = _serp_rows(args, unit, page, source, _CONTACT_QUERY[source])
+            rows = _merge_rows(rows, extra, _cap(args))
         if source == "instagram" and len(rows) < 3:
-            extra = _try_native_instagram(args, unit, page)
-            seen = {r["url"] for r in rows}
-            for r in extra:
-                if r["url"] not in seen:
-                    rows.append(r)
-                    seen.add(r["url"])
-                if len(rows) >= _cap(args):
-                    break
-        # Soft enrich: open first few URLs for a longer snippet when not login-walled
-        enrich_n = min(3, len(rows))
-        for i in range(enrich_n):
-            try:
-                if not goto(page, rows[i]["url"], args):
-                    continue
-                page.wait_for_timeout(900)
-                text = page.inner_text("body")
-                if text and len(text) > 40:
-                    # Skip obvious login walls
-                    low = text.lower()
-                    if any(x in low for x in ("log in", "sign up", "create an account", "join linkedin")):
-                        rows[i]["snippet"] = (rows[i].get("snippet") or "")[:300]
-                        continue
-                    rows[i]["snippet"] = (text[:400]).strip()
-            except Exception:
-                continue
-        return rows
+            native = _try_native_instagram(args, unit, page)
+            rows = _merge_rows(rows, native, _cap(args))
+        return _enrich_contacts(args, page, rows, source)
 
     return _work
 
@@ -325,5 +405,5 @@ def execute_index_batch(
         log=log,
     )
     n = write_csv(Path(out_dir) / f"{source}_{ts}.csv", CSV_COMMON, rows)
-    log(f"[{source}] wrote {n} rows")
+    log(f"[{source}] wrote {n} rows (name/email/phone when public)")
     return n, 0

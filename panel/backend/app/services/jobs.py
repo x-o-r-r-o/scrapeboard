@@ -507,12 +507,23 @@ async def create_job_from_bytes(
             raise ValueError(str(e)) from e
 
     defaults = package_defaults_from_package(pkg)
+    scrape_websites = overrides.get("scrape_websites")
+    if scrape_websites is None:
+        scrape_websites = defaults.get("scrape_websites") or "yes"
+    if isinstance(scrape_websites, bool):
+        scrape_websites = "yes" if scrape_websites else "no"
+    else:
+        scrape_websites = str(scrape_websites).strip().lower()
+        if scrape_websites in ("1", "true", "on", "yes"):
+            scrape_websites = "yes"
+        elif scrape_websites in ("0", "false", "off", "no"):
+            scrape_websites = "no"
+        else:
+            scrape_websites = "yes"
     settings = {
         "engine": overrides.get("engine") or defaults.get("engine") or "chrome",
         "threads": int(overrides.get("threads") or defaults.get("threads") or 2),
-        "scrape_websites": overrides.get("scrape_websites")
-        or defaults.get("scrape_websites")
-        or "yes",
+        "scrape_websites": scrape_websites,
         "max_results": int(
             overrides["max_results"]
             if overrides.get("max_results") is not None

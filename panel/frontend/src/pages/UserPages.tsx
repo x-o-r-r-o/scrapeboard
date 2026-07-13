@@ -90,6 +90,7 @@ export function JobsPage() {
   const [validateAfter, setValidateAfter] = useState(false);
   const [smtpProbe, setSmtpProbe] = useState(false);
   const [useDork, setUseDork] = useState(false);
+  const [scrapeWebsites, setScrapeWebsites] = useState(true);
   const [filterOwner, setFilterOwner] = useState("");
   const [filterStatus, setFilterStatus] = useState("");
   const [filterQ, setFilterQ] = useState("");
@@ -156,6 +157,9 @@ export function JobsPage() {
     fd.set("engine", engine);
     fd.set("threads", String(threads));
     fd.set("source", source);
+    if (source === "gmaps" || source === "maps" || !source) {
+      fd.set("scrape_websites", scrapeWebsites ? "yes" : "no");
+    }
     if (source === "email_harvest") {
       fd.set("channels", "google_search");
       if (validateAfter) fd.set("validate_after", "yes");
@@ -460,52 +464,71 @@ export function JobsPage() {
               </>
             ) : source === "youtube" ? (
               <>
-                Keyword × location files. Opens YouTube search (Google SERP fallback) and collects
-                video/channel links. Login walls and captchas are common — use proxies.
+                Keyword × location files. Discovers YouTube videos/channels and enriches each
+                result with <strong>name</strong>, <strong>email</strong>, and <strong>phone</strong>{" "}
+                when publicly visible (channel page). Login walls and captchas are common — use proxies.
               </>
             ) : source === "reddit" ? (
               <>
-                Keyword × location files. Public Reddit search + Google <code>site:reddit.com</code>{" "}
-                fallback. Collects post titles and URLs.
+                Keyword × location files. Public Reddit search + Google fallback. Collects posts and
+                scrapes public <strong>name / email / phone</strong> from pages when available.
               </>
             ) : source === "pinterest" ? (
               <>
-                Keyword × location files. Public Pinterest pin search + Google fallback.
+                Keyword × location files. Public Pinterest discovery + contact fields (
+                name / email / phone) from public pin/profile pages when visible.
               </>
             ) : source === "tiktok" ? (
               <>
-                Keyword × location files. Discovers general TikTok profiles via Google (distinct from
-                TikTok Shop). Heavy anti-bot — proxies recommended.
+                Keyword × location files. Discovers TikTok profiles via Google (distinct from TikTok
+                Shop). Scrapes <strong>name / email / phone</strong> from public bios. Heavy anti-bot —
+                proxies recommended.
               </>
             ) : source?.startsWith("facebook_") ? (
               <>
                 Keyword × location files. Discovers public Facebook {source.replace("facebook_", "")} via
-                Google <code>site:facebook.com</code>. Login walls are common; results are best-effort
-                public SERP metadata. Proxies strongly recommended.
+                Google. Visits profiles/pages for <strong>name / email / phone</strong> when public.
+                Login walls are common — proxies strongly recommended.
               </>
             ) : source === "instagram" ? (
               <>
-                Keyword × location files. Instagram discovery via Google (+ light native tag attempt).
-                Very high ban/login risk — use residential proxies.
+                Keyword × location files. Instagram discovery via Google; enriches profiles for{" "}
+                <strong>name / email / phone</strong> from public bios. Very high ban/login risk —
+                use residential proxies.
               </>
             ) : source === "linkedin" ? (
               <>
-                Keyword × location files. LinkedIn public profiles/companies via Google SERP. Extreme
-                ToS/ban risk; expect thin public snippets only.
+                Keyword × location files. LinkedIn via Google SERP; attempts{" "}
+                <strong>name / email / phone</strong> from public pages (often login-walled). Extreme
+                ToS/ban risk.
               </>
             ) : source === "twitter" ? (
               <>
-                Keyword × location files. X/Twitter profiles and posts via Google SERP. Extreme
-                ban/ToS risk; login walls are common.
+                Keyword × location files. X/Twitter via Google SERP; scrapes{" "}
+                <strong>name / email / phone</strong> from public bios when visible. Extreme ban/ToS
+                risk; login walls are common.
               </>
             ) : (
               <>
-                UTF-8 <code>.txt</code> / <code>.csv</code>: one keyword or <code>city,state,country</code> per line
-                (# comments OK). CSV may use a <code>keyword</code>/<code>query</code> or <code>location</code> header
-                column. Invalid files are rejected before the job is queued.
+                UTF-8 <code>.txt</code> / <code>.csv</code>: one keyword or{" "}
+                <code>city,state,country</code> per line (# comments OK). CSV may use a{" "}
+                <code>keyword</code>/<code>query</code> or <code>location</code> header column.
+                Google Maps collects business details from Maps; enable{" "}
+                <strong>Scrape websites</strong> below to visit each business site for extra email
+                and social links.
               </>
             )}
           </p>
+          {source === "gmaps" || !source ? (
+            <label style={{ gridColumn: "1 / -1", display: "flex", gap: "0.45rem", alignItems: "center" }}>
+              <input
+                type="checkbox"
+                checked={scrapeWebsites}
+                onChange={(e) => setScrapeWebsites(e.target.checked)}
+              />
+              Scrape websites (visit business sites for email + social links)
+            </label>
+          ) : null}
           {source === "email_harvest" ? (
             <label style={{ gridColumn: "1 / -1", display: "flex", gap: "0.45rem", alignItems: "center" }}>
               <input
