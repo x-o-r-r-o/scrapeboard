@@ -74,10 +74,14 @@ MENU_BUTTON_TO_CMD: dict[str, str] = {
     "Support": "/support",
     "Run": "/run",
     "Status": "/status",
+    "Stop": "/stop",
+    "Scrapers": "/scrapers",
+    "Plan": "/subscription",
     # Legacy reply-keyboard labels (no longer shown; keep for stale keyboards).
     "Packages": "/packages",  # alias of Buy / Upgrade list
     "Jobs": "/jobs",
     "Formats": "/help",  # legacy reply-keyboard label
+    "Subscription": "/subscription",
     "Admin": "/admin",
 }
 
@@ -944,33 +948,31 @@ def user_reply_keyboard(
 ) -> dict:
     """Persistent Telegram reply keyboard (always-on chrome).
 
-    Status covers job progress (typed /jobs still works). Help attaches the full
-    Telegram user guide (typed /formats still aliases to /help). Jobs/Formats are
-    not shown as buttons.
-    Buy and Packages are one action: guests see Buy; subscribers see Upgrade
-    (typed Packages still aliases to the same filtered list).
+    Subscriber chrome: Run / Status / Stop · Scrapers / Plan / Upgrade · Help (+ Support).
+    Guests: Buy · Scrapers · Help (+ Support). Admins get Admin instead of Plan/Upgrade.
+    Typed aliases still work: /packages, /jobs, /formats → help, /subscription.
     """
+    help_row: list[dict] = [{"text": "Help"}]
+    if support_enabled:
+        help_row.insert(0, {"text": "Support"})
+
     if is_admin:
         rows: list[list[dict]] = [
-            [{"text": "Run"}, {"text": "Status"}, {"text": "Buy"}],
-            [{"text": "Admin"}, {"text": "Help"}],
+            [{"text": "Run"}, {"text": "Status"}, {"text": "Stop"}],
+            [{"text": "Scrapers"}, {"text": "Buy"}, {"text": "Admin"}],
+            help_row,
         ]
-        if support_enabled:
-            rows[1].insert(1, {"text": "Support"})
     elif has_sub:
         rows = [
-            [{"text": "Run"}, {"text": "Status"}, {"text": "Upgrade"}],
-            [{"text": "Help"}],
+            [{"text": "Run"}, {"text": "Status"}, {"text": "Stop"}],
+            [{"text": "Scrapers"}, {"text": "Plan"}, {"text": "Upgrade"}],
+            help_row,
         ]
-        if support_enabled:
-            rows[1].insert(0, {"text": "Support"})
     else:
         rows = [
-            [{"text": "Buy"}],
-            [{"text": "Help"}],
+            [{"text": "Buy"}, {"text": "Scrapers"}],
+            help_row,
         ]
-        if support_enabled:
-            rows[1].append({"text": "Support"})
     return {
         "keyboard": rows,
         "resize_keyboard": True,

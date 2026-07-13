@@ -115,14 +115,45 @@ async def bootstrap(db: AsyncSession) -> None:
             if list(getattr(pkg, "allowed_sources", None) or []) != normalized:
                 pkg.allowed_sources = normalized
 
+    bot_settings = await db.get(BotSettings, 1)
+    if bot_settings and (bot_settings.welcome_text or "").strip() in (
+        "",
+        "Welcome to the GMaps Scraper bot.",
+        "Welcome!",
+    ):
+        bot_settings.welcome_text = (
+            "Welcome to Scrapeboard — Maps, search, email & social scrapers."
+        )
+
+    SYNC_MENU_KEYS = frozenset(
+        {
+            "start",
+            "help",
+            "formats",
+            "scrapers",
+            "whoami",
+            "packages",
+            "buy",
+            "upgrade",
+            "paid",
+            "subscription",
+            "run",
+            "status",
+            "jobs",
+            "stats",
+            "stop",
+            "support",
+            "admin",
+        }
+    )
     existing_cmds = {c.key: c for c in (await db.execute(select(BotCommand))).scalars().all()}
     for cmd in DEMO_COMMANDS:
         if cmd["key"] not in existing_cmds:
             db.add(BotCommand(**cmd))
         else:
             row = existing_cmds[cmd["key"]]
-            # Keep menu titles/descriptions in sync for built-in scrapers commands.
-            if cmd["key"] in ("run", "formats", "help", "scrapers", "status", "jobs", "support"):
+            # Keep BotFather menu titles/descriptions in sync for built-in user commands.
+            if cmd["key"] in SYNC_MENU_KEYS:
                 row.title = cmd.get("title", row.title)
                 row.description = cmd.get("description", row.description)
                 row.command = cmd.get("command", row.command)
@@ -137,6 +168,15 @@ async def bootstrap(db: AsyncSession) -> None:
     for i, wf in enumerate(DEMO_WORKFLOWS):
         if wf["key"] not in existing_wf:
             db.add(BotWorkflow(**{**wf, "sort_order": wf.get("sort_order", (i + 1) * 10)}))
+        else:
+            # Refresh demo workflow descriptions that document the Telegram menu.
+            if wf["key"] in ("onboarding", "job_progress", "job_stop", "job_run"):
+                row = (
+                    await db.execute(select(BotWorkflow).where(BotWorkflow.key == wf["key"]))
+                ).scalar_one()
+                row.description = wf.get("description", row.description)
+                row.name = wf.get("name", row.name)
+                row.definition = wf.get("definition", row.definition)
 
     await db.commit()
     await ensure_workers_have_default_profile(db)

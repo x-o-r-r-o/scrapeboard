@@ -82,7 +82,7 @@ ADMIN_COMMANDS = frozenset(
 
 ADMIN_MENU = """🛠 Telegram admin
 
-Send /start anytime to restore the main user menu.
+Send /start anytime to restore the main user menu (Run · Status · Stop · Scrapers …).
 
 Users
   /users [page] — list
@@ -257,7 +257,7 @@ async def handle_admin(
                     [{"text": "/users"}, {"text": "/subs"}, {"text": "/workers"}],
                     [{"text": "/alljobs"}, {"text": "/adminpkgs"}, {"text": "/pending"}],
                     [{"text": "/tickets"}, {"text": "/proxies"}, {"text": "/botstatus"}],
-                    [{"text": "/help"}],
+                    [{"text": "/start"}, {"text": "/help"}],
                 ],
                 "resize_keyboard": True,
             },

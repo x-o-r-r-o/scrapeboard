@@ -5,8 +5,11 @@ DEMO_COMMANDS = [
         "key": "start",
         "command": "/start",
         "title": "Start",
-        "description": "Welcome, auto-create account, show packages to buy",
-        "response_text": "Welcome! Pick a package with /buy or the Buy button below.",
+        "description": "Welcome, create account, show the menu (Buy / Scrapers / Help)",
+        "response_text": (
+            "Welcome to Scrapeboard! Tap Buy for plans, Scrapers for sources, "
+            "or Help for the full guide."
+        ),
         "enabled": True,
         "audience": "everyone",
         "sort_order": 10,
@@ -14,11 +17,10 @@ DEMO_COMMANDS = [
     {
         "key": "help",
         "command": "/help",
-        "title": "Help",
+        "title": "Help & guide",
         "description": "Commands, support tickets, and Telegram user guide (attached)",
         "response_text": (
-            "Send /help for commands + support instructions. "
-            "The full Telegram user guide is attached. "
+            "Send /help for commands + support. The full user guide is attached. "
             "Sources: /scrapers · tickets: /support <message> · run: /run source=…"
         ),
         "enabled": True,
@@ -39,7 +41,7 @@ DEMO_COMMANDS = [
         "key": "scrapers",
         "command": "/scrapers",
         "title": "Scrapers",
-        "description": "List allowed scraper modules + /run source= examples",
+        "description": "Maps, search, email, social, commerce — your allowed source= values",
         "response_text": "",
         "enabled": True,
         "audience": "users",
@@ -58,18 +60,18 @@ DEMO_COMMANDS = [
     {
         "key": "packages",
         "command": "/packages",
-        "title": "Packages",
+        "title": "Packages (alias)",
         "description": "Alias of /buy — list packages (upgrade-only while subscribed)",
         "response_text": "",
-        "enabled": True,
+        "enabled": False,
         "audience": "everyone",
         "sort_order": 40,
     },
     {
         "key": "buy",
         "command": "/buy",
-        "title": "Buy / Upgrade",
-        "description": "Order a package (guests: all plans; subscribed: higher tier only). Menu shows Upgrade when subscribed.",
+        "title": "Buy plan",
+        "description": "Order a package (guests: all plans; subscribed: higher tier only). Menu: Buy or Upgrade.",
         "response_text": "",
         "enabled": True,
         "audience": "everyone",
@@ -78,10 +80,10 @@ DEMO_COMMANDS = [
     {
         "key": "upgrade",
         "command": "/upgrade",
-        "title": "Upgrade",
+        "title": "Upgrade (alias)",
         "description": "Alias of /buy — higher-tier packages only while subscribed",
         "response_text": "",
-        "enabled": True,
+        "enabled": False,
         "audience": "everyone",
         "sort_order": 51,
     },
@@ -98,8 +100,8 @@ DEMO_COMMANDS = [
     {
         "key": "subscription",
         "command": "/subscription",
-        "title": "Subscription",
-        "description": "Show your current plan",
+        "title": "My plan",
+        "description": "Show your current plan, expiry, threads, and upload limit (menu: Plan)",
         "response_text": "",
         "enabled": True,
         "audience": "users",
@@ -108,8 +110,8 @@ DEMO_COMMANDS = [
     {
         "key": "run",
         "command": "/run",
-        "title": "Run job",
-        "description": "Queue a scrape after uploading inputs (source= / scrape_websites= / use_dork= …)",
+        "title": "Run scrape",
+        "description": "Queue a job after uploading inputs (source= / scrape_websites= / use_dork= …)",
         "response_text": (
             "Usage: /run [source=gmaps|google_search|tiktok_shop|email_harvest|"
             "email_validate|youtube|…] [name=MyJob] [engine=chrome] [threads=2] "
@@ -125,7 +127,7 @@ DEMO_COMMANDS = [
     {
         "key": "status",
         "command": "/status",
-        "title": "Job status",
+        "title": "Status",
         "description": "Running jobs, progress %, and recent stats (menu: Status)",
         "response_text": "",
         "enabled": True,
@@ -135,28 +137,28 @@ DEMO_COMMANDS = [
     {
         "key": "jobs",
         "command": "/jobs",
-        "title": "My jobs",
+        "title": "My jobs (alias)",
         "description": "Alias for /status — same progress view (not a menu button)",
         "response_text": "",
-        "enabled": True,
+        "enabled": False,
         "audience": "users",
         "sort_order": 91,
     },
     {
         "key": "stats",
         "command": "/stats",
-        "title": "Job stats",
+        "title": "Job stats (alias)",
         "description": "Alias for /status — progress % and row counts",
         "response_text": "",
-        "enabled": True,
+        "enabled": False,
         "audience": "users",
         "sort_order": 92,
     },
     {
         "key": "stop",
         "command": "/stop",
-        "title": "Stop",
-        "description": "Stop your own queued or running job",
+        "title": "Stop job",
+        "description": "Cancel your queued/running job (may deliver a partial ZIP)",
         "response_text": "",
         "enabled": True,
         "audience": "subscribers",
@@ -166,7 +168,7 @@ DEMO_COMMANDS = [
         "key": "support",
         "command": "/support",
         "title": "Support",
-        "description": "Open or follow up on a support ticket",
+        "description": "Open or follow up on a support ticket (menu: Support)",
         "response_text": "Send /support followed by your message.",
         "enabled": True,
         "audience": "users",
@@ -609,7 +611,7 @@ DEMO_WORKFLOWS = [
     {
         "key": "onboarding",
         "name": "Onboarding",
-        "description": "Guide new Telegram users: auto-account → packages → buy → ready",
+        "description": "Guide new Telegram users: auto-account → Buy / Scrapers → ready to scrape",
         "enabled": True,
         "is_demo": True,
         "sort_order": 10,
@@ -617,8 +619,8 @@ DEMO_WORKFLOWS = [
             "trigger": "command:/start",
             "steps": [
                 {"action": "ensure_telegram_user"},
-                {"if": "no_subscription", "say": "Welcome. Use Buy on the menu or tap a package below."},
-                {"if": "subscribed", "say": "You are ready. Upload .txt/.csv (caption keywords/locations/emails), then /run source=…. See /help and /scrapers. Need help? /support <message>."},
+                {"if": "no_subscription", "say": "Welcome to Scrapeboard. Tap Buy for plans, Scrapers for sources, or Help for the guide."},
+                {"if": "subscribed", "say": "You are ready. Upload .txt/.csv (caption keywords/locations/emails), tap Scrapers for source=, then Run. Need help? Support or /help."},
             ],
         },
     },
@@ -687,7 +689,7 @@ DEMO_WORKFLOWS = [
     {
         "key": "job_progress",
         "name": "Job progress & stats",
-        "description": "User sees running jobs, progress %, done/total searches, and rows saved via Status (/status; aliases /jobs /stats)",
+        "description": "User sees running jobs, progress %, done/total searches, and rows saved via Status (menu button or /status)",
         "enabled": True,
         "is_demo": True,
         "sort_order": 45,
@@ -704,7 +706,7 @@ DEMO_WORKFLOWS = [
     {
         "key": "job_stop",
         "name": "Stop with partial results",
-        "description": "/stop → cancel → merge partial → send ZIP",
+        "description": "Stop menu button or /stop → cancel → merge partial → send ZIP",
         "enabled": True,
         "is_demo": True,
         "sort_order": 50,

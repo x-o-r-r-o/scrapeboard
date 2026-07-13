@@ -9,11 +9,13 @@ Send **`/help`** on the bot anytime for the command list and this guide as an at
 ## Quick start
 
 1. Open the bot → `/start` (creates your account if needed).
-2. `/buy` or **Buy** on the menu → pick a package → pay → `/paid <txid>` when required.
+2. **Buy** on the menu (or `/buy`) → pick a package → pay → `/paid <txid>` when required.
 3. Upload input files (see [Uploads](#uploads)).
-4. `/scrapers` — see sources allowed for you.
-5. `/run source=…` — queue the job (default `source=gmaps` if omitted).
-6. `/status` — progress · `/stop` — cancel (results may be sent here as a ZIP when delivery is enabled).
+4. **Scrapers** — see sources allowed for you (or `/scrapers`).
+5. **Run** — queue the job (`/run source=…`; default `source=gmaps` if omitted).
+6. **Status** — progress · **Stop** — cancel (results may be sent here as a ZIP when delivery is enabled).
+
+Menu (subscribers): **Run · Status · Stop · Scrapers · Plan · Upgrade · Help** (+ **Support** when enabled).
 
 ---
 
@@ -41,15 +43,15 @@ Tips:
 
 | Command | Purpose |
 |---------|---------|
-| `/start` | Welcome + account |
-| `/help` | Commands + this guide (attached file) |
-| `/scrapers` | Sources you can run (`source=` values) |
+| `/start` | Welcome + account + menu |
+| `/help` | Commands + this guide (attached file) · menu: **Help** |
+| `/scrapers` | Sources you can run (`source=` values) · menu: **Scrapers** |
 | `/whoami` | Your Telegram id |
-| `/buy` `/packages` `/paid` `/subscription` | Billing |
-| `/run [key=value …]` | Queue a job from uploaded files |
-| `/status` `/jobs` | Your job progress |
-| `/stop` | Stop your active job |
-| `/support <message>` | Open or update a support ticket |
+| `/buy` `/paid` `/subscription` | Billing · menu: **Buy** / **Upgrade** / **Plan** |
+| `/run [key=value …]` | Queue a job from uploaded files · menu: **Run** |
+| `/status` | Your job progress · menu: **Status** |
+| `/stop` | Stop your active job · menu: **Stop** |
+| `/support <message>` | Open or update a support ticket · menu: **Support** |
 
 ### Useful `/run` options
 
@@ -154,4 +156,4 @@ CSV columns always include **`name`**, **`email`**, and **`phone`** (blank when 
 - One job runs at a time per account; extras stay queued.
 - `/status` anytime for %.
 - `/stop` cancels and may deliver a partial ZIP here.
-- Full guide again? `/help` (attaches this file) · sources? `/scrapers` · stuck? `/support …`.
+- Full guide again? **Help** / `/help` · sources? **Scrapers** · stuck? **Support** / `/support …`.

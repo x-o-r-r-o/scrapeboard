@@ -400,7 +400,10 @@ class BotSettings(Base):
     token: Mapped[str] = mapped_column(String(255), default="")
     username: Mapped[str] = mapped_column(String(128), default="")
     mode: Mapped[str] = mapped_column(String(16), default="polling")  # polling|webhook
-    welcome_text: Mapped[str] = mapped_column(Text, default="Welcome to the GMaps Scraper bot.")
+    welcome_text: Mapped[str] = mapped_column(
+        Text,
+        default="Welcome to Scrapeboard — Maps, search, email & social scrapers.",
+    )
     notify_interval_sec: Mapped[int] = mapped_column(Integer, default=300)
     support_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
     support_chat_id: Mapped[str] = mapped_column(String(64), default="")

@@ -585,32 +585,32 @@ class TelegramBotRuntime:
             await self._send(
                 token,
                 chat_id,
-                "Welcome! Use the menu below or send /buy to see subscription plans.",
+                "Welcome to Scrapeboard! Tap Buy for plans, Scrapers for sources, or Help for the guide.",
                 reply_markup=billing_svc.user_reply_keyboard(has_sub=False),
             )
             return
 
-        msg = settings.welcome_text or "Welcome!"
+        msg = settings.welcome_text or "Welcome to Scrapeboard!"
         msg += f"\nAccount: {user.username} ({user.role})."
         sub = await billing_svc.active_subscription(db, user)
         menu = await self._menu_markup(db, user, settings)
 
         if user.role == "admin":
             msg += "\nAdmin — no subscription required."
-            msg += "\nUpload inputs (.txt/.csv), then /run source=…. See /help and /scrapers."
-            msg += "\nTap Admin for the admin command menu."
+            msg += "\nMenu: Run · Status · Stop · Scrapers · Buy · Admin · Help."
+            msg += "\nUpload .txt/.csv, then Run (or /run source=…). Full guide: Help."
             await self._send(token, chat_id, msg, reply_markup=menu)
             return
 
         if sub:
             msg += f"\nPlan: {sub.package_name} until {sub.expires_at.date()}."
-            msg += "\nUpload inputs (.txt/.csv), then /run source=…. See /help and /scrapers."
-            msg += "\nTap Upgrade for a higher tier (same/lower plans are not offered)."
+            msg += "\nMenu: Run · Status · Stop · Scrapers · Plan · Upgrade · Help."
+            msg += "\nUpload .txt/.csv → Scrapers for source= → Run. Guide: Help."
             await self._send(token, chat_id, msg, reply_markup=menu)
             return
 
         # New / unsubscribed: sell packages instead of "ask admin for telegram id"
-        msg += "\nNo active subscription — pick a package to get access."
+        msg += "\nNo active plan — tap Buy (or pick a package below). Scrapers previews sources; Help has the guide."
         await self._send(token, chat_id, msg, reply_markup=menu)
 
         pkgs = (await db.execute(select(Package).where(Package.is_active == True))).scalars().all()  # noqa: E712
@@ -1032,8 +1032,8 @@ class TelegramBotRuntime:
         await self._send(
             token,
             chat_id,
-            f"✅ Saved {len(entries)} {kind}. Upload the other file if needed, then /run "
-            f"(e.g. /run source=google_search use_dork=yes). See /scrapers.",
+            f"✅ Saved {len(entries)} {kind}. Upload the other file if needed, then tap Run "
+            f"(e.g. /run source=google_search use_dork=yes). See Scrapers.",
         )
 
     async def _scrapers_list(self, db, token, chat_id, user) -> None:
@@ -1092,7 +1092,7 @@ class TelegramBotRuntime:
                 "/run source=youtube max_results=30",
                 "/run source=facebook_pages",
                 "",
-                "Help: /help (user guide attached) · /scrapers",
+                "Help: Help button / /help · Scrapers anytime",
             ]
         )
         await self._send(token, chat_id, "\n".join(lines))
@@ -1105,7 +1105,7 @@ class TelegramBotRuntime:
         if user.role != "admin":
             sub = await billing_svc.active_subscription(db, user)
             if not sub:
-                await self._send(token, chat_id, "⛔ Subscription required. /buy")
+                await self._send(token, chat_id, "⛔ Subscription required. Tap Buy.")
                 return
         inputs = self._inputs.get(user.id) or {}
         kw = inputs.get("keywords")
@@ -1134,7 +1134,7 @@ class TelegramBotRuntime:
             await self._send(
                 token,
                 chat_id,
-                "Upload a keywords (or emails) file first (caption it). See /help.",
+                "Upload a keywords (or emails) file first (caption it), then tap Run. See Help · Scrapers.",
             )
             return
 
@@ -1151,7 +1151,7 @@ class TelegramBotRuntime:
                 token,
                 chat_id,
                 "Upload keywords and locations files first (caption them). "
-                "For Google dorks use /run source=google_search use_dork=yes. See /help.",
+                "For Google dorks: /run source=google_search use_dork=yes. Help · Scrapers.",
             )
             return
 
@@ -1266,7 +1266,7 @@ class TelegramBotRuntime:
                 f"{done}/{j.total_searches} · rows {rows}"
             )
         lines.append("")
-        lines.append("Tips: /status · /stop · /scrapers · /help · /support")
+        lines.append("Tips: Status · Stop · Scrapers · Help · Support")
         await self._send(token, chat_id, "\n".join(lines))
 
     async def _stop_job(self, db, token, chat_id, user) -> None:
@@ -1344,9 +1344,9 @@ class TelegramBotRuntime:
         menu = await self._menu_markup(db, user, settings)
         text = (
             f"{help_body}\n\n"
-            "Use the menu buttons below, or type a command.\n"
+            "Menu buttons: Run · Status · Stop · Scrapers · Plan / Buy · Help (+ Support).\n"
             "Upload captions: keywords · locations · emails\n"
-            "Start a job: /run source=gmaps … · list sources: /scrapers\n\n"
+            "Start a job: /run source=gmaps … · list sources: Scrapers or /scrapers\n\n"
             f"{support_block}\n\n"
             "Full Telegram user guide is attached (uploads, scrapers, /run options)."
         )
