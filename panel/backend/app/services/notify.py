@@ -28,7 +28,8 @@ async def send_text(
     text: str,
     *,
     reply_markup: dict | None = None,
-) -> None:
+) -> int | None:
+    """Send a text message. Returns Telegram message_id on success, else None."""
     try:
         async with httpx.AsyncClient(timeout=30) as client:
             payload: dict = {"chat_id": chat_id, "text": text[:4000]}
@@ -45,8 +46,84 @@ async def send_text(
                 desc = str(data.get("description") or "sendMessage failed")
                 code = data.get("error_code")
                 log.warning("sendMessage rejected chat_id=%s: %s%s", chat_id, f"{code}: " if code else "", desc)
+                return None
+            result = data.get("result") or {}
+            mid = result.get("message_id")
+            return int(mid) if mid is not None else None
     except Exception:
         log.exception("send_text failed")
+        return None
+
+
+async def edit_text(
+    token: str,
+    chat_id: int | str,
+    message_id: int,
+    text: str,
+    *,
+    reply_markup: dict | None = None,
+) -> bool:
+    """Edit an existing message text (+ optional inline keyboard)."""
+    try:
+        import json
+
+        async with httpx.AsyncClient(timeout=30) as client:
+            payload: dict = {
+                "chat_id": chat_id,
+                "message_id": message_id,
+                "text": text[:4000],
+            }
+            if reply_markup is not None:
+                payload["reply_markup"] = json.dumps(reply_markup)
+            r = await client.post(
+                f"https://api.telegram.org/bot{token}/editMessageText",
+                data=payload,
+            )
+            data = r.json()
+            if not data.get("ok"):
+                desc = str(data.get("description") or "")
+                # No-op edits are fine when content is unchanged
+                if "message is not modified" in desc.lower():
+                    return True
+                log.warning("editMessageText rejected: %s", desc)
+                return False
+            return True
+    except Exception:
+        log.exception("edit_text failed")
+        return False
+
+
+async def edit_reply_markup(
+    token: str,
+    chat_id: int | str,
+    message_id: int,
+    reply_markup: dict | None,
+) -> bool:
+    """Edit only the inline keyboard on an existing message."""
+    try:
+        import json
+
+        async with httpx.AsyncClient(timeout=30) as client:
+            payload: dict = {
+                "chat_id": chat_id,
+                "message_id": message_id,
+                "reply_markup": json.dumps(reply_markup or {"inline_keyboard": []}),
+            }
+            r = await client.post(
+                f"https://api.telegram.org/bot{token}/editMessageReplyMarkup",
+                data=payload,
+            )
+            data = r.json()
+            if not data.get("ok"):
+                desc = str(data.get("description") or "")
+                if "message is not modified" in desc.lower():
+                    return True
+                log.warning("editMessageReplyMarkup rejected: %s", desc)
+                return False
+            return True
+    except Exception:
+        log.exception("edit_reply_markup failed")
+        return False
 
 
 async def send_document(token: str, chat_id: int | str, path: Path, caption: str = "") -> bool:

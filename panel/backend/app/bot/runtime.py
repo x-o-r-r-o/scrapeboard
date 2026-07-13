@@ -13,6 +13,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.bot.admin import ADMIN_COMMANDS, handle_admin
+from app.bot import wizard as run_wizard
 from app.bot.tg_auth import (
     find_user_by_telegram,
     normalize_telegram_id,
@@ -460,7 +461,19 @@ class TelegramBotRuntime:
             return
 
         if cmd == "/scrapers":
-            await self._scrapers_list(db, token, chat_id, user)
+            if not user and uid is not None:
+                try:
+                    user = await billing_svc.ensure_telegram_user(db, uid, display_name=display_name)
+                except Exception:
+                    log.exception("ensure_telegram_user failed on /scrapers")
+            if not user:
+                await self._send(token, chat_id, "Send /start first.")
+                return
+            # `/scrapers list` = text catalog for power users; default = button wizard
+            if args and args[0].lower() in ("list", "text", "all"):
+                await self._scrapers_list(db, token, chat_id, user)
+            else:
+                await run_wizard.open_wizard(db, token, int(chat_id), user)
             return
 
         # billing open commands (/packages aliases to same list as /buy|/upgrade)
@@ -518,7 +531,11 @@ class TelegramBotRuntime:
             return
 
         if cmd == "/run":
-            await self._run(db, token, chat_id, user, args)
+            # Bare /run or menu Run → button wizard. Args → advanced typed path.
+            if not args:
+                await run_wizard.open_wizard(db, token, int(chat_id), user)
+            else:
+                await self._run(db, token, chat_id, user, args)
             return
 
         if cmd in ("/status", "/stats", "/jobs"):
@@ -585,7 +602,7 @@ class TelegramBotRuntime:
             await self._send(
                 token,
                 chat_id,
-                "Welcome to Scrapeboard! Tap Buy for plans, Scrapers for sources, or Help for the guide.",
+                "Welcome to Scrapeboard! Tap 🛒 Buy for plans, 🛠 Scrapers for sources, or ❓ Help.",
                 reply_markup=billing_svc.user_reply_keyboard(has_sub=False),
             )
             return
@@ -597,20 +614,20 @@ class TelegramBotRuntime:
 
         if user.role == "admin":
             msg += "\nAdmin — no subscription required."
-            msg += "\nMenu: Run · Status · Stop · Scrapers · Buy · Admin · Help."
-            msg += "\nUpload .txt/.csv, then Run (or /run source=…). Full guide: Help."
+            msg += "\nTap 🛠 Scrapers → pick a source → options → upload → Start (buttons only)."
+            msg += "\nAdvanced: typed /run source=… still works. Tap 🛡 Admin for ops."
             await self._send(token, chat_id, msg, reply_markup=menu)
             return
 
         if sub:
             msg += f"\nPlan: {sub.package_name} until {sub.expires_at.date()}."
-            msg += "\nMenu: Run · Status · Stop · Scrapers · Plan · Upgrade · Help."
-            msg += "\nUpload .txt/.csv → Scrapers for source= → Run. Guide: Help."
+            msg += "\nEasy path: upload .txt/.csv → 🛠 Scrapers → Start (no typing)."
+            msg += "\nAdvanced: /run source=… key=value"
             await self._send(token, chat_id, msg, reply_markup=menu)
             return
 
         # New / unsubscribed: sell packages instead of "ask admin for telegram id"
-        msg += "\nNo active plan — tap Buy (or pick a package below). Scrapers previews sources; Help has the guide."
+        msg += "\nNo active plan — tap 🛒 Buy (or pick a package below). Button-driven from there."
         await self._send(token, chat_id, msg, reply_markup=menu)
 
         pkgs = (await db.execute(select(Package).where(Package.is_active == True))).scalars().all()  # noqa: E712
@@ -646,6 +663,7 @@ class TelegramBotRuntime:
         msg = cq.get("message") or {}
         chat = msg.get("chat") or {}
         chat_id = chat.get("id")
+        message_id = msg.get("message_id")
         cb_id = cq.get("id")
         if uid is None or chat_id is None or not cb_id:
             return
@@ -661,6 +679,59 @@ class TelegramBotRuntime:
             except Exception:
                 await self._answer_callback(token, cb_id, "Account error")
                 return
+
+        async def _answer(text: str = "") -> None:
+            await self._answer_callback(token, cb_id, text)
+
+        # Run wizard (button-driven)
+        if data.startswith("w:"):
+            inputs = self._inputs.get(user.id)
+
+            async def _start_job(*, source: str, overrides: dict[str, Any]) -> None:
+                await self._run_from_wizard(db, token, chat_id, user, source=source, overrides=overrides)
+
+            handled = await run_wizard.handle_callback(
+                db,
+                token,
+                int(chat_id),
+                int(message_id) if message_id is not None else None,
+                user,
+                data,
+                inputs,
+                answer=_answer,
+                start_job=_start_job,
+            )
+            if handled:
+                return
+
+        # Status chrome
+        if data == "ui:status":
+            await _answer("Refreshing")
+            await self._status(db, token, chat_id, user)
+            return
+        if data == "ui:stop":
+            await _answer("Stopping")
+            await self._stop_job(db, token, chat_id, user)
+            return
+        if data == "ui:scrapers":
+            await _answer("Scrapers")
+            await run_wizard.open_wizard(db, token, int(chat_id), user)
+            return
+        if data == "ui:buy":
+            await _answer("Buy")
+            settings = await db.get(BotSettings, 1)
+            await self._handle_billing(
+                db,
+                token,
+                chat_id,
+                user,
+                "/buy",
+                [],
+                settings,
+                uid=uid,
+                display_name=display_name,
+            )
+            return
 
         if data.startswith("buy:"):
             slug = data[4:].strip()
@@ -819,13 +890,30 @@ class TelegramBotRuntime:
                 return
             sub = await billing_svc.active_subscription(db, user)
             if not sub:
-                await self._send(token, chat_id, "No subscription. Send /buy.")
+                await self._send(
+                    token,
+                    chat_id,
+                    "No subscription yet.",
+                    reply_markup={
+                        "inline_keyboard": [[{"text": "🛒 Buy a plan", "callback_data": "ui:buy"}]]
+                    },
+                )
                 return
             await self._send(
                 token,
                 chat_id,
-                f"Package: {sub.package_name}\nExpires: {sub.expires_at.date()}\n"
+                f"📋 Your plan\n"
+                f"Package: {sub.package_name}\n"
+                f"Expires: {sub.expires_at.date()}\n"
                 f"Threads: {sub.threads} | Upload: {sub.max_upload_mb} MB",
+                reply_markup={
+                    "inline_keyboard": [
+                        [
+                            {"text": "⬆️ Upgrade", "callback_data": "ui:buy"},
+                            {"text": "🛠 Scrapers", "callback_data": "ui:scrapers"},
+                        ]
+                    ]
+                },
             )
             return
 
@@ -1029,12 +1117,26 @@ class TelegramBotRuntime:
         dest = dest_dir / f"{kind}.txt"
         dest.write_bytes(entries_to_bytes(entries))
         self._inputs.setdefault(user.id, {})[kind] = dest
-        await self._send(
-            token,
-            chat_id,
-            f"✅ Saved {len(entries)} {kind}. Upload the other file if needed, then tap Run "
-            f"(e.g. /run source=google_search use_dork=yes). See Scrapers.",
-        )
+        wiz = run_wizard.get_session(user.id)
+        if wiz and wiz.awaiting_upload:
+            await self._send(
+                token,
+                chat_id,
+                f"✅ Saved {len(entries)} {kind}. Continuing setup…",
+            )
+            await run_wizard.on_upload_received(
+                token,
+                user,
+                self._inputs.get(user.id),
+                kind=kind,
+            )
+        else:
+            await self._send(
+                token,
+                chat_id,
+                f"✅ Saved {len(entries)} {kind}. Tap 🛠 Scrapers or 🚀 Run to finish with buttons "
+                f"(or type /run source=… for advanced options).",
+            )
 
     async def _scrapers_list(self, db, token, chat_id, user) -> None:
         from app.models import Package
@@ -1097,6 +1199,28 @@ class TelegramBotRuntime:
         )
         await self._send(token, chat_id, "\n".join(lines))
 
+    async def _run_from_wizard(
+        self,
+        db,
+        token,
+        chat_id,
+        user: User,
+        *,
+        source: str,
+        overrides: dict[str, Any],
+    ) -> None:
+        """Create a job from the button wizard (no typed /run required)."""
+        opts = dict(overrides or {})
+        channels = opts.pop("channels", None)
+        args = [f"source={source}"]
+        for k, v in opts.items():
+            args.append(f"{k}={v}")
+        if isinstance(channels, list) and channels:
+            args.append("channels=" + ",".join(str(c) for c in channels))
+        elif channels:
+            args.append(f"channels={channels}")
+        await self._run(db, token, chat_id, user, args)
+
     async def _run(self, db, token, chat_id, user, args) -> None:
         perms = jobs_svc.effective_perms(user)
         if not perms.get("can_run") and user.role != "admin":
@@ -1105,7 +1229,14 @@ class TelegramBotRuntime:
         if user.role != "admin":
             sub = await billing_svc.active_subscription(db, user)
             if not sub:
-                await self._send(token, chat_id, "⛔ Subscription required. Tap Buy.")
+                await self._send(
+                    token,
+                    chat_id,
+                    "⛔ Subscription required. Tap 🛒 Buy.",
+                    reply_markup={
+                        "inline_keyboard": [[{"text": "🛒 Buy a plan", "callback_data": "ui:buy"}]]
+                    },
+                )
                 return
         inputs = self._inputs.get(user.id) or {}
         kw = inputs.get("keywords")
@@ -1134,7 +1265,10 @@ class TelegramBotRuntime:
             await self._send(
                 token,
                 chat_id,
-                "Upload a keywords (or emails) file first (caption it), then tap Run. See Help · Scrapers.",
+                "Upload a keywords (or emails) file first (caption it), then tap 🛠 Scrapers or 🚀 Run.",
+                reply_markup={
+                    "inline_keyboard": [[{"text": "🛠 Open scrapers", "callback_data": "ui:scrapers"}]]
+                },
             )
             return
 
@@ -1151,7 +1285,11 @@ class TelegramBotRuntime:
                 token,
                 chat_id,
                 "Upload keywords and locations files first (caption them). "
-                "For Google dorks: /run source=google_search use_dork=yes. Help · Scrapers.",
+                "Or use 🛠 Scrapers for a guided setup.\n"
+                "Advanced: /run source=google_search use_dork=yes",
+                reply_markup={
+                    "inline_keyboard": [[{"text": "🛠 Open scrapers", "callback_data": "ui:scrapers"}]]
+                },
             )
             return
 
@@ -1170,7 +1308,7 @@ class TelegramBotRuntime:
                 channels=channel_list,
             )
         except (PermissionError, ValueError) as e:
-            await self._send(token, chat_id, f"❌ {e}\nJob was not started. See /help.")
+            await self._send(token, chat_id, f"❌ {e}\nJob was not started. See ❓ Help.")
             return
         blocker = await jobs_svc.owner_blocking_job(db, user.id, exclude_job_id=job.id)
         if blocker:
@@ -1186,7 +1324,15 @@ class TelegramBotRuntime:
             f"✅ Job queued: {jobs_svc.job_display_label(job)}\n"
             f"{src_note} · {job.total_searches:,} searches · {jobs_svc.job_thread_count(job)} threads.\n"
             f"{wait_note}"
-            f"/status for progress.",
+            "Tap 📊 Status for progress · ⏹ Stop to cancel.",
+            reply_markup={
+                "inline_keyboard": [
+                    [
+                        {"text": "📊 Status", "callback_data": "ui:status"},
+                        {"text": "⏹ Stop", "callback_data": "ui:stop"},
+                    ]
+                ]
+            },
         )
 
     async def _status(self, db, token, chat_id, user) -> None:
@@ -1210,8 +1356,13 @@ class TelegramBotRuntime:
             await self._send(
                 token,
                 chat_id,
-                "No jobs yet.\nUpload inputs, then /run source=…\n"
-                "See /help and /scrapers. Use /status anytime for progress.",
+                "No jobs yet.\n"
+                "1) Upload keywords (+ locations)\n"
+                "2) Tap 🛠 Scrapers → pick source → Start\n"
+                "(Advanced: /run source=…)",
+                reply_markup={
+                    "inline_keyboard": [[{"text": "🛠 Open scrapers", "callback_data": "ui:scrapers"}]]
+                },
             )
             return
 
@@ -1254,7 +1405,7 @@ class TelegramBotRuntime:
             lines.append("")
         else:
             lines.append("▶ Active jobs (1 runs at a time)")
-            lines.append("• none — queue a job with /run")
+            lines.append("• none — tap 🛠 Scrapers to start")
             lines.append("")
 
         lines.append("📁 Recent jobs")
@@ -1266,8 +1417,16 @@ class TelegramBotRuntime:
                 f"{done}/{j.total_searches} · rows {rows}"
             )
         lines.append("")
-        lines.append("Tips: Status · Stop · Scrapers · Help · Support")
-        await self._send(token, chat_id, "\n".join(lines))
+        lines.append("Use the buttons below — no typing needed.")
+        kb_rows: list[list[dict[str, str]]] = [
+            [
+                {"text": "🔄 Refresh", "callback_data": "ui:status"},
+                {"text": "🛠 Scrapers", "callback_data": "ui:scrapers"},
+            ]
+        ]
+        if active:
+            kb_rows.insert(0, [{"text": "⏹ Stop active job", "callback_data": "ui:stop"}])
+        await self._send(token, chat_id, "\n".join(lines), reply_markup={"inline_keyboard": kb_rows})
 
     async def _stop_job(self, db, token, chat_id, user) -> None:
         """Stop the user's own active job (ownership via own_active_job). Panel stop is admin-only."""
@@ -1344,11 +1503,16 @@ class TelegramBotRuntime:
         menu = await self._menu_markup(db, user, settings)
         text = (
             f"{help_body}\n\n"
-            "Menu buttons: Run · Status · Stop · Scrapers · Plan / Buy · Help (+ Support).\n"
-            "Upload captions: keywords · locations · emails\n"
-            "Start a job: /run source=gmaps … · list sources: Scrapers or /scrapers\n\n"
+            "— Easy (buttons, no typing) —\n"
+            "🛒 Buy → pick plan → network → pay → /paid <txid>\n"
+            "Upload .txt/.csv (caption keywords / locations / emails)\n"
+            "🛠 Scrapers → pick source → options → Continue → 🚀 Start\n"
+            "📊 Status · ⏹ Stop · 📋 Plan · 💬 Support\n\n"
+            "— Advanced —\n"
+            "/run source=gmaps threads=2 scrape_websites=yes\n"
+            "/scrapers list — text catalog of sources\n\n"
             f"{support_block}\n\n"
-            "Full Telegram user guide is attached (uploads, scrapers, /run options)."
+            "Full user guide is attached."
         )
         await self._send(token, chat_id, text, reply_markup=menu)
         guide = self._telegram_users_guide_path()

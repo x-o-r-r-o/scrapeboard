@@ -69,20 +69,30 @@ METHOD_MANUAL = "manual"
 # Persistent Telegram reply-keyboard labels → slash commands
 MENU_BUTTON_TO_CMD: dict[str, str] = {
     "Buy": "/buy",
+    "🛒 Buy": "/buy",
     "Upgrade": "/buy",
+    "⬆️ Upgrade": "/buy",
     "Help": "/help",
+    "❓ Help": "/help",
     "Support": "/support",
+    "💬 Support": "/support",
     "Run": "/run",
+    "🚀 Run": "/run",
     "Status": "/status",
+    "📊 Status": "/status",
     "Stop": "/stop",
+    "⏹ Stop": "/stop",
     "Scrapers": "/scrapers",
+    "🛠 Scrapers": "/scrapers",
     "Plan": "/subscription",
+    "📋 Plan": "/subscription",
     # Legacy reply-keyboard labels (no longer shown; keep for stale keyboards).
-    "Packages": "/packages",  # alias of Buy / Upgrade list
+    "Packages": "/packages",
     "Jobs": "/jobs",
-    "Formats": "/help",  # legacy reply-keyboard label
+    "Formats": "/help",
     "Subscription": "/subscription",
     "Admin": "/admin",
+    "🛡 Admin": "/admin",
 }
 
 # Package ranking for upgrades: higher Package.tier wins.
@@ -925,9 +935,10 @@ def packages_inline_keyboard(pkgs: list[Package]) -> dict:
     """Telegram inline keyboard: one button per package."""
     rows: list[list[dict]] = []
     for p in sorted(pkgs, key=lambda x: x.tier):
-        label = f"{p.name} — {p.price_usdt} USDT / {p.duration_days}d"
+        label = f"🛒 {p.name} — {p.price_usdt} USDT / {p.duration_days}d"
         if len(label) > 64:
-            label = f"{p.slug} — {p.price_usdt} USDT"
+            label = f"🛒 {p.slug} — {p.price_usdt} USDT"
+
         rows.append([{"text": label, "callback_data": f"buy:{p.slug}"}])
     return {"inline_keyboard": rows}
 
@@ -948,29 +959,28 @@ def user_reply_keyboard(
 ) -> dict:
     """Persistent Telegram reply keyboard (always-on chrome).
 
-    Subscriber chrome: Run / Status / Stop · Scrapers / Plan / Upgrade · Help (+ Support).
-    Guests: Buy · Scrapers · Help (+ Support). Admins get Admin instead of Plan/Upgrade.
-    Typed aliases still work: /packages, /jobs, /formats → help, /subscription.
+    Emoji labels for clarity; plain-text legacy labels still map via MENU_BUTTON_TO_CMD.
+    Scrapers / Run open the inline wizard (no typing required).
     """
-    help_row: list[dict] = [{"text": "Help"}]
+    help_row: list[dict] = [{"text": "❓ Help"}]
     if support_enabled:
-        help_row.insert(0, {"text": "Support"})
+        help_row.insert(0, {"text": "💬 Support"})
 
     if is_admin:
         rows: list[list[dict]] = [
-            [{"text": "Run"}, {"text": "Status"}, {"text": "Stop"}],
-            [{"text": "Scrapers"}, {"text": "Buy"}, {"text": "Admin"}],
+            [{"text": "🚀 Run"}, {"text": "📊 Status"}, {"text": "⏹ Stop"}],
+            [{"text": "🛠 Scrapers"}, {"text": "🛒 Buy"}, {"text": "🛡 Admin"}],
             help_row,
         ]
     elif has_sub:
         rows = [
-            [{"text": "Run"}, {"text": "Status"}, {"text": "Stop"}],
-            [{"text": "Scrapers"}, {"text": "Plan"}, {"text": "Upgrade"}],
+            [{"text": "🚀 Run"}, {"text": "📊 Status"}, {"text": "⏹ Stop"}],
+            [{"text": "🛠 Scrapers"}, {"text": "📋 Plan"}, {"text": "⬆️ Upgrade"}],
             help_row,
         ]
     else:
         rows = [
-            [{"text": "Buy"}, {"text": "Scrapers"}],
+            [{"text": "🛒 Buy"}, {"text": "🛠 Scrapers"}],
             help_row,
         ]
     return {
