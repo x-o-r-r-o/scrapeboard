@@ -602,7 +602,7 @@ class TelegramBotRuntime:
             await self._send(
                 token,
                 chat_id,
-                "Welcome to Scrapeboard! Tap 🛒 Buy for plans, 🛠 Scrapers for sources, or ❓ Help.",
+                "Welcome to Scrapeboard! Tap 🛒 Buy for plans, or ❓ Help for the guide.",
                 reply_markup=billing_svc.user_reply_keyboard(has_sub=False),
             )
             return
@@ -614,14 +614,14 @@ class TelegramBotRuntime:
 
         if user.role == "admin":
             msg += "\nAdmin — no subscription required."
-            msg += "\nTap 🛠 Scrapers → pick a source → options → upload → Start (buttons only)."
+            msg += "\nTap 🚀 Run → pick a source → options → upload → Start (buttons only)."
             msg += "\nAdvanced: typed /run source=… still works. Tap 🛡 Admin for ops."
             await self._send(token, chat_id, msg, reply_markup=menu)
             return
 
         if sub:
             msg += f"\nPlan: {sub.package_name} until {sub.expires_at.date()}."
-            msg += "\nEasy path: upload .txt/.csv → 🛠 Scrapers → Start (no typing)."
+            msg += "\nEasy path: upload .txt/.csv → 🚀 Run → Start (no typing)."
             msg += "\nAdvanced: /run source=… key=value"
             await self._send(token, chat_id, msg, reply_markup=menu)
             return
@@ -714,7 +714,7 @@ class TelegramBotRuntime:
             await self._stop_job(db, token, chat_id, user)
             return
         if data == "ui:scrapers":
-            await _answer("Scrapers")
+            await _answer("Run")
             await run_wizard.open_wizard(db, token, int(chat_id), user)
             return
         if data == "ui:buy":
@@ -910,7 +910,7 @@ class TelegramBotRuntime:
                     "inline_keyboard": [
                         [
                             {"text": "⬆️ Upgrade", "callback_data": "ui:buy"},
-                            {"text": "🛠 Scrapers", "callback_data": "ui:scrapers"},
+                            {"text": "🚀 Run", "callback_data": "ui:scrapers"},
                         ]
                     ]
                 },
@@ -1134,7 +1134,7 @@ class TelegramBotRuntime:
             await self._send(
                 token,
                 chat_id,
-                f"✅ Saved {len(entries)} {kind}. Tap 🛠 Scrapers or 🚀 Run to finish with buttons "
+                f"✅ Saved {len(entries)} {kind}. Tap 🚀 Run to finish with buttons "
                 f"(or type /run source=… for advanced options).",
             )
 
@@ -1194,7 +1194,7 @@ class TelegramBotRuntime:
                 "/run source=youtube max_results=30",
                 "/run source=facebook_pages",
                 "",
-                "Help: Help button / /help · Scrapers anytime",
+                "Help: ❓ Help · tap 🚀 Run anytime",
             ]
         )
         await self._send(token, chat_id, "\n".join(lines))
@@ -1265,9 +1265,9 @@ class TelegramBotRuntime:
             await self._send(
                 token,
                 chat_id,
-                "Upload a keywords (or emails) file first (caption it), then tap 🛠 Scrapers or 🚀 Run.",
+                "Upload a keywords (or emails) file first (caption it), then tap 🚀 Run.",
                 reply_markup={
-                    "inline_keyboard": [[{"text": "🛠 Open scrapers", "callback_data": "ui:scrapers"}]]
+                    "inline_keyboard": [[{"text": "🚀 Run", "callback_data": "ui:scrapers"}]]
                 },
             )
             return
@@ -1285,10 +1285,10 @@ class TelegramBotRuntime:
                 token,
                 chat_id,
                 "Upload keywords and locations files first (caption them). "
-                "Or use 🛠 Scrapers for a guided setup.\n"
+                "Or tap 🚀 Run for a guided setup.\n"
                 "Advanced: /run source=google_search use_dork=yes",
                 reply_markup={
-                    "inline_keyboard": [[{"text": "🛠 Open scrapers", "callback_data": "ui:scrapers"}]]
+                    "inline_keyboard": [[{"text": "🚀 Run", "callback_data": "ui:scrapers"}]]
                 },
             )
             return
@@ -1358,10 +1358,10 @@ class TelegramBotRuntime:
                 chat_id,
                 "No jobs yet.\n"
                 "1) Upload keywords (+ locations)\n"
-                "2) Tap 🛠 Scrapers → pick source → Start\n"
+                "2) Tap 🚀 Run → pick source → Start\n"
                 "(Advanced: /run source=…)",
                 reply_markup={
-                    "inline_keyboard": [[{"text": "🛠 Open scrapers", "callback_data": "ui:scrapers"}]]
+                    "inline_keyboard": [[{"text": "🚀 Run", "callback_data": "ui:scrapers"}]]
                 },
             )
             return
@@ -1405,7 +1405,7 @@ class TelegramBotRuntime:
             lines.append("")
         else:
             lines.append("▶ Active jobs (1 runs at a time)")
-            lines.append("• none — tap 🛠 Scrapers to start")
+            lines.append("• none — tap 🚀 Run to start")
             lines.append("")
 
         lines.append("📁 Recent jobs")
@@ -1421,7 +1421,7 @@ class TelegramBotRuntime:
         kb_rows: list[list[dict[str, str]]] = [
             [
                 {"text": "🔄 Refresh", "callback_data": "ui:status"},
-                {"text": "🛠 Scrapers", "callback_data": "ui:scrapers"},
+                {"text": "🚀 Run", "callback_data": "ui:scrapers"},
             ]
         ]
         if active:
@@ -1506,7 +1506,7 @@ class TelegramBotRuntime:
             "— Easy (buttons, no typing) —\n"
             "🛒 Buy → pick plan → network → pay → /paid <txid>\n"
             "Upload .txt/.csv (caption keywords / locations / emails)\n"
-            "🛠 Scrapers → pick source → options → Continue → 🚀 Start\n"
+            "🚀 Run → pick source → options → Continue → Start\n"
             "📊 Status · ⏹ Stop · 📋 Plan · 💬 Support\n\n"
             "— Advanced —\n"
             "/run source=gmaps threads=2 scrape_websites=yes\n"

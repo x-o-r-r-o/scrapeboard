@@ -11,12 +11,12 @@ Send **❓ Help** or `/help` anytime for the command list and this guide as an a
 1. Open the bot → `/start` (creates your account).
 2. Tap **🛒 Buy** → pick a package → pick network → pay → send `/paid <txid>` when required.
 3. Upload input files as **documents** (see [Uploads](#uploads)). Caption them correctly.
-4. Tap **🛠 Scrapers** (or **🚀 Run**).
+4. Tap **🚀 Run**.
 5. Tap a **category** → a **scraper** → toggle **options** → **Continue**.
 6. Follow upload prompts if needed → tap **🚀 Start job**.
 7. **📊 Status** for progress · **⏹ Stop** to cancel (partial ZIP may be sent here).
 
-Menu (subscribers): **🚀 Run · 📊 Status · ⏹ Stop · 🛠 Scrapers · 📋 Plan · ⬆️ Upgrade · ❓ Help** (+ **💬 Support** when enabled).
+Menu (subscribers): **🚀 Run · 📊 Status · ⏹ Stop · 📋 Plan · ⬆️ Upgrade · ❓ Help** (+ **💬 Support** when enabled).
 
 No need to type `/run source=…` unless you want advanced options.
 
@@ -36,10 +36,10 @@ No need to type `/run source=…` unless you want advanced options.
 |---------|---------|
 | `/start` | Welcome + menu |
 | `/help` | Commands + this guide · menu: **❓ Help** |
-| `/scrapers` | **Button wizard** to pick a scraper · `/scrapers list` for text catalog |
 | `/whoami` | Your Telegram id |
 | `/buy` `/paid` `/subscription` | Billing · **🛒 Buy** / **⬆️ Upgrade** / **📋 Plan** |
-| `/run` | Opens the **same button wizard**. With args: advanced typed run |
+| `/run` | **Button wizard** to pick a scraper and start · with args: advanced typed run |
+| `/scrapers` | Alias of `/run` · `/scrapers list` for text catalog |
 | `/status` | Job progress · **📊 Status** |
 | `/stop` | Stop active job · **⏹ Stop** |
 | `/support <message>` | Support ticket · **💬 Support** |
@@ -83,13 +83,13 @@ Send a **document** (`.txt` or `.csv`, UTF-8). Set the **caption** (or filename)
 - **`email_validate`**: emails only (caption `emails`).
 - **Google dork mode**: keywords hold full queries; locations optional (bot offers Skip).
 
-The scraper wizard tells you when each file is needed.
+The **Run** wizard tells you when each file is needed.
 
 ---
 
-## Scrapers (`source=`)
+## Available scrapers (`source=`)
 
-Availability depends on your plan. Tap **🛠 Scrapers** for *your* list.
+Availability depends on your plan. Tap **🚀 Run** for *your* list.
 
 Includes: Google Maps, TikTok Shop, Google Search, Email Harvest / Validate, Facebook (pages/groups/posts/comments), Instagram, TikTok, YouTube, Reddit, Pinterest, LinkedIn, X (Twitter).
 
@@ -101,5 +101,5 @@ CSV outputs include **name**, **email**, and **phone** when publicly available.
 
 - Prefer **buttons** for buy + run; type only for TxID and support notes.
 - One job at a time; extras queue.
-- `/scrapers list` if you want the old text catalog.
+- `/scrapers list` if you want a text catalog.
 - Stuck? **💬 Support** or `/support …`.

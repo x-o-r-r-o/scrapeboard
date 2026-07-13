@@ -59,7 +59,7 @@ TOGGLE_KEYS = {
 }
 TOGGLE_REVERSE = {v: k for k, v in TOGGLE_KEYS.items()}
 
-ENGINE_CYCLE = ("chrome", "brave", "camoufox")
+ENGINE_CYCLE = ("chrome", "brave", "camoufox")  # unused in Telegram UI — engine fixed to chrome
 MAX_RESULTS_CYCLE = (0, 25, 50, 100, 200)
 THREAD_PRESETS = (1, 2, 4, 8)
 
@@ -182,7 +182,8 @@ def _groups_from_rows(rows: list[dict[str, Any]]) -> list[tuple[str, str]]:
 
 
 def _mark(on: bool) -> str:
-    return "✅" if on else "⬜"
+    """On = check, off = cross (⬜ often renders blank on Telegram clients)."""
+    return "✅" if on else "❌"
 
 
 def _options_keyboard(sess: WizardSession) -> dict:
@@ -216,13 +217,9 @@ def _options_keyboard(sess: WizardSession) -> dict:
             label = "unlimited" if mr <= 0 else str(mr)
             rows.append([_btn(f"📊 Max results: {label}", "w:c:mr")])
 
-    # Threads
+    # Threads only — engine is fixed (chrome); not shown in Telegram UI
     th = int(opts.get("threads") or 1)
     rows.append([_btn(f"🧵 Threads: {th} (tap to cycle)", "w:c:th")])
-    # Engine for browser scrapers (not email_validate alone)
-    if src != "email_validate":
-        eng = str(opts.get("engine") or "chrome")
-        rows.append([_btn(f"🌐 Engine: {eng}", "w:c:en")])
 
     rows.append([_btn("➡️ Continue", "w:n"), _btn("❌ Cancel", "w:x")])
     rows.append([_btn("⬅️ Back", "w:b")])
@@ -239,8 +236,9 @@ def _options_text(sess: WizardSession) -> str:
         "Advanced users can still type: /run source=… key=value",
         "",
     ]
+    hide = {"channels", "engine"}
     for k, v in sorted(sess.options.items()):
-        if k == "channels":
+        if k in hide:
             continue
         lines.append(f"• {k} = {v}")
     return "\n".join(lines)
@@ -256,10 +254,18 @@ def _inputs_status(inputs: dict[str, Path] | None, source: str, options: dict[st
     return has_kw, has_loc
 
 
-def _upload_kw_keyboard() -> dict:
+def _upload_kw_keyboard(*, source: str, options: dict[str, Any] | None = None) -> dict:
+    src = normalize_source(source)
+    options = options or {}
+    if src == "email_validate":
+        waiting = "📎 Waiting for emails.txt…"
+    elif src == "google_search" and _opt_bool(options, "use_dork", False):
+        waiting = "📎 Waiting for keywords.txt (dork queries)…"
+    else:
+        waiting = "📎 Waiting for keywords.txt…"
     return _inline(
         [
-            [_btn("📎 Waiting for keywords/emails file…", "w:noop")],
+            [_btn(waiting, "w:noop")],
             [_btn("➡️ I uploaded — Continue", "w:n"), _btn("❌ Cancel", "w:x")],
             [_btn("⬅️ Back", "w:b")],
         ]
@@ -268,7 +274,7 @@ def _upload_kw_keyboard() -> dict:
 
 def _upload_loc_keyboard(*, can_skip: bool) -> dict:
     rows: list[list[dict[str, str]]] = [
-        [_btn("📎 Waiting for locations file…", "w:noop")],
+        [_btn("📎 Waiting for locations.txt…", "w:noop")],
     ]
     cont = [_btn("➡️ I uploaded — Continue", "w:n")]
     if can_skip:
@@ -298,14 +304,17 @@ def _confirm_text(sess: WizardSession, inputs: dict[str, Path] | None) -> str:
         f"source={normalize_source(sess.source)}",
         "",
     ]
+    hide = {"channels", "engine"}
     for k, v in sorted(sess.options.items()):
+        if k in hide:
+            continue
         lines.append(f"• {k}={v}")
     lines.append("")
-    lines.append(f"Keywords: {kw.name if kw and kw.exists() else '—'}")
+    lines.append(f"keywords.txt: {kw.name if kw and kw.exists() else '—'}")
     if needs_locations(sess.source or "", sess.options):
-        lines.append(f"Locations: {loc.name if loc and loc.exists() else '—'}")
+        lines.append(f"locations.txt: {loc.name if loc and loc.exists() else '—'}")
     else:
-        lines.append("Locations: not required")
+        lines.append("locations.txt: not required")
     lines.append("")
     lines.append("Tap Start job — no typing needed.")
     return "\n".join(lines)
@@ -418,24 +427,53 @@ async def _show_upload_kw(token: str, sess: WizardSession) -> None:
     sess.step = STEP_UPLOAD_KW
     sess.awaiting_upload = "keywords"
     spec = get_scraper(sess.source)
-    hint = "emails file (caption: emails)" if normalize_source(sess.source) == "email_validate" else "keywords / dork file (caption: keywords)"
-    text = (
-        f"📎 Upload {hint}\n\n"
-        f"Scraper: {spec.label if spec else sess.source}\n"
-        "Send a .txt or .csv document with the right caption, then tap Continue.\n"
-        "One entry per line."
-    )
-    await _render(token, sess, text, _upload_kw_keyboard())
+    src = normalize_source(sess.source)
+    if src == "email_validate":
+        text = (
+            "📎 Step 1/1 — upload emails.txt\n\n"
+            f"Scraper: {spec.label if spec else src}\n\n"
+            "Send a .txt or .csv document.\n"
+            "• Caption (or filename): emails\n"
+            "• One email per line\n\n"
+            "Then tap Continue."
+        )
+    elif src == "google_search" and _opt_bool(sess.options, "use_dork", False):
+        text = (
+            "📎 Step 1/1 — upload keywords.txt (Google dorks)\n\n"
+            f"Scraper: {spec.label if spec else src}\n\n"
+            "Send a .txt or .csv document.\n"
+            "• Caption (or filename): keywords or dork\n"
+            "• One full Google query per line (site:, filetype:, …)\n"
+            "• Locations not required in dork mode\n\n"
+            "Then tap Continue."
+        )
+    else:
+        # Maps and most scrapers: keywords.txt then locations.txt
+        text = (
+            "📎 Step 1/2 — upload keywords.txt\n\n"
+            f"Scraper: {spec.label if spec else src}\n\n"
+            "Send a .txt or .csv document.\n"
+            "• Caption (or filename): keywords\n"
+            "• One search keyword / niche per line\n\n"
+            "Next you will upload locations.txt.\n"
+            "Then tap Continue."
+        )
+    await _render(token, sess, text, _upload_kw_keyboard(source=src, options=sess.options))
 
 
 async def _show_upload_loc(token: str, sess: WizardSession) -> None:
     sess.step = STEP_UPLOAD_LOC
     sess.awaiting_upload = "locations"
     can_skip = location_optional(sess.source or "", sess.options)
+    spec = get_scraper(sess.source)
     text = (
-        "📎 Upload locations file\n\n"
-        "Caption the document: locations (or region).\n"
-        "Prefer city,state,country — one per line."
+        "📎 Step 2/2 — upload locations.txt\n\n"
+        f"Scraper: {spec.label if spec else sess.source}\n\n"
+        "Send a .txt or .csv document.\n"
+        "• Caption (or filename): locations (or region)\n"
+        "• One location per line (prefer city,state,country)\n"
+        "  Example: Austin,Texas,USA\n\n"
+        "Then tap Continue."
     )
     if can_skip:
         text += "\n\nLocations are optional for this mode — you can Skip."
@@ -482,11 +520,11 @@ async def handle_callback(
                 token,
                 sess.chat_id,
                 sess.message_id,
-                "Cancelled. Tap Scrapers or Run anytime to start again.",
+                "Cancelled. Tap 🚀 Run anytime to start again.",
                 reply_markup={"inline_keyboard": []},
             )
         else:
-            await send_text(token, chat_id, "Cancelled. Tap Scrapers or Run anytime.")
+            await send_text(token, chat_id, "Cancelled. Tap 🚀 Run anytime.")
         return True
 
     # Ensure session for navigation from stale messages
@@ -538,13 +576,6 @@ async def handle_callback(
             except ValueError:
                 idx = 0
             sess.options["threads"] = presets[(idx + 1) % len(presets)]
-        elif what == "en":
-            cur = str(sess.options.get("engine") or "chrome")
-            try:
-                idx = ENGINE_CYCLE.index(cur)
-            except ValueError:
-                idx = 0
-            sess.options["engine"] = ENGINE_CYCLE[(idx + 1) % len(ENGINE_CYCLE)]
         elif what == "mr":
             cur = int(sess.options.get("max_results") or 0)
             try:
@@ -552,6 +583,7 @@ async def handle_callback(
             except ValueError:
                 idx = 0
             sess.options["max_results"] = MAX_RESULTS_CYCLE[(idx + 1) % len(MAX_RESULTS_CYCLE)]
+        # "en" (engine) intentionally ignored — Telegram UI does not expose engine
         await answer("Updated")
         await _show_options(token, sess)
         return True

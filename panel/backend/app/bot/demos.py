@@ -5,9 +5,9 @@ DEMO_COMMANDS = [
         "key": "start",
         "command": "/start",
         "title": "Start",
-        "description": "Welcome, create account, show the menu (Buy / Scrapers / Help)",
+        "description": "Welcome, create account, show the menu (Buy / Run / Help)",
         "response_text": (
-            "Welcome to Scrapeboard! Tap Buy for plans, Scrapers for sources, "
+            "Welcome to Scrapeboard! Tap Buy for plans, Run to scrape, "
             "or Help for the full guide."
         ),
         "enabled": True,
@@ -41,9 +41,9 @@ DEMO_COMMANDS = [
         "key": "scrapers",
         "command": "/scrapers",
         "title": "Scrapers",
-        "description": "Button wizard: pick a scraper for /run (or /scrapers list for text)",
+        "description": "Same as Run — button wizard (or /scrapers list for text catalog)",
         "response_text": "",
-        "enabled": True,
+        "enabled": False,
         "audience": "users",
         "sort_order": 28,
     },
@@ -113,7 +113,7 @@ DEMO_COMMANDS = [
         "title": "Run scrape",
         "description": "Button wizard to queue a job (typed /run source=… still works for advanced)",
         "response_text": (
-            "Easy: tap Scrapers → pick source → options → upload → Start.\n"
+            "Easy: tap Run → pick source → options → upload → Start.\n"
             "Advanced: /run [source=gmaps|…] [threads=2] [scrape_websites=yes|no] "
             "[use_dork=yes] [validate_after=yes] [max_results=50]\n"
             "See /help (guide attached)."
@@ -609,7 +609,7 @@ DEMO_WORKFLOWS = [
     {
         "key": "onboarding",
         "name": "Onboarding",
-        "description": "Guide new Telegram users: Buy → upload → Scrapers button wizard → Start",
+        "description": "Guide new Telegram users: Buy → upload → Run wizard → Start",
         "enabled": True,
         "is_demo": True,
         "sort_order": 10,
@@ -617,8 +617,8 @@ DEMO_WORKFLOWS = [
             "trigger": "command:/start",
             "steps": [
                 {"action": "ensure_telegram_user"},
-                {"if": "no_subscription", "say": "Welcome to Scrapeboard. Tap Buy for plans, Scrapers to browse, Help for the guide."},
-                {"if": "subscribed", "say": "Upload .txt/.csv, then tap Scrapers → pick source → Start. Advanced: /run source=…"},
+                {"if": "no_subscription", "say": "Welcome to Scrapeboard. Tap Buy for plans, Help for the guide."},
+                {"if": "subscribed", "say": "Upload .txt/.csv, then tap Run → pick source → Start. Advanced: /run source=…"},
             ],
         },
     },
@@ -667,7 +667,7 @@ DEMO_WORKFLOWS = [
     {
         "key": "job_run",
         "name": "Job run & delivery",
-        "description": "Scrapers button wizard → options → upload → Start (or typed /run) → ZIP via Telegram",
+        "description": "Run button wizard → options → upload → Start (or typed /run) → ZIP via Telegram",
         "enabled": True,
         "is_demo": True,
         "sort_order": 40,

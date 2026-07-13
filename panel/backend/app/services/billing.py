@@ -960,7 +960,7 @@ def user_reply_keyboard(
     """Persistent Telegram reply keyboard (always-on chrome).
 
     Emoji labels for clarity; plain-text legacy labels still map via MENU_BUTTON_TO_CMD.
-    Scrapers / Run open the inline wizard (no typing required).
+    Run opens the inline scrapers wizard (no typing required).
     """
     help_row: list[dict] = [{"text": "❓ Help"}]
     if support_enabled:
@@ -969,18 +969,18 @@ def user_reply_keyboard(
     if is_admin:
         rows: list[list[dict]] = [
             [{"text": "🚀 Run"}, {"text": "📊 Status"}, {"text": "⏹ Stop"}],
-            [{"text": "🛠 Scrapers"}, {"text": "🛒 Buy"}, {"text": "🛡 Admin"}],
+            [{"text": "🛒 Buy"}, {"text": "🛡 Admin"}],
             help_row,
         ]
     elif has_sub:
         rows = [
             [{"text": "🚀 Run"}, {"text": "📊 Status"}, {"text": "⏹ Stop"}],
-            [{"text": "🛠 Scrapers"}, {"text": "📋 Plan"}, {"text": "⬆️ Upgrade"}],
+            [{"text": "📋 Plan"}, {"text": "⬆️ Upgrade"}],
             help_row,
         ]
     else:
         rows = [
-            [{"text": "🛒 Buy"}, {"text": "🛠 Scrapers"}],
+            [{"text": "🛒 Buy"}],
             help_row,
         ]
     return {

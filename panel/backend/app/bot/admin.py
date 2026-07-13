@@ -82,7 +82,7 @@ ADMIN_COMMANDS = frozenset(
 
 ADMIN_MENU = """🛠 Telegram admin
 
-Send /start anytime to restore the main user menu (Run · Status · Stop · Scrapers …).
+Send /start anytime to restore the main user menu (Run · Status · Stop …).
 
 Users
   /users [page] — list
