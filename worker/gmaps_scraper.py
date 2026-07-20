@@ -83,14 +83,39 @@ HOST_OS = platform.system()  # "Darwin", "Linux", or "Windows"
 # ----------------------------------------------------------------------------
 
 
+def _in_virtualenv() -> bool:
+    return (
+        getattr(sys, "base_prefix", sys.prefix) != sys.prefix
+        or bool(os.environ.get("VIRTUAL_ENV"))
+    )
+
+
 def _pip_install(pkgs: list[str]):
     print(f"[setup] installing Python packages: {', '.join(pkgs)}")
     cmd = [sys.executable, "-m", "pip", "install", *pkgs]
     try:
         subprocess.check_call(cmd)
+        return
     except subprocess.CalledProcessError:
-        # Fall back to a per-user install (common on system Python / macOS).
+        pass
+    # Fall back to a per-user install (common on system Python / macOS).
+    try:
         subprocess.check_call(cmd + ["--user"])
+    except subprocess.CalledProcessError as e:
+        if not _in_virtualenv():
+            worker_dir = os.path.dirname(os.path.abspath(__file__))
+            venv_py = os.path.join(worker_dir, ".venv", "bin", "python")
+            if HOST_OS == "Windows":
+                venv_py = os.path.join(worker_dir, ".venv", "Scripts", "python.exe")
+            hint = (
+                f"\n[hint] System Python blocks pip (PEP 668). Use the worker venv:\n"
+                f"  {venv_py if os.path.isfile(venv_py) else 'python3 -m venv worker/.venv'} "
+                f"test_social_scrapers.py\n"
+                f"  or:  cd worker && source .venv/bin/activate && python test_social_scrapers.py\n"
+                f"  or:  bash setup_and_run.sh   # creates .venv if missing"
+            )
+            raise SystemExit(f"[fatal] could not auto-install {pkgs}: {e}{hint}") from e
+        raise
 
 
 def _default_playwright_cache_dir() -> str:

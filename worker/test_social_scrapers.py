@@ -20,6 +20,33 @@ ROOT = Path(__file__).resolve().parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+
+def _prefer_worker_venv() -> None:
+    """Re-exec under worker/.venv when started with system Python (PEP 668)."""
+    if getattr(sys, "base_prefix", sys.prefix) != sys.prefix or os.environ.get("VIRTUAL_ENV"):
+        return
+    if os.environ.get("SCRAPEBOARD_ALLOW_SYSTEM_PYTHON", "").strip() in ("1", "true", "yes"):
+        return
+    if sys.platform == "win32":
+        venv_py = ROOT / ".venv" / "Scripts" / "python.exe"
+    else:
+        venv_py = ROOT / ".venv" / "bin" / "python"
+    if not venv_py.is_file():
+        print(
+            f"[hint] No worker venv at {venv_py}. Create it first:\n"
+            f"  cd {ROOT} && python3 -m venv .venv && "
+            f".venv/bin/pip install -r requirements.txt && "
+            f".venv/bin/python -m playwright install chromium\n"
+            f"Then re-run:  .venv/bin/python test_social_scrapers.py",
+            file=sys.stderr,
+        )
+        return
+    if Path(sys.executable).resolve() == venv_py.resolve():
+        return
+    print(f"[test] re-exec with worker venv: {venv_py}", flush=True)
+    os.execv(str(venv_py), [str(venv_py), *sys.argv])
+
+
 PUBLIC_SOURCES = ("youtube", "reddit", "pinterest", "tiktok")
 META_SOURCES = (
     "facebook_pages",
@@ -258,4 +285,5 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
+    _prefer_worker_venv()
     raise SystemExit(main())
