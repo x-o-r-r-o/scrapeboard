@@ -386,7 +386,7 @@ def execute_index_batch(
 ) -> tuple[int, int]:
     _ = solver
     source = (source or "facebook_pages").strip().lower()
-    if source in ("x", "twitter_x"):
+    if source in ("x", "twitter_x", "x_twitter", "twitter-x"):
         source = "twitter"
     if source not in PHASE_FG_SOURCES:
         raise ValueError(f"Unsupported Phase F/G source: {source}")

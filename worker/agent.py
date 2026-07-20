@@ -34,7 +34,7 @@ ROOT = Path(__file__).resolve().parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-VERSION = "0.8.6"
+VERSION = "0.8.7"
 CONFIG_NAME = "worker_config.json"
 HOST_OS = platform.system()  # Windows | Darwin | Linux
 SERVICE_NAME = "scrapeboard-worker"
@@ -1082,8 +1082,13 @@ def ensure_engine_ready(settings: dict, force: bool = False, skip: bool = False)
         args.skip_setup = True
     if force:
         args.force_setup = True
+        _SETUP_DONE_ENGINES.discard(engine)
     if not force and engine in _SETUP_DONE_ENGINES:
-        return
+        # Stale in-process cache: Chromium may have been wiped after first setup.
+        if engine == "chrome" and not gs._chromium_installed():
+            _SETUP_DONE_ENGINES.discard(engine)
+        else:
+            return
     print(f"[setup] ensuring deps + browser for engine={engine} on {HOST_OS}…", flush=True)
     gs.ensure_dependencies(args)
     _SETUP_DONE_ENGINES.add(engine)
@@ -1104,6 +1109,8 @@ def run_chunk(
     )
     if source in ("maps", "google_maps", "google-maps"):
         source = "gmaps"
+    if source in ("x", "twitter_x", "x_twitter", "twitter-x"):
+        source = "twitter"
 
     keywords = job.get("keywords") or []
     locations = job.get("locations") or []

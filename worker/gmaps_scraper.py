@@ -93,7 +93,7 @@ def _pip_install(pkgs: list[str]):
         subprocess.check_call(cmd + ["--user"])
 
 
-def _playwright_cache_dir() -> str:
+def _default_playwright_cache_dir() -> str:
     if HOST_OS == "Windows":
         base = os.environ.get("LOCALAPPDATA", os.path.expanduser(r"~\AppData\Local"))
         return os.path.join(base, "ms-playwright")
@@ -102,11 +102,123 @@ def _playwright_cache_dir() -> str:
     return os.path.expanduser("~/.cache/ms-playwright")
 
 
-def _chromium_installed() -> bool:
+def _sanitize_playwright_browsers_path() -> None:
+    """Drop a broken PLAYWRIGHT_BROWSERS_PATH override.
+
+    Some environments (CI sandboxes, IDE runners) inject an empty cache dir via
+    PLAYWRIGHT_BROWSERS_PATH. Playwright then looks there, misses Chromium, and
+    social scrapers die with 'Executable doesn't exist' even though browsers
+    already exist in the default user cache. If the override has no Chromium but
+    the default cache does, clear the override.
+    """
+    override = (os.environ.get("PLAYWRIGHT_BROWSERS_PATH") or "").strip()
+    if not override or override == "0":
+        return
+    override_exp = os.path.abspath(os.path.expanduser(override))
+    default = os.path.abspath(_default_playwright_cache_dir())
+    if override_exp == default:
+        return
+    if any(_iter_chromium_executables(override_exp)):
+        return
+    if any(_iter_chromium_executables(default)):
+        print(
+            f"[setup] PLAYWRIGHT_BROWSERS_PATH={override!r} has no Chromium; "
+            f"using default cache {default}",
+            flush=True,
+        )
+        os.environ.pop("PLAYWRIGHT_BROWSERS_PATH", None)
+
+
+def _playwright_cache_dir() -> str:
+    """Directory where Playwright stores browser builds.
+
+    Honours ``PLAYWRIGHT_BROWSERS_PATH`` when set (same as Playwright itself),
+    after sanitizing empty/broken overrides.
+    """
+    _sanitize_playwright_browsers_path()
+    override = (os.environ.get("PLAYWRIGHT_BROWSERS_PATH") or "").strip()
+    if override and override != "0":
+        return os.path.expanduser(override)
+    return _default_playwright_cache_dir()
+
+
+_CHROMIUM_BIN_NAMES = frozenset({
+    "chrome",
+    "chrome.exe",
+    "chrome-headless-shell",
+    "headless_shell",
+    "Google Chrome for Testing",
+})
+
+
+def _prefer_full_chromium() -> None:
+    """Use full Chromium for headless launches when possible.
+
+    Playwright's ``chromium_headless_shell`` crashes (SIGSEGV) on some hosts
+    (restricted sandboxes, broken GPU stubs). Prefer the full build unless the
+    operator explicitly set PLAYWRIGHT_CHROMIUM_USE_HEADLESS_SHELL.
+    """
+    _sanitize_playwright_browsers_path()
+    os.environ.setdefault("PLAYWRIGHT_CHROMIUM_USE_HEADLESS_SHELL", "0")
+
+
+def _iter_chromium_executables(cache_dir: str):
+    """Yield executable paths under a Playwright cache, full Chromium first."""
     try:
-        return any(n.startswith("chromium") for n in os.listdir(_playwright_cache_dir()))
+        names = os.listdir(cache_dir)
     except OSError:
-        return False
+        return
+    ranked: list[tuple[int, str]] = []
+    for name in names:
+        if name.startswith("chromium-") and not name.startswith("chromium_headless"):
+            ranked.append((0, name))
+        elif name.startswith("chromium_headless_shell-") or name.startswith(
+            "chromium_headless_shell"
+        ):
+            ranked.append((1, name))
+    ranked.sort()
+    for _, dirname in ranked:
+        root = os.path.join(cache_dir, dirname)
+        if not os.path.isdir(root):
+            continue
+        for dirpath, _dirnames, filenames in os.walk(root):
+            for fn in filenames:
+                if fn not in _CHROMIUM_BIN_NAMES:
+                    continue
+                path = os.path.join(dirpath, fn)
+                if os.path.isfile(path) and os.access(path, os.X_OK):
+                    yield path
+
+
+def _find_bundled_chromium_executable() -> str | None:
+    # Search active cache first, then default (covers stale env overrides).
+    seen: set[str] = set()
+    for cache in (_playwright_cache_dir(), _default_playwright_cache_dir()):
+        cache = os.path.abspath(cache)
+        if cache in seen or not os.path.isdir(cache):
+            continue
+        seen.add(cache)
+        for path in _iter_chromium_executables(cache):
+            return path
+    return None
+
+
+def _chromium_installed() -> bool:
+    return _find_bundled_chromium_executable() is not None
+
+
+def _chrome_launch_error_hint(exc: BaseException) -> str:
+    msg = str(exc)
+    if "Executable doesn't exist" in msg or "browserType.launch" in msg.lower():
+        cache = _playwright_cache_dir()
+        return (
+            f"\n[hint] Chromium binary missing or Playwright cache mismatch.\n"
+            f"  cache dir : {cache}\n"
+            f"  PLAYWRIGHT_BROWSERS_PATH={os.environ.get('PLAYWRIGHT_BROWSERS_PATH')!r}\n"
+            f"  Fix: {sys.executable} -m playwright install chromium\n"
+            f"  Or unset a bad PLAYWRIGHT_BROWSERS_PATH and re-run with --force-setup."
+        )
+    return ""
 
 
 def install_brave() -> str | None:
@@ -155,6 +267,10 @@ def ensure_dependencies(args):
     """Make sure the packages + browser needed for the chosen engine exist,
     installing them automatically on first run. OS is auto-detected."""
     if getattr(args, "skip_setup", False):
+        # Still sanitize browser path / prefer full Chromium so launches work
+        # even when package install is skipped (agent sets skip_setup after first run).
+        if args.engine in ("chrome", "google-chrome", "edge", "brave"):
+            _prefer_full_chromium()
         return
 
     # 1) Python packages required for this engine.
@@ -192,22 +308,46 @@ def ensure_dependencies(args):
             print("[setup] dnspython not installed — email MX checks will use "
                   "socket A-record fallback.")
 
+    if args.engine in ("chrome", "google-chrome", "edge", "brave"):
+        _prefer_full_chromium()
+
     # 2) Browser binary (expensive; only done once, tracked by a per-user
     #    sentinel stored in the HOME directory — never in the script folder, so
     #    it cannot ship with the code and wrongly skip setup on someone else's
-    #    machine).
+    #    machine). Always re-verify that Chromium/Brave still exists: a stale
+    #    sentinel after cache wipe or PLAYWRIGHT_BROWSERS_PATH mismatch caused
+    #    social scrapers to fail with 'Executable doesn't exist'.
     state_dir = os.path.join(os.path.expanduser("~"), ".gmaps_scraper")
     try:
         os.makedirs(state_dir, exist_ok=True)
     except OSError:
         state_dir = os.path.expanduser("~")
     sentinel = os.path.join(state_dir, f"setup_{args.engine}.done")
+
+    def _invalidate_sentinel(reason: str) -> None:
+        print(f"[setup] {reason} — re-running browser install…")
+        try:
+            os.remove(sentinel)
+        except OSError:
+            pass
+
     if not args.force_setup and os.path.exists(sentinel):
-        return
+        if args.engine == "chrome" and not _chromium_installed():
+            _invalidate_sentinel(
+                f"setup sentinel present but Chromium missing under {_playwright_cache_dir()}"
+            )
+        elif args.engine == "brave" and not (args.browser_path or detect_brave_path()):
+            _invalidate_sentinel("setup sentinel present but Brave binary not found")
+        elif args.browser_path and not os.path.exists(args.browser_path):
+            _invalidate_sentinel(f"--browser-path missing: {args.browser_path}")
+        else:
+            return
 
     # If the user supplied an explicit binary, no download is needed for any
     # Chromium-based engine.
     if args.browser_path and args.engine in ("chrome", "google-chrome", "edge", "brave"):
+        if not os.path.exists(args.browser_path):
+            raise SystemExit(f"[fatal] --browser-path not found: {args.browser_path}")
         _write_sentinel(sentinel)
         return
 
@@ -216,6 +356,11 @@ def ensure_dependencies(args):
             # Playwright's bundled Chromium — most reliable everywhere.
             if args.force_setup or not _chromium_installed():
                 _pw_install("chromium")
+            if not _chromium_installed():
+                raise SystemExit(
+                    "[fatal] Chromium install finished but no executable was found under "
+                    f"{_playwright_cache_dir()}. Check PLAYWRIGHT_BROWSERS_PATH and disk space."
+                )
         elif args.engine == "google-chrome":
             # Real Google Chrome (stable channel).
             _pw_install("chrome")
@@ -1126,6 +1271,7 @@ class BrowserSession:
     def _start_chrome(self):
         from playwright.sync_api import sync_playwright
 
+        _prefer_full_chromium()
         self._pw = sync_playwright().start()
         launch_kwargs = {"headless": self.headless, "args": self._chrome_args()}
         if self.proxy is not None:
@@ -1139,7 +1285,49 @@ class BrowserSession:
             launch_kwargs["executable_path"] = self.exec_path
         elif self.engine in self._CHANNELS:
             launch_kwargs["channel"] = self._CHANNELS[self.engine]
-        self.browser = self._pw.chromium.launch(**launch_kwargs)
+        try:
+            self.browser = self._pw.chromium.launch(**launch_kwargs)
+        except Exception as first_err:
+            # Recover from missing/corrupt Playwright browser once.
+            recoverable = (
+                self.engine == "chrome"
+                and not self.exec_path
+                and (
+                    "Executable doesn't exist" in str(first_err)
+                    or "chromium_headless_shell" in str(first_err)
+                )
+            )
+            if not recoverable:
+                hint = _chrome_launch_error_hint(first_err)
+                raise RuntimeError(
+                    f"Browser launch failed (engine={self.engine}): {first_err}{hint}"
+                ) from first_err
+            print(
+                "[browser] Chromium launch failed — reinstalling Playwright Chromium once…",
+                flush=True,
+            )
+            try:
+                self._pw.stop()
+            except Exception:
+                pass
+            self._pw = None
+            try:
+                _pw_install("chromium")
+            except Exception as install_err:
+                raise RuntimeError(
+                    f"Browser launch failed and Chromium reinstall failed: {first_err}\n"
+                    f"reinstall error: {install_err}"
+                    f"{_chrome_launch_error_hint(first_err)}"
+                ) from install_err
+            _prefer_full_chromium()
+            self._pw = sync_playwright().start()
+            try:
+                self.browser = self._pw.chromium.launch(**launch_kwargs)
+            except Exception as second_err:
+                raise RuntimeError(
+                    f"Browser launch failed after Chromium reinstall: {second_err}"
+                    f"{_chrome_launch_error_hint(second_err)}"
+                ) from second_err
         self.context = self.browser.new_context(
             user_agent=self.ua,
             locale="en-US",
